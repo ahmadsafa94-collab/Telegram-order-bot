@@ -330,21 +330,26 @@ async def notify_admin_receipt(context: ContextTypes.DEFAULT_TYPE, order_row, ph
     order_id, user_id, username, items_json, total, status, created_at = order_row
     items = json.loads(items_json)
     lines = [f"{qty}x {MENU[i][0]}" for i, qty in items.items()]
+    # Plain text on purpose — usernames or item names can contain characters
+    # (like _ or *) that break Telegram's Markdown parser and silently fail
+    # to send. No parse_mode here avoids that entirely.
     caption = (
-        f"🧾 *Receipt received — Order #{order_id}*\n"
+        f"🧾 Receipt received — Order #{order_id}\n"
         f"From: @{username or user_id}\n\n"
         + "\n".join(lines)
-        + f"\n\n*Total: {CURRENCY}{total:.2f}*\n\n"
+        + f"\n\nTotal: {CURRENCY}{total:.2f}\n\n"
         "Check the receipt, then confirm or reject below."
     )
     if ADMIN_CHAT_ID:
-        await context.bot.send_photo(
-            chat_id=ADMIN_CHAT_ID,
-            photo=photo_file_id,
-            caption=caption,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=admin_review_keyboard(order_id),
-        )
+        try:
+            await context.bot.send_photo(
+                chat_id=ADMIN_CHAT_ID,
+                photo=photo_file_id,
+                caption=caption,
+                reply_markup=admin_review_keyboard(order_id),
+            )
+        except Exception:
+            logger.exception("Failed to notify admin for order #%s", order_id)
     else:
         logger.warning("ADMIN_CHAT_ID not set — no admin notified for order #%s", order_id)
 
