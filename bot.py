@@ -85,19 +85,94 @@ PAYMENT_INSTRUCTIONS = (
 PAYMENT_LINK_BASE_URL = "https://payments.suyool.com/pay/g401_MD"
 
 # Countries offered under "Pay using local payment methods."
-LOCAL_PAYMENT_COUNTRIES = ["Lebanon", "Jordan", "India", "Ghana", "Pakistan", "Europe", "USA"]
+LOCAL_PAYMENT_COUNTRIES = ["Lebanon", "Jordan", "India", "Ghana", "Pakistan", "Europe", "USA", "KSA", "Russia"]
 
-# Payment instructions per country. Edit these with your real local payment
-# details (bank transfer, mobile money, etc.) for each country.
+# Payment instructions per country. Wrapped in backticks where possible so
+# the ID/number is tap-to-copy in Telegram.
 LOCAL_PAYMENT_INSTRUCTIONS = {
-    "Lebanon": "Pay via OMT / Whish Money.\nName: Your Name Here\nPhone: +961 XX XXX XXX",
-    "Jordan": "Local payment details for Jordan go here.",
-    "India": "Local payment details for India go here.",
-    "Ghana": "Local payment details for Ghana go here.",
+    "Lebanon": (
+        "Whish to Whish\n\n"
+        "WhishMoney Number: (Tap to copy)\n`81666579`"
+    ),
+    "Jordan": (
+        "Tap on one of the cliq IDs below to copy:\n\n"
+        "CLIQ ALIAS: `WKS777`\n(Orange Money)\nWALEED SHAQFEH\n\n"
+        "CLIQ ALIAS: `WKS999`\n(Etihad bank)\nWALEED SHAQFEH\n\n"
+        "CLIQ ALIAS: `WKS555`\n(Zain Cash)\nMohammad shamalti\n\n"
+        "🧾 After the payment is done, please send a screenshot of the receipt "
+        "and your name on cliq.\n\n"
+        "We will reach out back at the earliest to register your account. Please be patient."
+    ),
+    "India": (
+        "UPI ID (tap to copy)\n`s4005194160889795@slc`\n\n"
+        "Name: Shilpaben karetiya\n\n"
+        "‼️ Important Remarks:\n\n"
+        "➖ This ID is valid for the next 48 hours. Confirm with us before you do "
+        "the payment if you are doing it after 48 hours.\n\n"
+        "➖ Upon completion of the payment, please send the full receipt (with the "
+        "transaction ID or UTR shown) and await our response and confirmation. "
+        "We will contact you promptly to proceed with your account registration.\n\n"
+        "➖ STRICTLY don't mention anything regarding the subscription in the "
+        "comments/remarks of the payment. Just leave it empty.\n\n"
+        "➖ If you could not complete the payment in whole, do it in parts. "
+        "Eg. If the app didn't allow you to send 4000 Rupees, send 2000 rupees twice."
+    ),
+    "Ghana": (
+        "Tap on the number to copy:\n\n"
+        "📲 `0257505632`\nMTN Mobile Money\nSaibu Mahamadu\n\n"
+        "📲 `0204860754`\nTelecel/Vodafone\nSaibu Mahamadu\n\n"
+        "Strictly do not call the number please. Just do the payment."
+    ),
     "Pakistan": "Local payment details for Pakistan go here.",
-    "Europe": "Local payment details for Europe (SEPA transfer, etc.) go here.",
+    "Europe": (
+        "Revolut (visa to visa)\n\n"
+        "1) Open your Revolut app/website\n"
+        "2) Click \"Transfer\" > \"+ New\" > \"Card recipient\"\n"
+        "3) Enter the details\n\n"
+        "Card Number: `5413525250267271`\n"
+        "Name: Alijon Karimov\n"
+        "Country: Tajikistan"
+    ),
     "USA": "Local payment details for the USA (Zelle, etc.) go here.",
+    "KSA": (
+        "(Tap to copy)\n\n"
+        "`SA8710000006857309000101`\n\n"
+        "`SA0510000062300187719603`\n\n"
+        "Bank: Ahli Bank\n"
+        "Name: Jamil Hajji\n\n"
+        "Please make sure the purpose of the payment be Friends and family or "
+        "personal NOT goods or services."
+    ),
+    "Russia": (
+        "1- Open the Sberbank app/website.\n"
+        "2- Navigate to the \"Payments\" section.\n"
+        "3- Select \"International wire transfers.\"\n"
+        "4- Choose the option to transfer to a card or account using the "
+        "recipient's phone number.\n\n"
+        "Payment Details:\n\n"
+        "Country: Tajikistan\n"
+        "Phone number: `+992002373232`\n"
+        "Name: Alijon Karimov\n"
+        "Recipient Bank: Alif Bank"
+    ),
 }
+
+# Crypto wallet addresses shown under "Pay with Cryptocurrency."
+CRYPTO_INSTRUCTIONS = (
+    "*Crypto Wallet Address*\n"
+    "(Tap on the wallet address to copy)\n\n"
+    "*USDT (BEP20 Network)*\n`0xefbab9265bb3a22492e4a100c27791da385eeb37`\n\n"
+    "*USDT (TRC20 Network)*\n`TM8JhfHfaxNgBRs3benrTkWAz6Zprk9QmF`\n\n"
+    "*Bitcoin (BTC Network)*\n`18rALgWKZZPMgGjVBCDBPgnnpdaj8rEQ2x`\n\n"
+    "Bybit UID: `65577310`\n\n"
+    "OKX UID: `847060953866125494`\n\n"
+    "BingX UID: `10276647`"
+)
+
+# India's QR code image, sent alongside the India payment instructions.
+# Upload the QR image to your repo at this exact path (assets/india_qr.jpg)
+# for it to be sent automatically.
+INDIA_QR_PATH = os.path.join(os.path.dirname(__file__), "assets", "india_qr.jpg")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -286,6 +361,7 @@ def checkout_view(order_id: int):
         [InlineKeyboardButton("⭐ Pay with Telegram Stars", callback_data=f"pay_stars:{order_id}")],
         [InlineKeyboardButton("💳 Pay using Visa/Mastercard", url=PAYMENT_LINK_BASE_URL)],
         [InlineKeyboardButton("🌍 Pay using local payment methods", callback_data=f"local_pay:{order_id}")],
+        [InlineKeyboardButton("₿ Pay with Cryptocurrency", callback_data=f"pay_crypto:{order_id}")],
         [InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")],
         [InlineKeyboardButton("✖️ Cancel order", callback_data=f"cancel:{order_id}")],
     ]
@@ -353,6 +429,29 @@ async def local_country_selected(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton("⬅️ Back", callback_data=f"local_pay:{order_id}")],
     ]
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
+
+    # India includes a QR code image — send it as a follow-up photo if present.
+    if country == "India" and os.path.exists(INDIA_QR_PATH):
+        try:
+            with open(INDIA_QR_PATH, "rb") as qr_file:
+                await context.bot.send_photo(chat_id=query.message.chat_id, photo=qr_file)
+        except Exception:
+            logger.exception("Failed to send India QR code image")
+
+
+async def pay_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows crypto wallet addresses for payment."""
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+
+    buttons = [
+        [InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")],
+        [InlineKeyboardButton("⬅️ Back", callback_data=f"back_to_checkout:{order_id}")],
+    ]
+    await query.edit_message_text(
+        CRYPTO_INSTRUCTIONS, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 
 async def back_to_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -584,6 +683,7 @@ def main():
     app.add_handler(CallbackQueryHandler(pay_with_stars, pattern=r"^pay_stars:"))
     app.add_handler(CallbackQueryHandler(local_pay_start, pattern=r"^local_pay:"))
     app.add_handler(CallbackQueryHandler(local_country_selected, pattern=r"^local_country:"))
+    app.add_handler(CallbackQueryHandler(pay_crypto, pattern=r"^pay_crypto:"))
     app.add_handler(CallbackQueryHandler(back_to_checkout, pattern=r"^back_to_checkout:"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
