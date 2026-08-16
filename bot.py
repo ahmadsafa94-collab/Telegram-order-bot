@@ -60,10 +60,10 @@ CURRENCY = "$"
 
 # Your menu. Keys are short item IDs, values are (display name, price).
 MENU = {
-    "item1": ("Uptodate Online", $20.00),
-    "item2": ("iMD VIP - 1 year", $75.00),
-    "item3": ("Uptodate Online + Offline", $30.00),
-    "item4": ("Amboss Full Access - 1 year", $85.00),
+    "item1": ("Uptodate Online", 20.00),
+    "item2": ("iMD VIP - 1 year", 75.00),
+    "item3": ("Uptodate Online + Offline", 30.00),
+    "item4": ("Amboss Full Access - 1 year", 85.00),
 }
 
 # Payment instructions shown to the customer at checkout.
