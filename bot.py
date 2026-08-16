@@ -76,13 +76,28 @@ MENU = {
 
 # Payment instructions shown to the customer at checkout.
 PAYMENT_INSTRUCTIONS = (
-    "*Pay using the card link below, or via your usual local payment method.*\n\n"
-    "After paying, tap *I've Paid* below and upload a screenshot of your "
+    "Choose how you'd like to pay below.\n\n"
+    "After paying, tap *I've Paid* and upload a screenshot of your "
     "receipt. We'll verify it and confirm your order."
 )
 
-# Optional payment link. Leave "" to hide the "Pay by card" button.
-PAYMENT_LINK_BASE_URL = ""  # e.g. "https://payments.example.com/pay/xxxx"
+# Card payment link (Visa/Mastercard).
+PAYMENT_LINK_BASE_URL = "https://payments.suyool.com/pay/g401_MD"
+
+# Countries offered under "Pay using local payment methods."
+LOCAL_PAYMENT_COUNTRIES = ["Lebanon", "Jordan", "India", "Ghana", "Pakistan", "Europe", "USA"]
+
+# Payment instructions per country. Edit these with your real local payment
+# details (bank transfer, mobile money, etc.) for each country.
+LOCAL_PAYMENT_INSTRUCTIONS = {
+    "Lebanon": "Pay via OMT / Whish Money.\nName: Your Name Here\nPhone: +961 XX XXX XXX",
+    "Jordan": "Local payment details for Jordan go here.",
+    "India": "Local payment details for India go here.",
+    "Ghana": "Local payment details for Ghana go here.",
+    "Pakistan": "Local payment details for Pakistan go here.",
+    "Europe": "Local payment details for Europe (SEPA transfer, etc.) go here.",
+    "USA": "Local payment details for the USA (Zelle, etc.) go here.",
+}
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -250,6 +265,33 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_reply_markup(reply_markup=menu_keyboard())
 
 
+def checkout_view(order_id: int):
+    """Builds the (text, keyboard) for the main checkout screen. Reused so
+    'back' buttons from sub-screens can rebuild the same view."""
+    order = db_get_order(order_id)
+    if not order:
+        return "Order not found.", None
+
+    _, user_id, username, items_json, total, status, created_at = order
+    items = json.loads(items_json)
+    lines = [f"{qty}x {MENU[i][0]} — {CURRENCY}{MENU[i][1] * qty:.2f}" for i, qty in items.items()]
+    text = (
+        f"*Order #{order_id} created*\n\n"
+        + "\n".join(lines)
+        + f"\n\n*Total: {CURRENCY}{total:.2f}*\n\n"
+        + PAYMENT_INSTRUCTIONS
+    )
+
+    buttons = [
+        [InlineKeyboardButton("⭐ Pay with Telegram Stars", callback_data=f"pay_stars:{order_id}")],
+        [InlineKeyboardButton("💳 Pay using Visa/Mastercard", url=PAYMENT_LINK_BASE_URL)],
+        [InlineKeyboardButton("🌍 Pay using local payment methods", callback_data=f"local_pay:{order_id}")],
+        [InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")],
+        [InlineKeyboardButton("✖️ Cancel order", callback_data=f"cancel:{order_id}")],
+    ]
+    return text, InlineKeyboardMarkup(buttons)
+
+
 async def start_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     cart = context.user_data.get("cart", {})
@@ -263,23 +305,62 @@ async def start_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = db_create_order(user.id, user.username or user.first_name, cart, total)
     context.user_data["last_order_id"] = order_id
 
-    text = (
-        f"*Order #{order_id} created*\n\n"
-        f"{format_cart(cart)}\n\n"
-        f"{PAYMENT_INSTRUCTIONS}"
-    )
-
-    buttons = []
-    if PAYMENT_LINK_BASE_URL:
-        buttons.append([InlineKeyboardButton("💳 Pay by card", url=PAYMENT_LINK_BASE_URL)])
-    buttons.append([InlineKeyboardButton("⭐ Pay with Telegram Stars", callback_data=f"pay_stars:{order_id}")])
-    buttons.append([InlineKeyboardButton("✅ I've Paid (manual transfer)", callback_data=f"paid:{order_id}")])
-    buttons.append([InlineKeyboardButton("✖️ Cancel order", callback_data=f"cancel:{order_id}")])
-
-    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
+    text, keyboard = checkout_view(order_id)
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
     # clear the cart now that the order has been placed
     context.user_data["cart"] = {}
+
+
+async def local_pay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the country picker for local payment methods."""
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+
+    rows = []
+    for i in range(0, len(LOCAL_PAYMENT_COUNTRIES), 2):
+        pair = LOCAL_PAYMENT_COUNTRIES[i:i + 2]
+        rows.append([
+            InlineKeyboardButton(country, callback_data=f"local_country:{order_id}:{country}")
+            for country in pair
+        ])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"back_to_checkout:{order_id}")])
+
+    await query.edit_message_text(
+        "Which country are you paying from?",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def local_country_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows local payment instructions for the chosen country."""
+    query = update.callback_query
+    await query.answer()
+    _, order_id_str, country = query.data.split(":", 2)
+    order_id = int(order_id_str)
+
+    instructions = LOCAL_PAYMENT_INSTRUCTIONS.get(
+        country, "Contact us directly for payment instructions in your country."
+    )
+    text = (
+        f"*Payment instructions — {country}*\n\n"
+        f"{instructions}\n\n"
+        "After paying, tap *I've Paid* below."
+    )
+    buttons = [
+        [InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")],
+        [InlineKeyboardButton("⬅️ Back", callback_data=f"local_pay:{order_id}")],
+    ]
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def back_to_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+    text, keyboard = checkout_view(order_id)
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
 
 async def pay_with_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -501,6 +582,9 @@ def main():
     app.add_handler(CallbackQueryHandler(order_action, pattern=r"^(paid|cancel):"))
     app.add_handler(CallbackQueryHandler(admin_action, pattern=r"^admin_(confirm|reject):"))
     app.add_handler(CallbackQueryHandler(pay_with_stars, pattern=r"^pay_stars:"))
+    app.add_handler(CallbackQueryHandler(local_pay_start, pattern=r"^local_pay:"))
+    app.add_handler(CallbackQueryHandler(local_country_selected, pattern=r"^local_country:"))
+    app.add_handler(CallbackQueryHandler(back_to_checkout, pattern=r"^back_to_checkout:"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, receipt_photo))
