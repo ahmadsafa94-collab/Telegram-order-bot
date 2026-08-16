@@ -62,10 +62,9 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "orders.db")
 
 CURRENCY = "$"
 
-# Roughly how many Telegram Stars equal $1. Telegram's actual Stars pricing
-# isn't a fixed public exchange rate, so this is an approximation you may
-# want to adjust based on current Stars purchase pricing.
-STAR_RATE = 100
+# Telegram Stars pricing: ~50 Stars per $1 (based on the in-app purchase
+# packages, e.g. 100 Stars = $2.00). Adjust if Telegram's pricing changes.
+STAR_RATE = 50
 
 # Your menu. Keys are short item IDs, values are (display name, price).
 MENU = {
