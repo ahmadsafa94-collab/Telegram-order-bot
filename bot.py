@@ -1,4 +1,3 @@
-
 """
 Telegram Order Bot — cart + checkout + manual payment confirmation
 with receipt photo upload.
@@ -38,6 +37,7 @@ from datetime import datetime
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LabeledPrice,
     Update,
 )
 from telegram.constants import ParseMode
@@ -47,6 +47,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    PreCheckoutQueryHandler,
     filters,
 )
 
@@ -60,6 +61,11 @@ ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", "0"))  # your Telegram user 
 DB_PATH = os.path.join(os.path.dirname(__file__), "orders.db")
 
 CURRENCY = "$"
+
+# Roughly how many Telegram Stars equal $1. Telegram's actual Stars pricing
+# isn't a fixed public exchange rate, so this is an approximation you may
+# want to adjust based on current Stars purchase pricing.
+STAR_RATE = 100
 
 # Your menu. Keys are short item IDs, values are (display name, price).
 MENU = {
@@ -267,13 +273,84 @@ async def start_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     if PAYMENT_LINK_BASE_URL:
         buttons.append([InlineKeyboardButton("💳 Pay by card", url=PAYMENT_LINK_BASE_URL)])
-    buttons.append([InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")])
+    buttons.append([InlineKeyboardButton("⭐ Pay with Telegram Stars", callback_data=f"pay_stars:{order_id}")])
+    buttons.append([InlineKeyboardButton("✅ I've Paid (manual transfer)", callback_data=f"paid:{order_id}")])
     buttons.append([InlineKeyboardButton("✖️ Cancel order", callback_data=f"cancel:{order_id}")])
 
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
 
     # clear the cart now that the order has been placed
     context.user_data["cart"] = {}
+
+
+async def pay_with_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends a native Telegram Stars invoice for the given order."""
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+    order = db_get_order(order_id)
+
+    if not order:
+        await context.bot.send_message(chat_id=query.message.chat_id, text="Order not found.")
+        return
+
+    total = order[4]  # id, user_id, username, items_json, total, status, created_at
+    star_amount = max(1, round(total * STAR_RATE))
+
+    await context.bot.send_invoice(
+        chat_id=query.message.chat_id,
+        title=f"Order #{order_id}",
+        description=f"Payment for order #{order_id}",
+        payload=f"order_{order_id}",
+        provider_token="",  # empty string is required for Telegram Stars (XTR)
+        currency="XTR",
+        prices=[LabeledPrice(label=f"Order #{order_id}", amount=star_amount)],
+    )
+
+
+async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Telegram calls this right before charging the user — final validation point."""
+    pre_checkout_query = update.pre_checkout_query
+    payload = pre_checkout_query.invoice_payload
+
+    if not payload.startswith("order_"):
+        await pre_checkout_query.answer(ok=False, error_message="Invalid order.")
+        return
+
+    order_id = int(payload.split("_", 1)[1])
+    order = db_get_order(order_id)
+
+    if not order:
+        await pre_checkout_query.answer(ok=False, error_message="Order not found — please start over.")
+        return
+
+    await pre_checkout_query.answer(ok=True)
+
+
+async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fires automatically once a Stars payment completes — no manual confirmation needed."""
+    payload = update.message.successful_payment.invoice_payload
+    order_id = int(payload.split("_", 1)[1])
+
+    db_update_status(order_id, "paid")
+
+    await update.message.reply_text(
+        f"✅ Payment received via Telegram Stars for order #{order_id}! We're preparing it now."
+    )
+
+    order = db_get_order(order_id)
+    if order and ADMIN_CHAT_ID:
+        _, user_id, username, items_json, total, status, created_at = order
+        items = json.loads(items_json)
+        lines = [f"{qty}x {MENU[i][0]}" for i, qty in items.items()]
+        text = (
+            f"⭐ Stars payment received — Order #{order_id}\n"
+            f"From: @{username or user_id}\n\n"
+            + "\n".join(lines)
+            + f"\n\nTotal: {CURRENCY}{total:.2f}\n"
+            "Paid automatically via Telegram Stars — no action needed."
+        )
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
 
 
 async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -424,6 +501,9 @@ def main():
     app.add_handler(CommandHandler("myorders", my_orders))
     app.add_handler(CallbackQueryHandler(order_action, pattern=r"^(paid|cancel):"))
     app.add_handler(CallbackQueryHandler(admin_action, pattern=r"^admin_(confirm|reject):"))
+    app.add_handler(CallbackQueryHandler(pay_with_stars, pattern=r"^pay_stars:"))
+    app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, receipt_photo))
     app.add_handler(CallbackQueryHandler(menu_button))  # catch-all for menu/cart callbacks
 
