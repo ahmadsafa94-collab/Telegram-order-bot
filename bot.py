@@ -60,10 +60,10 @@ CURRENCY = "$"
 
 # Your menu. Keys are short item IDs, values are (display name, price).
 MENU = {
-    "item1": ("Classic Burger", 8.00),
-    "item2": ("Chicken Wrap", 7.50),
-    "item3": ("Fries", 3.00),
-    "item4": ("Soft Drink", 1.50),
+    "item1": ("Uptodate Online", $20.00),
+    "item2": ("iMD VIP - 1 year", $75.00),
+    "item3": ("Uptodate Online + Offline", $30.00),
+    "item4": ("Amboss Full Access - 1 year", $85.00),
 }
 
 # Payment instructions shown to the customer at checkout.
@@ -77,7 +77,7 @@ PAYMENT_INSTRUCTIONS = (
 
 # Optional: if you set up a Tap Payments / MyFatoorah *payment link* product,
 # you can paste a link-generation URL or leave this blank to skip it.
-PAYMENT_LINK_BASE_URL = "https://payments.suyool.com/pay/g401_MD"  # e.g. "https://pay.tap.company/..." or leave ""
+PAYMENT_LINK_BASE_URL = "https://payments.suyoo$l.com/pay/g401_MD"  # e.g. "https://pay.tap.company/..." or leave ""
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
