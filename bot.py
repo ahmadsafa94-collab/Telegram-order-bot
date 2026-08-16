@@ -15,8 +15,8 @@ SETUP
 2. Create a bot with @BotFather, get the token.
 3. Get your own numeric Telegram user ID (message @userinfobot).
 4. Set environment variables (or edit the constants below):
-     BOT_TOKEN=xxxx
-     ADMIN_CHAT_ID=123456789
+     BOT_TOKEN=5324079406:AAGhZWPrpMol2gG_UKzc7pOoTWD-Yg_O-uY
+     ADMIN_CHAT_ID=5018373506
 5. Edit the MENU dict below with your real items/prices.
 6. Edit PAYMENT_INSTRUCTIONS with your real OMT/Whish details.
 7. Run: python bot.py
@@ -68,7 +68,7 @@ MENU = {
 
 # Payment instructions shown to the customer at checkout.
 PAYMENT_INSTRUCTIONS = (
-    "*Pay via OMT or Whish Money*\n\n"
+    "*Pay via Payment link using visa or master card or Pay using local payment methods*\n\n"
     "Name: `Your Name Here`\n"
     "Phone: `+961 XX XXX XXX`\n\n"
     "After sending the transfer, tap *I've Paid* below. "
@@ -77,7 +77,7 @@ PAYMENT_INSTRUCTIONS = (
 
 # Optional: if you set up a Tap Payments / MyFatoorah *payment link* product,
 # you can paste a link-generation URL or leave this blank to skip it.
-PAYMENT_LINK_BASE_URL = ""  # e.g. "https://pay.tap.company/..." or leave ""
+PAYMENT_LINK_BASE_URL = "https://payments.suyool.com/pay/g401_MD"  # e.g. "https://pay.tap.company/..." or leave ""
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
