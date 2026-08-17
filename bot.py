@@ -401,9 +401,11 @@ def db_init():
             order_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             item_id TEXT NOT NULL,
+            unit_no INTEGER NOT NULL DEFAULT 1,
             state TEXT NOT NULL DEFAULT 'needs_info',
+            info_json TEXT,
             created_at TEXT NOT NULL,
-            UNIQUE(order_id, item_id)
+            UNIQUE(order_id, item_id, unit_no)
         )
         """
     )
@@ -451,55 +453,79 @@ def db_get_delivery(delivery_id: int, user_id: int):
 # Fulfilment states: 'needs_info' -> we still need details from the customer
 #                   'awaiting_delivery' -> details in, waiting on us
 #                   'delivered' -> done
+#
+# One row per purchased UNIT, not per product: ordering two Uptodate
+# subscriptions creates two independent rows, each collecting its own
+# details and delivered separately.
 
 def db_add_fulfilment_items(order_id: int, user_id: int, items: dict):
-    """Records every product in a paid order so the fulfilment queue lives
-    in the database rather than in memory — otherwise a redeploy wipes it
-    and half-finished orders are silently forgotten."""
+    """Records every purchased unit of a paid order so the fulfilment queue
+    lives in the database rather than in memory — a redeploy would
+    otherwise wipe it and silently strand half-finished orders."""
     conn = sqlite3.connect(DB_PATH)
-    for item_id in items:
-        try:
-            conn.execute(
-                "INSERT INTO fulfilment (order_id, user_id, item_id, state, created_at) "
-                "VALUES (?, ?, ?, 'needs_info', ?)",
-                (order_id, user_id, item_id, datetime.utcnow().isoformat()),
-            )
-        except sqlite3.IntegrityError:
-            pass  # already recorded
+    for item_id, qty in items.items():
+        for unit_no in range(1, int(qty) + 1):
+            try:
+                conn.execute(
+                    "INSERT INTO fulfilment (order_id, user_id, item_id, unit_no, state, created_at) "
+                    "VALUES (?, ?, ?, ?, 'needs_info', ?)",
+                    (order_id, user_id, item_id, unit_no, datetime.utcnow().isoformat()),
+                )
+            except sqlite3.IntegrityError:
+                pass  # already recorded
     conn.commit()
     conn.close()
 
 
 def db_next_needs_info(order_id: int):
-    """The next product in this order still waiting on customer details.
-    iMD items come first because they're delivered instantly."""
+    """The next unit in this order still waiting on customer details.
+    Returns (fulfilment_id, item_id) or None. iMD units come first
+    because they're delivered instantly."""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT item_id FROM fulfilment WHERE order_id = ? AND state = 'needs_info' ORDER BY id",
+        "SELECT id, item_id FROM fulfilment WHERE order_id = ? AND state = 'needs_info' ORDER BY id",
         (order_id,),
     ).fetchall()
     conn.close()
-    item_ids = [r[0] for r in rows]
-    for item_id in item_ids:
+    for fid, item_id in rows:
         if item_id in IMD_TRIGGER_ITEMS:
-            return item_id
-    return item_ids[0] if item_ids else None
+            return fid, item_id
+    return rows[0] if rows else None
 
 
-def db_set_fulfilment_state(order_id: int, item_id: str, state: str):
+def db_set_fulfilment_state(fulfilment_id: int, state: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE fulfilment SET state = ? WHERE id = ?", (state, fulfilment_id))
+    conn.commit()
+    conn.close()
+
+
+def db_set_fulfilment_info(fulfilment_id: int, info: dict):
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
-        "UPDATE fulfilment SET state = ? WHERE order_id = ? AND item_id = ?",
-        (state, order_id, item_id),
+        "UPDATE fulfilment SET info_json = ? WHERE id = ?", (json.dumps(info), fulfilment_id)
     )
     conn.commit()
     conn.close()
 
 
+def db_get_fulfilment(fulfilment_id: int):
+    """Returns (id, order_id, user_id, item_id, unit_no, state, info_json)."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT id, order_id, user_id, item_id, unit_no, state, info_json "
+        "FROM fulfilment WHERE id = ?",
+        (fulfilment_id,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
 def db_order_undelivered_items(order_id: int):
+    """Units of this order not yet delivered: (fulfilment_id, item_id, state)."""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT item_id, state FROM fulfilment WHERE order_id = ? AND state != 'delivered' ORDER BY id",
+        "SELECT id, item_id, state FROM fulfilment WHERE order_id = ? AND state != 'delivered' ORDER BY id",
         (order_id,),
     ).fetchall()
     conn.close()
@@ -507,15 +533,41 @@ def db_order_undelivered_items(order_id: int):
 
 
 def db_user_pending_items(user_id: int):
-    """Products the customer has paid for that aren't delivered yet.
-    Returns (order_id, item_id, state)."""
+    """Units this customer has paid for that aren't delivered yet.
+    Returns (fulfilment_id, order_id, item_id, unit_no, state)."""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT f.order_id, f.item_id, f.state FROM fulfilment f "
+        "SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state FROM fulfilment f "
         "JOIN orders o ON o.id = f.order_id "
         "WHERE f.user_id = ? AND f.state != 'delivered' "
         "AND o.status NOT IN ('cancelled', 'rejected') "
         "ORDER BY f.order_id DESC, f.id",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def db_all_pending_items():
+    """Every undelivered unit across all customers, for the admin view.
+    Returns (fulfilment_id, order_id, user_id, username, item_id, unit_no, state)."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT f.id, f.order_id, f.user_id, o.username, f.item_id, f.unit_no, f.state "
+        "FROM fulfilment f JOIN orders o ON o.id = f.order_id "
+        "WHERE f.state != 'delivered' AND o.status = 'paid' "
+        "ORDER BY f.order_id, f.id",
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def db_user_delivered_units(user_id: int):
+    """Delivered units with their collected info, for the customer lookup."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT f.id, f.order_id, f.item_id, f.unit_no, f.info_json FROM fulfilment f "
+        "WHERE f.user_id = ? AND f.state = 'delivered' ORDER BY f.order_id DESC, f.id",
         (user_id,),
     ).fetchall()
     conn.close()
@@ -735,13 +787,14 @@ A_VIEW_SERIALS = "🔑 View Serials"
 A_ADD_SERIALS = "➕ Add Serials"
 A_REMOVE_SERIAL = "🗑 Remove Serial"
 A_RECENT_ORDERS = "📊 Recent Orders"
+A_PENDING = "⏳ Pending Orders"
 A_FIND_ORDER = "🔎 Find Order"
 A_FIND_CUSTOMER = "👤 Find Customer"
 A_CUSTOMER_VIEW = "🛍 Customer Menu"
 
 ADMIN_LABELS = [
     A_VIEW_SERIALS, A_ADD_SERIALS, A_REMOVE_SERIAL,
-    A_RECENT_ORDERS, A_FIND_ORDER, A_FIND_CUSTOMER, A_CUSTOMER_VIEW,
+    A_RECENT_ORDERS, A_PENDING, A_FIND_ORDER, A_FIND_CUSTOMER, A_CUSTOMER_VIEW,
 ]
 
 
@@ -761,6 +814,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
         [
             [A_VIEW_SERIALS, A_ADD_SERIALS],
             [A_REMOVE_SERIAL, A_RECENT_ORDERS],
+            [A_PENDING],
             [A_FIND_ORDER, A_FIND_CUSTOMER],
             [A_CUSTOMER_VIEW],
         ],
@@ -885,10 +939,11 @@ def pending_keyboard(user_id: int):
     if not rows:
         return None
     buttons = []
-    for order_id, item_id, status in rows:
+    for fid, order_id, item_id, unit_no, state in rows:
         name = MENU.get(item_id, (item_id,))[0]
+        suffix = f" #{unit_no}" if unit_no > 1 else ""
         buttons.append(
-            [InlineKeyboardButton(f"#{order_id} — {name}"[:60], callback_data=f"pend:{order_id}:{item_id}")]
+            [InlineKeyboardButton(f"#{order_id} — {name}{suffix}"[:60], callback_data=f"pend:{fid}")]
         )
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="subs_menu")])
     return InlineKeyboardMarkup(buttons)
@@ -947,16 +1002,20 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     the missing field), or it's with us and they just need to wait."""
     query = update.callback_query
     await query.answer()
-    _, order_id_str, item_id = query.data.split(":", 2)
-    order_id = int(order_id_str)
+    fulfilment_id = int(query.data.split(":", 1)[1])
 
-    name = MENU.get(item_id, (item_id,))[0]
+    row = db_get_fulfilment(fulfilment_id)
     back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="subs_pending")]])
+    if not row:
+        await query.edit_message_text("That order is no longer pending.", reply_markup=back)
+        return
+
+    _, order_id, user_id, item_id, unit_no, state, info_json = row
+    name = MENU.get(item_id, (item_id,))[0]
 
     order = db_get_order(order_id)
     status = order[5] if order else None
 
-    # Not paid for yet.
     if status in ("awaiting_payment", "awaiting_receipt", "awaiting_confirmation"):
         if status == "awaiting_confirmation":
             text = (
@@ -973,10 +1032,25 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=back)
         return
 
-    # The bot is mid-conversation with this customer about this order.
-    reg_field = context.user_data.get("awaiting_registration_field")
-    if reg_field and context.user_data.get("registration_order") == order_id:
-        prompt = IMD_FIELD_PROMPTS.get(reg_field, "Please send the requested information:")
+    if state == "needs_info":
+        # Re-ask for whatever this unit is still missing.
+        reg_field = context.user_data.get("awaiting_registration_field")
+        gen_field = context.user_data.get("awaiting_generic_field")
+
+        if reg_field and context.user_data.get("registration_fulfilment_id") == fulfilment_id:
+            prompt = IMD_FIELD_PROMPTS.get(reg_field, "Please send the requested information:")
+        elif gen_field and context.user_data.get("generic_fulfilment_id") == fulfilment_id:
+            prompt = dict(GENERIC_FIELDS).get(gen_field, "Please send the requested information:")
+        else:
+            # Nothing in progress for this unit — restart its collection.
+            await query.edit_message_text(
+                f"📝 *{name}* (Order #{order_id})\n\nWe still need some details from you.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=back,
+            )
+            await process_next_in_queue(context, query.from_user.id, order_id)
+            return
+
         await query.edit_message_text(
             f"📝 *{name}* (Order #{order_id})\n\nWe still need some information from you.",
             parse_mode=ParseMode.MARKDOWN,
@@ -985,18 +1059,6 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=query.from_user.id, text=prompt)
         return
 
-    gen_field = context.user_data.get("awaiting_generic_field")
-    if gen_field and context.user_data.get("generic_order_id") == order_id:
-        prompt = dict(GENERIC_FIELDS).get(gen_field, "Please send the requested information:")
-        await query.edit_message_text(
-            f"📝 *{name}* (Order #{order_id})\n\nWe still need some information from you.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=back,
-        )
-        await context.bot.send_message(chat_id=query.from_user.id, text=prompt)
-        return
-
-    # Paid and all details in — it's on our side now.
     await query.edit_message_text(
         f"⏳ *{name}* (Order #{order_id})\n\n"
         "Your payment is confirmed and we have everything we need. Your account is being "
@@ -1382,12 +1444,17 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # The admin message here is a photo (caption), so edit the caption, not the text.
     if action == "admin_confirm":
         db_update_status(order_id, "paid")
-        await query.edit_message_caption(
-            caption=f"✅ Order #{order_id} confirmed as paid.\n\nTap below when ready to send login details.",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("📤 Send Credentials", callback_data=f"deliver:{order_id}")]]
-            ),
-        )
+
+        # Cosmetic only — a failure here (double tap, "message is not
+        # modified", non-photo message) must never stop the order being
+        # fulfilled, so it's isolated.
+        try:
+            await query.edit_message_caption(
+                caption=f"✅ Order #{order_id} confirmed as paid."
+            )
+        except Exception:
+            logger.info("Could not edit confirmation caption for order #%s", order_id)
+
         await context.bot.send_message(
             chat_id=user_id,
             text=(
@@ -1396,7 +1463,6 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
         )
 
-        # If this order includes an iMD item, start the guided form collection.
         items = json.loads(items_json)
         await start_order_fulfilment(context, order_id, user_id, items)
 
@@ -1441,6 +1507,9 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == A_RECENT_ORDERS:
         await customer_history(update, context)
 
+    elif text == A_PENDING:
+        await admin_pending_list(update, context)
+
     elif text == A_FIND_ORDER:
         context.user_data["awaiting_admin_input"] = "find_order"
         await update.message.reply_text("Send the order number:")
@@ -1454,6 +1523,110 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Switched to the customer menu. Send /start to return to the admin panel.",
             reply_markup=main_menu_keyboard(),
         )
+
+
+def format_fulfilment_info(item_id: str, info_json: str) -> str:
+    """Renders the details a customer submitted for one unit."""
+    if not info_json:
+        return "(no details collected)"
+    try:
+        info = json.loads(info_json)
+    except (TypeError, ValueError):
+        return "(details unreadable)"
+    if not info:
+        return "(no details collected)"
+
+    labels = {
+        "first_name": "First name", "last_name": "Last name", "email": "Email",
+        "username": "Username", "password": "Password",
+        "prev_username": "Previous username",
+    }
+    return "\n".join(f"{labels.get(k, k)}: {v}" for k, v in info.items())
+
+
+async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Every undelivered item across all customers, one button each."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    rows = db_all_pending_items()
+    if not rows:
+        await update.message.reply_text("No pending orders — everything is delivered.")
+        return
+
+    buttons = []
+    for fid, order_id, user_id, username, item_id, unit_no, state in rows:
+        name = MENU.get(item_id, (item_id,))[0]
+        suffix = f" #{unit_no}" if unit_no > 1 else ""
+        flag = "📝" if state == "awaiting_delivery" else "⌛"
+        who = f"@{username}" if username else str(user_id)
+        label = f"{flag} {name}{suffix} — {who} (#{order_id})"
+        buttons.append([InlineKeyboardButton(label[:60], callback_data=f"apend:{fid}")])
+
+    await update.message.reply_text(
+        "Pending orders:\n📝 = details ready to deliver   ⌛ = waiting on customer",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the details a customer submitted, with a deliver button."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    fulfilment_id = int(query.data.split(":", 1)[1])
+    row = db_get_fulfilment(fulfilment_id)
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="apend_back")]])
+
+    if not row:
+        await query.edit_message_text("That item no longer exists.", reply_markup=back)
+        return
+
+    _, order_id, user_id, item_id, unit_no, state, info_json = row
+    name = MENU.get(item_id, (item_id,))[0]
+    order = db_get_order(order_id)
+    username = order[2] if order else None
+
+    text = (
+        f"{name}{f' #{unit_no}' if unit_no > 1 else ''}\n"
+        f"Order #{order_id} — {f'@{username}' if username else ''} (ID: {user_id})\n"
+        f"Status: {state}\n\n"
+        f"{format_fulfilment_info(item_id, info_json)}"
+    )
+
+    buttons = []
+    if state == "awaiting_delivery":
+        buttons.append([InlineKeyboardButton("📤 Deliver to Customer", callback_data=f"deliver:{fulfilment_id}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="apend_back")])
+
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def admin_pending_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    rows = db_all_pending_items()
+    if not rows:
+        await query.edit_message_text("No pending orders — everything is delivered.")
+        return
+
+    buttons = []
+    for fid, order_id, user_id, username, item_id, unit_no, state in rows:
+        name = MENU.get(item_id, (item_id,))[0]
+        suffix = f" #{unit_no}" if unit_no > 1 else ""
+        flag = "📝" if state == "awaiting_delivery" else "⌛"
+        who = f"@{username}" if username else str(user_id)
+        buttons.append(
+            [InlineKeyboardButton(f"{flag} {name}{suffix} — {who} (#{order_id})"[:60], callback_data=f"apend:{fid}")]
+        )
+
+    await query.edit_message_text(
+        "Pending orders:\n📝 = details ready to deliver   ⌛ = waiting on customer",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 
 async def show_serials(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1556,7 +1729,7 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get("awaiting_admin_input"):
             await admin_input_reply(update, context)
             return
-        if context.user_data.get("awaiting_credentials_for_order"):
+        if context.user_data.get("awaiting_credentials_fulfilment"):
             await credentials_reply(update, context)
             return
 
@@ -1577,21 +1750,23 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
     something."""
     if order_id is None:
         pending = db_user_pending_items(user_id)
-        needs = [(o, i) for o, i, state in pending if state == "needs_info"]
+        needs = [row for row in pending if row[4] == "needs_info"]
         if not needs:
             return
-        order_id = needs[0][0]
+        order_id = needs[0][1]
 
-    item_id = db_next_needs_info(order_id)
-    if not item_id:
+    nxt = db_next_needs_info(order_id)
+    if not nxt:
         return
+    fulfilment_id, item_id = nxt
 
     item_name = MENU.get(item_id, (item_id, 0))[0]
     customer_data = context.application.user_data[user_id]
 
     if item_id in IMD_TRIGGER_ITEMS:
-        await start_imd_collection(context, order_id, user_id, item_id)
+        await start_imd_collection(context, order_id, user_id, item_id, fulfilment_id)
     else:
+        customer_data["generic_fulfilment_id"] = fulfilment_id
         customer_data["generic_item_id"] = item_id
         customer_data["generic_order_id"] = order_id
         customer_data["generic_data"] = {}
@@ -1643,13 +1818,15 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
     # All fields collected — hand off to the admin for manual fulfilment.
     order_id = context.user_data.pop("generic_order_id", None)
     item_id = context.user_data.pop("generic_item_id", None)
+    fulfilment_id = context.user_data.pop("generic_fulfilment_id", None)
     context.user_data.pop("awaiting_generic_field", None)
     context.user_data.pop("generic_data", None)
 
     await update.message.reply_text(DELIVERY_48H_MESSAGE)
 
-    if order_id and item_id:
-        db_set_fulfilment_state(order_id, item_id, "awaiting_delivery")
+    if fulfilment_id:
+        db_set_fulfilment_info(fulfilment_id, data)
+        db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
 
     if ADMIN_CHAT_ID and order_id:
         item_name = MENU.get(item_id, (item_id, 0))[0]
@@ -1666,7 +1843,7 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "Deliver within 48 hours using the 📤 Send Credentials button on this order."
             ),
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("📤 Send Credentials", callback_data=f"deliver:{order_id}:{item_id}")]]
+                [[InlineKeyboardButton("📤 Send Credentials", callback_data=f"deliver:{fulfilment_id}")]]
             ),
         )
 
@@ -1674,7 +1851,7 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
     await process_next_in_queue(context, update.effective_user.id, order_id)
 
 
-async def start_imd_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int, imd_item: str):
+async def start_imd_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int, imd_item: str, fulfilment_id: int):
     """Kicks off the customer-facing form collection for an iMD item —
     email/username/password for a new account, or just the previous
     username for a renewal."""
@@ -1689,6 +1866,7 @@ async def start_imd_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int
     customer_data["registration_is_renew"] = is_renew
     customer_data["registration_duration"] = duration
     customer_data["registration_item_id"] = imd_item
+    customer_data["registration_fulfilment_id"] = fulfilment_id
 
     if is_renew:
         customer_data["awaiting_registration_field"] = "prev_username"
@@ -1750,6 +1928,7 @@ async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TY
     is_renew = context.user_data.pop("registration_is_renew", False)
     duration = context.user_data.pop("registration_duration", None)
     item_id = context.user_data.pop("registration_item_id", None)
+    fulfilment_id = context.user_data.pop("registration_fulfilment_id", None)
     context.user_data.pop("awaiting_registration_field", None)
     context.user_data.pop("registration_data", None)
 
@@ -1765,6 +1944,7 @@ async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TY
         "is_renew": is_renew,
         "duration": duration,
         "item_id": item_id,
+        "fulfilment_id": fulfilment_id,
     }
 
     if ADMIN_CHAT_ID:
@@ -1884,8 +2064,8 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
         )
         if customer_user_id:
             await context.bot.send_message(chat_id=customer_user_id, text=delivery_message)
-            if data.get("item_id"):
-                db_set_fulfilment_state(order_id, data["item_id"], "delivered")
+            if data.get("fulfilment_id"):
+                db_set_fulfilment_state(data["fulfilment_id"], "delivered")
             # This order may contain more items — move on to the next one.
             await process_next_in_queue(context, customer_user_id, order_id)
         return
@@ -2135,82 +2315,69 @@ def build_imd_delivery_message(username: str, password: str = None, date_str: st
 
 
 async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin tapped '📤 Send Credentials'. The callback data may carry the
-    specific item this delivery is for (deliver:<order>:<item>), so the
-    subscription gets listed under its own name for the customer."""
+    """Admin tapped '📤 Send Credentials'. The callback carries the specific
+    fulfilment row (one purchased unit), so two identical products in the
+    same order stay independent."""
     query = update.callback_query
     if query.from_user.id != ADMIN_CHAT_ID:
         await query.answer("Not authorized.", show_alert=True)
         return
     await query.answer()
 
-    parts = query.data.split(":")
-    order_id = int(parts[1])
-    item_id = parts[2] if len(parts) > 2 else None
+    fulfilment_id = int(query.data.split(":", 1)[1])
+    row = db_get_fulfilment(fulfilment_id)
+    if not row:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That item no longer exists.")
+        return
 
-    context.user_data["awaiting_credentials_for_order"] = order_id
-    context.user_data["awaiting_credentials_item"] = item_id
+    _, order_id, user_id, item_id, unit_no, state, info_json = row
+    context.user_data["awaiting_credentials_fulfilment"] = fulfilment_id
 
-    label = MENU.get(item_id, (None,))[0] if item_id else None
-    suffix = f" ({label})" if label else ""
+    name = MENU.get(item_id, (item_id,))[0]
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
-        text=f"Reply with the username & password for order #{order_id}{suffix}.",
+        text=f"Reply with the account details for {name} (Order #{order_id}).",
     )
 
 
 async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Catches the admin's next text message after tapping 'Send Credentials'
-    (the manual delivery flow) and forwards it to the customer as their
-    account details."""
+    and forwards it to the customer as their account details."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
-    order_id = context.user_data.get("awaiting_credentials_for_order")
-    if not order_id:
+    fulfilment_id = context.user_data.pop("awaiting_credentials_fulfilment", None)
+    if not fulfilment_id:
         return  # admin isn't in the middle of delivering anything
 
-    order = db_get_order(order_id)
-    if not order:
-        await update.message.reply_text("Order not found.")
-        context.user_data.pop("awaiting_credentials_for_order", None)
-        context.user_data.pop("awaiting_credentials_item", None)
+    row = db_get_fulfilment(fulfilment_id)
+    if not row:
+        await update.message.reply_text("That item no longer exists.")
         return
 
-    _, user_id, username, items_json, total, status, created_at = order
+    _, order_id, user_id, item_id, unit_no, state, info_json = row
     credentials_text = update.message.text
-    item_id = context.user_data.pop("awaiting_credentials_item", None)
-
-    # The generic "Send Credentials" button on the payment message doesn't
-    # name a product. Rather than record the delivery against nothing (which
-    # made it show as "Order #N" and hid the order's remaining items from
-    # Pending), fall back to the first item in this order that's still
-    # outstanding.
-    if not item_id:
-        undelivered = db_order_undelivered_items(order_id)
-        if undelivered:
-            item_id = undelivered[0][0]
+    name = MENU.get(item_id, (item_id,))[0]
 
     await context.bot.send_message(
         chat_id=user_id,
-        text=f"🔑 Here are your account details for order #{order_id}:\n\n{credentials_text}",
+        text=f"🔑 Here are your account details for {name} (Order #{order_id}):\n\n{credentials_text}",
     )
     db_save_delivery(order_id, credentials_text)
     db_add_delivery(order_id, user_id, item_id, credentials_text)
-    if item_id:
-        db_set_fulfilment_state(order_id, item_id, "delivered")
-    context.user_data.pop("awaiting_credentials_for_order", None)
-    await update.message.reply_text(f"✅ Credentials sent to the customer for order #{order_id}.")
+    db_set_fulfilment_state(fulfilment_id, "delivered")
+    await update.message.reply_text(f"✅ {name} delivered to the customer (Order #{order_id}).")
 
-    # A manual delivery finishes whatever item the customer was on, so any
-    # half-finished collection for it is stale — clear it and move the
-    # order's queue forward, otherwise remaining items are never asked for.
+    # A manual delivery ends whatever the customer was mid-way through for
+    # this unit, so clear any stale collection state and move the order on —
+    # otherwise the remaining items are never asked for.
     customer_data = context.application.user_data[user_id]
     for key in (
         "awaiting_registration_field", "registration_order", "registration_data",
         "registration_is_renew", "registration_duration", "registration_item_id",
-        "registration_retry_field", "awaiting_generic_field", "generic_data",
-        "generic_order_id", "generic_item_id",
+        "registration_fulfilment_id", "registration_retry_field",
+        "awaiting_generic_field", "generic_data", "generic_order_id",
+        "generic_item_id", "generic_fulfilment_id",
     ):
         customer_data.pop(key, None)
     await process_next_in_queue(context, user_id, order_id)
@@ -2285,8 +2452,8 @@ async def serials_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: every order for one specific customer, by Telegram user
-    ID or @username."""
+    """Admin-only: full picture for one customer — delivered and pending
+    shown separately, each with the details they submitted."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
@@ -2296,42 +2463,56 @@ async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query_arg = context.args[0]
     conn = sqlite3.connect(DB_PATH)
-
     if query_arg.startswith("@"):
-        username = query_arg[1:]
-        rows = conn.execute(
-            "SELECT id, items_json, total, status, created_at, delivered_at, credentials "
-            "FROM orders WHERE username = ? ORDER BY id DESC",
-            (username,),
-        ).fetchall()
+        row = conn.execute(
+            "SELECT user_id FROM orders WHERE username = ? ORDER BY id DESC LIMIT 1",
+            (query_arg[1:],),
+        ).fetchone()
+        conn.close()
+        if not row:
+            await update.message.reply_text(f"No orders found for {query_arg}.")
+            return
+        user_id = row[0]
     else:
+        conn.close()
         try:
             user_id = int(query_arg)
         except ValueError:
             await update.message.reply_text("Provide a numeric Telegram user ID or @username.")
             return
-        rows = conn.execute(
-            "SELECT id, items_json, total, status, created_at, delivered_at, credentials "
-            "FROM orders WHERE user_id = ? ORDER BY id DESC",
-            (user_id,),
-        ).fetchall()
 
-    conn.close()
+    delivered = db_user_delivered_units(user_id)
+    pending = db_user_pending_items(user_id)
 
-    if not rows:
+    if not delivered and not pending:
         await update.message.reply_text(f"No orders found for {query_arg}.")
         return
 
-    lines = [f"Orders for {query_arg}:"]
-    for order_id, items_json, total, status, created_at, delivered_at, credentials in rows:
-        items = json.loads(items_json)
-        item_names = ", ".join(MENU[i][0] for i in items if i in MENU)
-        line = f"\n#{order_id} — {item_names} — {CURRENCY}{total:.2f} — {status}"
-        if delivered_at:
-            line += f"\nDelivered: {delivered_at[:19]}\nCredentials: {credentials}"
-        lines.append(line)
+    parts = [f"Customer {query_arg} (ID: {user_id})"]
 
-    text = "".join(lines)
+    parts.append("\n✅ DELIVERED")
+    if delivered:
+        for fid, order_id, item_id, unit_no, info_json in delivered:
+            name = MENU.get(item_id, (item_id,))[0]
+            suffix = f" #{unit_no}" if unit_no > 1 else ""
+            parts.append(f"\n• {name}{suffix} — Order #{order_id}")
+            parts.append(format_fulfilment_info(item_id, info_json))
+    else:
+        parts.append("(none)")
+
+    parts.append("\n⏳ PENDING")
+    if pending:
+        for fid, order_id, item_id, unit_no, state in pending:
+            name = MENU.get(item_id, (item_id,))[0]
+            suffix = f" #{unit_no}" if unit_no > 1 else ""
+            label = "details ready to deliver" if state == "awaiting_delivery" else "waiting on customer"
+            parts.append(f"\n• {name}{suffix} — Order #{order_id} ({label})")
+            row = db_get_fulfilment(fid)
+            parts.append(format_fulfilment_info(item_id, row[6] if row else None))
+    else:
+        parts.append("(none)")
+
+    text = "\n".join(parts)
     for i in range(0, len(text), 3500):
         await update.message.reply_text(text[i:i + 3500])
 
@@ -2460,6 +2641,8 @@ def main():
     app.add_handler(CallbackQueryHandler(subs_registered, pattern=r"^subs_registered$"))
     app.add_handler(CallbackQueryHandler(subs_pending, pattern=r"^subs_pending$"))
     app.add_handler(CallbackQueryHandler(pending_detail, pattern=r"^pend:"))
+    app.add_handler(CallbackQueryHandler(admin_pending_detail, pattern=r"^apend:"))
+    app.add_handler(CallbackQueryHandler(admin_pending_back, pattern=r"^apend_back$"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, receipt_photo))
