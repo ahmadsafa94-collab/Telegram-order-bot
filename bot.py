@@ -49,6 +49,8 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    PersistenceInput,
+    PicklePersistence,
     PreCheckoutQueryHandler,
     filters,
 )
@@ -392,6 +394,19 @@ def db_init():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fulfilment (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            item_id TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'needs_info',
+            created_at TEXT NOT NULL,
+            UNIQUE(order_id, item_id)
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -431,42 +446,80 @@ def db_get_delivery(delivery_id: int, user_id: int):
     return row[0] if row else None
 
 
-def db_user_pending_items(user_id: int):
-    """Items the customer has ordered that haven't been delivered yet.
-    Returns (order_id, item_id, status). Compares each order's items
-    against the deliveries table, so a part-delivered order correctly
-    shows only its outstanding items."""
+
+
+# Fulfilment states: 'needs_info' -> we still need details from the customer
+#                   'awaiting_delivery' -> details in, waiting on us
+#                   'delivered' -> done
+
+def db_add_fulfilment_items(order_id: int, user_id: int, items: dict):
+    """Records every product in a paid order so the fulfilment queue lives
+    in the database rather than in memory — otherwise a redeploy wipes it
+    and half-finished orders are silently forgotten."""
     conn = sqlite3.connect(DB_PATH)
-    orders = conn.execute(
-        "SELECT id, items_json, status FROM orders "
-        "WHERE user_id = ? AND status NOT IN ('cancelled', 'rejected') "
-        "ORDER BY id DESC",
-        (user_id,),
-    ).fetchall()
-    delivered = conn.execute(
-        "SELECT order_id, item_id FROM deliveries WHERE user_id = ?", (user_id,)
-    ).fetchall()
+    for item_id in items:
+        try:
+            conn.execute(
+                "INSERT INTO fulfilment (order_id, user_id, item_id, state, created_at) "
+                "VALUES (?, ?, ?, 'needs_info', ?)",
+                (order_id, user_id, item_id, datetime.utcnow().isoformat()),
+            )
+        except sqlite3.IntegrityError:
+            pass  # already recorded
+    conn.commit()
     conn.close()
 
-    delivered_pairs = {(o, i) for o, i in delivered}
-    delivered_orders_no_item = {o for o, i in delivered if i is None}
 
-    pending = []
-    for order_id, items_json, status in orders:
-        try:
-            items = json.loads(items_json)
-        except (TypeError, ValueError):
-            continue
-        for item_id in items:
-            if (order_id, item_id) in delivered_pairs:
-                continue
-            # A delivery recorded without an item id (older/manual ones)
-            # can't be matched to a specific product, so treat the whole
-            # order as handled rather than nagging the customer.
-            if order_id in delivered_orders_no_item:
-                continue
-            pending.append((order_id, item_id, status))
-    return pending
+def db_next_needs_info(order_id: int):
+    """The next product in this order still waiting on customer details.
+    iMD items come first because they're delivered instantly."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT item_id FROM fulfilment WHERE order_id = ? AND state = 'needs_info' ORDER BY id",
+        (order_id,),
+    ).fetchall()
+    conn.close()
+    item_ids = [r[0] for r in rows]
+    for item_id in item_ids:
+        if item_id in IMD_TRIGGER_ITEMS:
+            return item_id
+    return item_ids[0] if item_ids else None
+
+
+def db_set_fulfilment_state(order_id: int, item_id: str, state: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE fulfilment SET state = ? WHERE order_id = ? AND item_id = ?",
+        (state, order_id, item_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_order_undelivered_items(order_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT item_id, state FROM fulfilment WHERE order_id = ? AND state != 'delivered' ORDER BY id",
+        (order_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def db_user_pending_items(user_id: int):
+    """Products the customer has paid for that aren't delivered yet.
+    Returns (order_id, item_id, state)."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT f.order_id, f.item_id, f.state FROM fulfilment f "
+        "JOIN orders o ON o.id = f.order_id "
+        "WHERE f.user_id = ? AND f.state != 'delivered' "
+        "AND o.status NOT IN ('cancelled', 'rejected') "
+        "ORDER BY f.order_id DESC, f.id",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return rows
 
 
 def db_add_serials(duration: str, codes: list) -> int:
@@ -809,7 +862,17 @@ def subscriptions_keyboard(user_id: int):
     for delivery_id, order_id, item_id, message, delivered_at in rows:
         name = MENU.get(item_id, (None,))[0] if item_id else None
         if not name:
-            name = f"Order #{order_id}"
+            # Legacy rows saved before per-item tracking: fall back to the
+            # order's product names so the button is still meaningful
+            # rather than an opaque "Order #N".
+            order = db_get_order(order_id)
+            if order:
+                try:
+                    items = json.loads(order[3])
+                    name = ", ".join(MENU[i][0] for i in items if i in MENU)
+                except (TypeError, ValueError):
+                    name = None
+            name = name or f"Order #{order_id}"
         label = name + (f" ({delivered_at[:10]})" if delivered_at else "")
         buttons.append([InlineKeyboardButton(label[:60], callback_data=f"mysub:{delivery_id}")])
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="subs_menu")])
@@ -1499,39 +1562,32 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_order_fulfilment(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int, items: dict):
-    """Builds the fulfilment queue for a paid order and starts the first
-    item. iMD items go first because they're delivered instantly; the
-    rest are collected one at a time afterwards and fulfilled manually
-    within 48 hours."""
-    imd_items = [i for i in items if i in IMD_TRIGGER_ITEMS]
-    other_items = [i for i in items if i not in IMD_TRIGGER_ITEMS]
+    """Records every product in the paid order in the database, then starts
+    collecting details for the first one."""
+    db_add_fulfilment_items(order_id, user_id, items)
+    await process_next_in_queue(context, user_id, order_id)
 
-    queue = imd_items + other_items
-    if not queue:
+
+async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int, order_id: int = None):
+    """Starts collection for the next product still needing details.
+
+    Reads the queue from the database rather than memory, so a restart or
+    redeploy can't lose track of a half-finished order. If no order_id is
+    given, picks up whichever of this customer's orders still needs
+    something."""
+    if order_id is None:
+        pending = db_user_pending_items(user_id)
+        needs = [(o, i) for o, i, state in pending if state == "needs_info"]
+        if not needs:
+            return
+        order_id = needs[0][0]
+
+    item_id = db_next_needs_info(order_id)
+    if not item_id:
         return
 
-    customer_data = context.application.user_data[user_id]
-    customer_data["fulfil_queue"] = queue
-    customer_data["fulfil_order_id"] = order_id
-
-    await process_next_in_queue(context, user_id)
-
-
-async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    """Starts collection for the next unfulfilled item, or wraps up if the
-    queue is empty."""
-    customer_data = context.application.user_data[user_id]
-    queue = customer_data.get("fulfil_queue") or []
-    order_id = customer_data.get("fulfil_order_id")
-
-    if not queue:
-        customer_data.pop("fulfil_queue", None)
-        customer_data.pop("fulfil_order_id", None)
-        return
-
-    item_id = queue.pop(0)
-    customer_data["fulfil_queue"] = queue
     item_name = MENU.get(item_id, (item_id, 0))[0]
+    customer_data = context.application.user_data[user_id]
 
     if item_id in IMD_TRIGGER_ITEMS:
         await start_imd_collection(context, order_id, user_id, item_id)
@@ -1592,6 +1648,9 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await update.message.reply_text(DELIVERY_48H_MESSAGE)
 
+    if order_id and item_id:
+        db_set_fulfilment_state(order_id, item_id, "awaiting_delivery")
+
     if ADMIN_CHAT_ID and order_id:
         item_name = MENU.get(item_id, (item_id, 0))[0]
         await context.bot.send_message(
@@ -1612,7 +1671,7 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
     # Move on to the next item in this order, if any.
-    await process_next_in_queue(context, update.effective_user.id)
+    await process_next_in_queue(context, update.effective_user.id, order_id)
 
 
 async def start_imd_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int, imd_item: str):
@@ -1825,8 +1884,10 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
         )
         if customer_user_id:
             await context.bot.send_message(chat_id=customer_user_id, text=delivery_message)
+            if data.get("item_id"):
+                db_set_fulfilment_state(order_id, data["item_id"], "delivered")
             # This order may contain more items — move on to the next one.
-            await process_next_in_queue(context, customer_user_id)
+            await process_next_in_queue(context, customer_user_id, order_id)
         return
 
     # Everything below is a non-success: the serial goes back to the pool
@@ -2120,12 +2181,24 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     credentials_text = update.message.text
     item_id = context.user_data.pop("awaiting_credentials_item", None)
 
+    # The generic "Send Credentials" button on the payment message doesn't
+    # name a product. Rather than record the delivery against nothing (which
+    # made it show as "Order #N" and hid the order's remaining items from
+    # Pending), fall back to the first item in this order that's still
+    # outstanding.
+    if not item_id:
+        undelivered = db_order_undelivered_items(order_id)
+        if undelivered:
+            item_id = undelivered[0][0]
+
     await context.bot.send_message(
         chat_id=user_id,
         text=f"🔑 Here are your account details for order #{order_id}:\n\n{credentials_text}",
     )
     db_save_delivery(order_id, credentials_text)
     db_add_delivery(order_id, user_id, item_id, credentials_text)
+    if item_id:
+        db_set_fulfilment_state(order_id, item_id, "delivered")
     context.user_data.pop("awaiting_credentials_for_order", None)
     await update.message.reply_text(f"✅ Credentials sent to the customer for order #{order_id}.")
 
@@ -2140,7 +2213,7 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "generic_order_id", "generic_item_id",
     ):
         customer_data.pop(key, None)
-    await process_next_in_queue(context, user_id)
+    await process_next_in_queue(context, user_id, order_id)
 
 
 async def add_serials_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2351,7 +2424,15 @@ def main():
     if BOT_TOKEN == "PUT_YOUR_BOT_TOKEN_HERE":
         raise SystemExit("Set BOT_TOKEN (env var) before running.")
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Persist conversation state to disk. Without this, an in-progress
+    # collection (and anything else in user_data) is wiped by every
+    # restart or redeploy, silently stranding half-finished orders.
+    persistence = PicklePersistence(
+        filepath=os.path.join(os.path.dirname(DB_PATH) or ".", "bot_state.pickle"),
+        store_data=PersistenceInput(bot_data=True, chat_data=True, user_data=True, callback_data=False),
+    )
+
+    app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myorders", my_orders))
