@@ -87,27 +87,17 @@ IMD_TRIGGER_ITEMS = {"item2"}
 
 IMD_REGISTRATION_URL = "https://imedicaldoctor.net/register/"
 
-# !! VERIFY THESE BEFORE RELYING ON AUTO-REGISTRATION !!
-# These are the HTML <input name="..."> values the registration form
-# actually submits. I could only see the *visible labels* (Username,
-# Password, Verify Password, Email, Serial) — not the real underlying
-# field names or any hidden tokens the form might send (e.g. a CSRF
-# token). Guessing wrong here means the auto-registration attempt will
-# fail (safely — the code below surfaces the raw response to you so
-# you can see what went wrong and register manually instead).
-#
-# HOW TO GET THE REAL VALUES:
-# 1. Open https://imedicaldoctor.net/register/ in a desktop browser
-# 2. Right-click the Username field -> Inspect
-# 3. Find the <input> tag, note its `name="..."` attribute
-# 4. Repeat for Password, Verify Password, Email, Serial
-# 5. Also check if the <form> tag or a hidden <input> contains anything
-#    like csrf_token, _token, or similar — if so, that needs to be
-#    fetched from the page first and submitted alongside the form data
+# Confirmed directly from the page's HTML source (2026-08-17).
+# No CSRF token present. There IS a required hidden field, `register`,
+# submitted with an empty value — included below.
+# Note: the page also loads Cloudflare's bot-challenge script. That may or
+# may not block a plain form POST depending on their security settings —
+# the response preview after each attempt will show if that's happening
+# (e.g. an HTML challenge page instead of a normal response).
 IMD_FORM_FIELD_MAP = {
     "username": "username",
     "password": "password",
-    "verify_password": "verify_password",
+    "verify_password": "passwordverify",
     "email": "email",
     "serial": "serial",
 }
@@ -911,12 +901,17 @@ async def attempt_imd_registration(email: str, username: str, password: str, ser
         IMD_FORM_FIELD_MAP["password"]: password,
         IMD_FORM_FIELD_MAP["verify_password"]: password,
         IMD_FORM_FIELD_MAP["serial"]: serial,
+        "register": "",  # required hidden field the real form always sends
     }
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
             response = await client.post(IMD_REGISTRATION_URL, data=payload)
         # We can't reliably know what a "success" page looks like without
-        # seeing the real one — surface the outcome so the admin can judge.
+        # seeing one first-hand — surface the outcome so the admin can judge.
+        # Watch for signs of a Cloudflare challenge page (e.g. "Just a
+        # moment", "cf-challenge", "Attention Required") in the preview —
+        # that would mean the request got blocked before reaching the form
+        # handler at all, regardless of field names being correct.
         snippet = response.text[:500].replace("\n", " ")
         if response.status_code == 200:
             return True, f"HTTP {response.status_code}. Response preview:\n{snippet}"
