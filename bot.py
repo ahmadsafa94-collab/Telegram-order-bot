@@ -58,7 +58,7 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "PUT_YOUR_BOT_TOKEN_HERE")
 ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", "0"))  # your Telegram user ID
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "orders.db")
+DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "orders.db"))
 
 CURRENCY = "$"
 
@@ -200,6 +200,13 @@ def db_init():
         )
         """
     )
+    # Added later for record-keeping — ALTER TABLE is skipped if the column
+    # already exists, so this is safe to run on every startup.
+    for column, coltype in [("credentials", "TEXT"), ("delivered_at", "TEXT")]:
+        try:
+            conn.execute(f"ALTER TABLE orders ADD COLUMN {column} {coltype}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -218,10 +225,26 @@ def db_create_order(user_id: int, username: str, items: dict, total: float) -> i
 
 
 def db_get_order(order_id: int):
+    # Explicit column list (not SELECT *) so existing code that unpacks this
+    # tuple keeps working even after new columns are added to the table.
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    row = conn.execute(
+        "SELECT id, user_id, username, items_json, total, status, created_at "
+        "FROM orders WHERE id = ?",
+        (order_id,),
+    ).fetchone()
     conn.close()
     return row
+
+
+def db_save_delivery(order_id: int, credentials_text: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE orders SET status = ?, credentials = ?, delivered_at = ? WHERE id = ?",
+        ("delivered", credentials_text, datetime.utcnow().isoformat(), order_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 def db_update_status(order_id: int, status: str):
@@ -709,9 +732,87 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=user_id,
         text=f"🔑 Here are your account details for order #{order_id}:\n\n{credentials_text}",
     )
-    db_update_status(order_id, "delivered")
+    db_save_delivery(order_id, credentials_text)
     context.user_data.pop("awaiting_credentials_for_order", None)
     await update.message.reply_text(f"✅ Credentials sent to the customer for order #{order_id}.")
+
+
+async def customer_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: overview of recent orders and their delivery status."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, username, items_json, total, status, delivered_at "
+        "FROM orders ORDER BY id DESC LIMIT 30"
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        await update.message.reply_text("No orders yet.")
+        return
+
+    lines = []
+    for order_id, username, items_json, total, status, delivered_at in rows:
+        items = json.loads(items_json)
+        item_names = ", ".join(MENU[i][0] for i in items if i in MENU)
+        line = f"#{order_id} @{username or 'unknown'} — {item_names} — {status}"
+        if delivered_at:
+            line += f" (delivered {delivered_at[:10]})"
+        lines.append(line)
+
+    # Telegram caps messages at 4096 chars — chunk if the list gets long.
+    text = "\n".join(lines)
+    for i in range(0, len(text), 3500):
+        await update.message.reply_text(text[i:i + 3500])
+
+
+async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: full detail for one order, including delivered credentials."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /order <order_id>")
+        return
+
+    try:
+        order_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Order id must be a number.")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT id, user_id, username, items_json, total, status, created_at, "
+        "credentials, delivered_at FROM orders WHERE id = ?",
+        (order_id,),
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        await update.message.reply_text(f"Order #{order_id} not found.")
+        return
+
+    oid, user_id, username, items_json, total, status, created_at, credentials, delivered_at = row
+    items = json.loads(items_json)
+    item_names = ", ".join(MENU[i][0] for i in items if i in MENU)
+
+    text = (
+        f"Order #{oid}\n"
+        f"Customer: @{username or user_id}\n"
+        f"Items: {item_names}\n"
+        f"Total: {CURRENCY}{total:.2f}\n"
+        f"Status: {status}\n"
+        f"Created: {created_at[:19]}\n"
+    )
+    if delivered_at:
+        text += f"Delivered: {delivered_at[:19]}\n\nCredentials sent:\n{credentials}"
+    else:
+        text += "\nNo credentials delivered yet."
+
+    await update.message.reply_text(text)
 
 
 # ------------------------------------------------------------------
@@ -728,6 +829,8 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myorders", my_orders))
+    app.add_handler(CommandHandler("customers", customer_history))
+    app.add_handler(CommandHandler("order", order_lookup))
     app.add_handler(CallbackQueryHandler(order_action, pattern=r"^(paid|cancel):"))
     app.add_handler(CallbackQueryHandler(admin_action, pattern=r"^admin_(confirm|reject):"))
     app.add_handler(CallbackQueryHandler(deliver_start, pattern=r"^deliver:"))
