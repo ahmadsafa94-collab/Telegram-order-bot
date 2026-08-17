@@ -409,6 +409,37 @@ def db_init():
         )
         """
     )
+
+    # Migration: an earlier version created `fulfilment` without unit_no /
+    # info_json and with UNIQUE(order_id, item_id). CREATE TABLE IF NOT
+    # EXISTS silently leaves that old table in place, so every insert then
+    # fails with OperationalError and order fulfilment dies right after the
+    # payment-confirmed message. Rebuild it when the old shape is detected.
+    columns = [r[1] for r in conn.execute("PRAGMA table_info(fulfilment)").fetchall()]
+    if columns and "unit_no" not in columns:
+        conn.execute("ALTER TABLE fulfilment RENAME TO fulfilment_old")
+        conn.execute(
+            """
+            CREATE TABLE fulfilment (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                item_id TEXT NOT NULL,
+                unit_no INTEGER NOT NULL DEFAULT 1,
+                state TEXT NOT NULL DEFAULT 'needs_info',
+                info_json TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(order_id, item_id, unit_no)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO fulfilment (order_id, user_id, item_id, unit_no, state, created_at) "
+            "SELECT order_id, user_id, item_id, 1, state, created_at FROM fulfilment_old"
+        )
+        conn.execute("DROP TABLE fulfilment_old")
+        logger.info("Migrated fulfilment table to per-unit schema")
+
     conn.commit()
     conn.close()
 
@@ -1735,10 +1766,25 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_order_fulfilment(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int, items: dict):
-    """Records every product in the paid order in the database, then starts
-    collecting details for the first one."""
-    db_add_fulfilment_items(order_id, user_id, items)
-    await process_next_in_queue(context, user_id, order_id)
+    """Records every purchased unit of the paid order, then starts
+    collecting details for the first one.
+
+    Wrapped in error handling because a failure here means the customer is
+    told their payment succeeded and then never asked for anything — a
+    silent dead end. If it breaks, the admin gets told instead."""
+    try:
+        db_add_fulfilment_items(order_id, user_id, items)
+        await process_next_in_queue(context, user_id, order_id)
+    except Exception as exc:
+        logger.exception("Failed to start fulfilment for order #%s", order_id)
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    f"⚠️ Could not start fulfilment for order #{order_id} — the customer has NOT "
+                    f"been asked for their details.\n\nError: {exc}"
+                ),
+            )
 
 
 async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int, order_id: int = None):
