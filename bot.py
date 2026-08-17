@@ -888,7 +888,15 @@ async def reg_serial_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def attempt_imd_registration(email: str, username: str, password: str, serial: str):
     """Automatic submission to iMD's registration form using a real headless
     Chromium browser (via Playwright), since a plain HTTP POST is blocked
-    by Cloudflare. Returns (success: bool, detail: str)."""
+    by Cloudflare. Returns (success: bool, detail: str).
+
+    Note: the post-submit page can still show a Cloudflare interstitial
+    even when the registration itself went through server-side (confirmed
+    by testing — accounts were created despite this page showing). So a
+    lingering 'Just a moment' title after submit is NOT treated as a
+    failure here; only an actual exception (network error, timeout, field
+    not found, etc.) counts as one. The response snippet is still returned
+    for the admin's own reference in case something looks genuinely wrong."""
     from playwright.async_api import async_playwright
 
     try:
@@ -908,8 +916,8 @@ async def attempt_imd_registration(email: str, username: str, password: str, ser
 
             await page.goto(IMD_REGISTRATION_URL, wait_until="networkidle", timeout=30000)
 
-            # Give Cloudflare's JS challenge time to run and redirect through,
-            # checking a few times rather than one fixed long wait.
+            # Give Cloudflare's JS challenge time to run and redirect through
+            # before we try to interact with the form itself.
             for _ in range(4):
                 title = await page.title()
                 if "Just a moment" not in title:
@@ -920,7 +928,7 @@ async def attempt_imd_registration(email: str, username: str, password: str, ser
             if "Just a moment" in title:
                 content = await page.content()
                 await browser.close()
-                return False, f"Still blocked by Cloudflare after waiting. Title: {title}\n{content[:500]}"
+                return False, f"Still blocked by Cloudflare before the form loaded. Title: {title}\n{content[:500]}"
 
             await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["username"]}"]', username)
             await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["password"]}"]', password)
@@ -931,17 +939,46 @@ async def attempt_imd_registration(email: str, username: str, password: str, ser
             await page.click("#submit")
             await page.wait_for_load_state("networkidle", timeout=30000)
 
+            # Give a post-submit Cloudflare interstitial a chance to clear
+            # too, purely for a cleaner response snippet — doesn't affect
+            # the success/failure outcome below.
+            for _ in range(3):
+                result_title = await page.title()
+                if "Just a moment" not in result_title:
+                    break
+                await page.wait_for_timeout(3000)
+
             result_title = await page.title()
             content = await page.content()
             await browser.close()
 
             snippet = content[:800].replace("\n", " ")
-            if "Just a moment" in result_title or "Attention Required" in content:
-                return False, f"Blocked by Cloudflare on submit. Title: {result_title}\n{snippet}"
             return True, f"Submitted. Page title after: {result_title}\n{snippet}"
 
     except Exception as exc:
         return False, f"Browser automation failed: {exc}"
+
+
+def build_imd_delivery_message(username: str, password: str) -> str:
+    """The exact account-delivery message format used for iMD orders."""
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    return (
+        "✅ IMD 1 year Full Access \n\n"
+        f"Date: {date_str}\n\n"
+        f"Username: {username}\n"
+        f"Password: {password}\n\n"
+        "⭕️ This account is restricted to simultaneous use on a single device. "
+        "Device changes are permitted; however, logging in on a new device will "
+        "automatically terminate the session on the previous one.\n\n"
+        "♦️ This account is designated for exclusive use by one individual. "
+        "Please ensure your password is not shared with others. Unauthorized "
+        "sharing or misuse may result in account suspension.\n\n"
+        "🛑 Installation Guide:\n\n"
+        "🌐 Web Version for all platforms: \n"
+        "www.imdweb.org\n\n\n"
+        "📱App version for Android:\n"
+        "sg.imedicaldoctor.net/imd200.apk"
+    )
 
 
 async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -989,20 +1026,11 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         customer_user_id = order[1] if order else None
 
         if success:
-            db_save_delivery(
-                serial_order_id,
-                f"Email: {data.get('email')}\nUsername: {data.get('username')}\nPassword: {data.get('password')}",
-            )
+            delivery_message = build_imd_delivery_message(data.get("username"), data.get("password"))
+            db_save_delivery(serial_order_id, delivery_message)
             await update.message.reply_text(f"✅ Registration attempt finished.\n\n{detail}")
             if customer_user_id:
-                await context.bot.send_message(
-                    chat_id=customer_user_id,
-                    text=(
-                        f"✅ Your iMD account is ready!\n\n"
-                        f"Username: {data.get('username')}\n"
-                        f"Password: {data.get('password')}"
-                    ),
-                )
+                await context.bot.send_message(chat_id=customer_user_id, text=delivery_message)
         else:
             await update.message.reply_text(
                 f"⚠️ Registration attempt did not clearly succeed — check the response below, "
