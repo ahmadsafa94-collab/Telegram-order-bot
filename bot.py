@@ -70,7 +70,10 @@ STAR_RATE = 50
 # Your menu. Keys are short item IDs, values are (display name, price).
 MENU = {
     "item1": ("Uptodate Online", 20.00),
-    "item2": ("iMD VIP - 1 year", 75.00),
+    "imd_new_6m": ("iMD VIP New Account - 6 Months", 50.00),
+    "imd_new_1y": ("iMD VIP New Account - 1 Year", 75.00),
+    "imd_renew_6m": ("iMD VIP Renewal - 6 Months", 50.00),
+    "imd_renew_1y": ("iMD VIP Renewal - 1 Year", 75.00),
     "item3": ("Uptodate Online + Offline", 30.00),
     "item4": ("Amboss Full Access - 1 year", 85.00),
 }
@@ -79,21 +82,39 @@ MENU = {
 # iMD FORM COLLECTION
 # ------------------------------------------------------------------
 
-# Which item(s) trigger the automatic email/username/password collection
-# and auto-registration flow after payment is confirmed.
-IMD_TRIGGER_ITEMS = {"item2"}
+# All four iMD variants trigger the guided collection flow.
+IMD_TRIGGER_ITEMS = {"imd_new_6m", "imd_new_1y", "imd_renew_6m", "imd_renew_1y"}
+IMD_NEW_ITEMS = {"imd_new_6m", "imd_new_1y"}
+IMD_RENEW_ITEMS = {"imd_renew_6m", "imd_renew_1y"}
 
-IMD_REGISTRATION_URL = "https://imedicaldoctor.net/register/index.php"
+# Maps each item id to which serial pool it should draw from.
+IMD_DURATION_MAP = {
+    "imd_new_6m": "6m",
+    "imd_new_1y": "1y",
+    "imd_renew_6m": "6m",
+    "imd_renew_1y": "1y",
+}
 
-# Confirmed directly from the page's HTML source.
+IMD_REGISTER_URL = "https://imedicaldoctor.net/register/index.php"
+IMD_RENEW_URL = "https://imedicaldoctor.net/ess.php"
+
+# Confirmed directly from the register page's HTML source.
 # Real field names (not the visible labels): username, password,
 # passwordverify (no underscore), email, serial. There's also a required
 # hidden field, `register`, sent with an empty value.
-IMD_FORM_FIELD_MAP = {
+IMD_REGISTER_FIELD_MAP = {
     "username": "username",
     "password": "password",
     "verify_password": "passwordverify",
     "email": "email",
+    "serial": "serial",
+}
+
+# Confirmed directly from the renewal page's HTML source. Same field names
+# as the register page's username/serial, plus a required hidden field,
+# `extend`, submitted with an empty value.
+IMD_RENEW_FIELD_MAP = {
+    "username": "username",
     "serial": "serial",
 }
 
@@ -230,6 +251,80 @@ def db_init():
             conn.execute(f"ALTER TABLE orders ADD COLUMN {column} {coltype}")
         except sqlite3.OperationalError:
             pass  # column already exists
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS serials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            duration TEXT NOT NULL,
+            code TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'available',
+            used_for_order INTEGER,
+            used_at TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_add_serials(duration: str, codes: list) -> int:
+    """Adds serials to the pool. Duplicate codes are silently skipped
+    (UNIQUE constraint). Returns how many were actually added."""
+    conn = sqlite3.connect(DB_PATH)
+    added = 0
+    for code in codes:
+        try:
+            conn.execute(
+                "INSERT INTO serials (duration, code, status) VALUES (?, ?, 'available')",
+                (duration, code),
+            )
+            added += 1
+        except sqlite3.IntegrityError:
+            pass  # duplicate code, skip
+    conn.commit()
+    conn.close()
+    return added
+
+
+def db_count_serials(duration: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    count = conn.execute(
+        "SELECT COUNT(*) FROM serials WHERE duration = ? AND status = 'available'", (duration,)
+    ).fetchone()[0]
+    conn.close()
+    return count
+
+
+def db_pop_serial(duration: str):
+    """Reserves one available serial for this duration (marks it 'pending'
+    so it can't be double-assigned). Returns (serial_id, code) or None if
+    the pool is empty. Call db_finalize_serial afterward to either confirm
+    it as used or release it back to available."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT id, code FROM serials WHERE duration = ? AND status = 'available' ORDER BY id LIMIT 1",
+        (duration,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return None
+    serial_id, code = row
+    conn.execute("UPDATE serials SET status = 'pending' WHERE id = ?", (serial_id,))
+    conn.commit()
+    conn.close()
+    return serial_id, code
+
+
+def db_finalize_serial(serial_id: int, order_id: int, success: bool):
+    conn = sqlite3.connect(DB_PATH)
+    if success:
+        conn.execute(
+            "UPDATE serials SET status = 'used', used_for_order = ?, used_at = ? WHERE id = ?",
+            (order_id, datetime.utcnow().isoformat(), serial_id),
+        )
+    else:
+        conn.execute("UPDATE serials SET status = 'available' WHERE id = ?", (serial_id,))
     conn.commit()
     conn.close()
 
@@ -313,11 +408,46 @@ def cart_total(cart: dict) -> float:
 def menu_keyboard() -> InlineKeyboardMarkup:
     rows = []
     for item_id, (name, price) in MENU.items():
+        if item_id in IMD_TRIGGER_ITEMS:
+            continue  # shown via the "🎓 iMD VIP" submenu button instead
         rows.append(
             [InlineKeyboardButton(f"{name} — {CURRENCY}{price:.2f}", callback_data=f"add:{item_id}")]
         )
+    rows.append([InlineKeyboardButton("🎓 iMD VIP", callback_data="imd_menu")])
     rows.append([InlineKeyboardButton("🛒 View Cart / Checkout", callback_data="view_cart")])
     return InlineKeyboardMarkup(rows)
+
+
+async def imd_menu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the New Account / Renew Account choice."""
+    query = update.callback_query
+    await query.answer()
+    buttons = [
+        [InlineKeyboardButton("🆕 Buy New Account", callback_data="imd_type:new")],
+        [InlineKeyboardButton("🔄 Renew Previous Account", callback_data="imd_type:renew")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu")],
+    ]
+    await query.edit_message_text("iMD VIP — what would you like to do?", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def imd_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the 6 months / 1 year choice for the chosen type."""
+    query = update.callback_query
+    await query.answer()
+    imd_type = query.data.split(":", 1)[1]  # "new" or "renew"
+
+    six_month_id = f"imd_{imd_type}_6m"
+    one_year_id = f"imd_{imd_type}_1y"
+    six_month_price = MENU[six_month_id][1]
+    one_year_price = MENU[one_year_id][1]
+
+    buttons = [
+        [InlineKeyboardButton(f"6 Months — {CURRENCY}{six_month_price:.2f}", callback_data=f"add:{six_month_id}")],
+        [InlineKeyboardButton(f"1 Year — {CURRENCY}{one_year_price:.2f}", callback_data=f"add:{one_year_id}")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="imd_menu")],
+    ]
+    label = "New Account" if imd_type == "new" else "Renew Previous Account"
+    await query.edit_message_text(f"iMD VIP — {label}. Choose a duration:", reply_markup=InlineKeyboardMarkup(buttons))
 
 
 # Persistent bottom keyboard labels (must match exactly between the keyboard
@@ -626,18 +756,7 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
         )
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
 
-        if any(item_id in IMD_TRIGGER_ITEMS for item_id in items):
-            customer_data = context.application.user_data[user_id]
-            customer_data["awaiting_registration_field"] = "email"
-            customer_data["registration_order"] = order_id
-            customer_data["registration_data"] = {}
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "🎓 Let's set up your iMD account. Please fill this form to register:\n\n"
-                    "Reply with your email address:"
-                ),
-            )
+        await start_imd_collection(context, order_id, user_id, items)
 
 
 async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -767,25 +886,9 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
         )
 
-        # If this order includes an iMD item, start the guided form collection
-        # (email -> username -> password) with the customer.
+        # If this order includes an iMD item, start the guided form collection.
         items = json.loads(items_json)
-        if any(item_id in IMD_TRIGGER_ITEMS for item_id in items):
-            # Set the flag on the CUSTOMER's user_data (not the admin's) —
-            # context.application.user_data lets us reach into any user's
-            # data store from here, since this handler runs in the admin's
-            # context.
-            customer_data = context.application.user_data[user_id]
-            customer_data["awaiting_registration_field"] = "email"
-            customer_data["registration_order"] = order_id
-            customer_data["registration_data"] = {}
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "🎓 Let's set up your iMD account. Please fill this form to register:\n\n"
-                    "Reply with your email address:"
-                ),
-            )
+        await start_imd_collection(context, order_id, user_id, items)
 
     elif action == "admin_reject":
         db_update_status(order_id, "rejected")
@@ -811,24 +914,60 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if update.effective_user.id == ADMIN_CHAT_ID:
-        if context.user_data.get("awaiting_serial_for_order") or context.user_data.get(
-            "awaiting_credentials_for_order"
-        ):
+        if context.user_data.get("awaiting_credentials_for_order"):
             await credentials_reply(update, context)
             return
 
 
+async def start_imd_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int, items: dict):
+    """Kicks off the customer-facing form collection for an iMD order —
+    email/username/password for a new account, or just the previous
+    username for a renewal."""
+    imd_item = next((i for i in items if i in IMD_TRIGGER_ITEMS), None)
+    if not imd_item:
+        return
+
+    is_renew = imd_item in IMD_RENEW_ITEMS
+    duration = IMD_DURATION_MAP[imd_item]
+
+    # context.application.user_data lets us reach into the CUSTOMER's data
+    # store from here, even though this often runs in the admin's context.
+    customer_data = context.application.user_data[user_id]
+    customer_data["registration_order"] = order_id
+    customer_data["registration_data"] = {}
+    customer_data["registration_is_renew"] = is_renew
+    customer_data["registration_duration"] = duration
+
+    if is_renew:
+        customer_data["awaiting_registration_field"] = "prev_username"
+        text = "🎓 Let's renew your iMD account.\n\nReply with your previous username:"
+    else:
+        customer_data["awaiting_registration_field"] = "email"
+        text = "🎓 Let's set up your iMD account. Please fill this form to register:\n\nReply with your email address:"
+
+    await context.bot.send_message(chat_id=user_id, text=text)
+
+
 async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Collects email -> username -> password from the customer, one message
-    at a time, after an iMD order is confirmed."""
+    """Collects the iMD form fields from the customer, one message at a
+    time — either email -> username -> password (new account) or just
+    previous username (renewal)."""
     field = context.user_data.get("awaiting_registration_field")
     if not field:
         return  # not in the middle of registration
 
+    is_renew = context.user_data.get("registration_is_renew", False)
     value = update.message.text.strip()
     data = context.user_data.setdefault("registration_data", {})
     data[field] = value
 
+    if is_renew:
+        # Only one field to collect for a renewal.
+        if field == "prev_username":
+            await finish_imd_collection(update, context, data)
+        return
+
+    # New account: three fields in sequence.
     if field == "email":
         context.user_data["awaiting_registration_field"] = "username"
         await update.message.reply_text("Desired username:")
@@ -840,40 +979,64 @@ async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT
         return
 
     if field == "password":
-        order_id = context.user_data.pop("registration_order", None)
-        context.user_data.pop("awaiting_registration_field", None)
-        context.user_data.pop("registration_data", None)
+        await finish_imd_collection(update, context, data)
 
-        await update.message.reply_text(
-            "Thanks! We're setting up your account now — you'll get your login details here shortly."
+
+async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict):
+    """Common finish step for both the new-account and renewal collection
+    flows: notify the admin with a one-tap 'complete this' button. The
+    serial is pulled automatically from the pool when that button is
+    tapped — the admin doesn't need to type one in."""
+    order_id = context.user_data.pop("registration_order", None)
+    is_renew = context.user_data.pop("registration_is_renew", False)
+    duration = context.user_data.pop("registration_duration", None)
+    context.user_data.pop("awaiting_registration_field", None)
+    context.user_data.pop("registration_data", None)
+
+    await update.message.reply_text(
+        "Thanks! We're setting up your account now — you'll get your login details here shortly."
+    )
+
+    if not order_id or not ADMIN_CHAT_ID:
+        return
+
+    context.application.bot_data.setdefault("pending_registrations", {})[order_id] = {
+        **data,
+        "is_renew": is_renew,
+        "duration": duration,
+    }
+
+    available = db_count_serials(duration)
+    duration_label = "1 Year" if duration == "1y" else "6 Months"
+
+    if is_renew:
+        summary = f"Previous username: {data.get('prev_username')}"
+        action_label = "✅ Complete Renewal"
+    else:
+        summary = (
+            f"Email: {data.get('email')}\n"
+            f"Username: {data.get('username')}\n"
+            f"Password: {data.get('password')}"
         )
+        action_label = "✅ Complete Registration"
 
-        if not order_id or not ADMIN_CHAT_ID:
-            return
-
-        # Stash the collected info where the admin can pick it up once
-        # they've registered the account manually. bot_data is shared
-        # across all users, unlike user_data.
-        context.application.bot_data.setdefault("pending_registrations", {})[order_id] = data
-
-        await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=(
-                f"🎓 iMD registration request — Order #{order_id}\n\n"
-                f"Email: {data.get('email')}\n"
-                f"Username: {data.get('username')}\n"
-                f"Password: {data.get('password')}\n\n"
-                "Tap below when you have a serial ready to complete registration."
-            ),
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔐 Enter Serial & Register", callback_data=f"reg_serial:{order_id}")]]
-            ),
-        )
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=(
+            f"🎓 iMD {'renewal' if is_renew else 'registration'} request — Order #{order_id}\n"
+            f"Duration: {duration_label} ({available} serials available)\n\n"
+            f"{summary}"
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(action_label, callback_data=f"reg_go:{order_id}")]]
+        ),
+    )
 
 
-async def reg_serial_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin tapped 'Enter Serial & Register' — wait for their next message
-    to be the serial number for this order."""
+async def reg_go(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped 'Complete Registration'/'Complete Renewal'. Pulls a
+    serial automatically from the pool matching this order's duration —
+    no manual serial entry needed."""
     query = update.callback_query
     if query.from_user.id != ADMIN_CHAT_ID:
         await query.answer("Not authorized.", show_alert=True)
@@ -881,22 +1044,89 @@ async def reg_serial_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     order_id = int(query.data.split(":", 1)[1])
-    context.user_data["awaiting_serial_for_order"] = order_id
-    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"Send the serial for order #{order_id}.")
+    pending = context.application.bot_data.get("pending_registrations", {})
+    data = pending.get(order_id)
+
+    if not data:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"No pending registration data found for order #{order_id}.")
+        return
+
+    duration = data.get("duration")
+    is_renew = data.get("is_renew")
+
+    popped = db_pop_serial(duration)
+    if not popped:
+        duration_label = "1 Year" if duration == "1y" else "6 Months"
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=(
+                f"⚠️ No available {duration_label} serials in stock for order #{order_id}.\n"
+                f"Add more with /addserials {duration} <code1> <code2> ... then tap the button again."
+            ),
+        )
+        return
+
+    serial_id, serial_code = popped
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="Attempting registration...")
+
+    if is_renew:
+        success, detail = await attempt_imd_action(
+            IMD_RENEW_URL, IMD_RENEW_FIELD_MAP, {"username": data.get("prev_username"), "serial": serial_code}
+        )
+    else:
+        success, detail = await attempt_imd_action(
+            IMD_REGISTER_URL,
+            IMD_REGISTER_FIELD_MAP,
+            {
+                "username": data.get("username"),
+                "password": data.get("password"),
+                "verify_password": data.get("password"),
+                "email": data.get("email"),
+                "serial": serial_code,
+            },
+        )
+
+    order = db_get_order(order_id)
+    customer_user_id = order[1] if order else None
+
+    if success:
+        pending.pop(order_id, None)
+        db_finalize_serial(serial_id, order_id, success=True)
+
+        if is_renew:
+            delivery_message = build_imd_delivery_message(data.get("prev_username"), password=None)
+        else:
+            delivery_message = build_imd_delivery_message(data.get("username"), data.get("password"))
+
+        db_save_delivery(order_id, delivery_message)
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID, text=f"✅ {'Renewal' if is_renew else 'Registration'} finished. Serial used: {serial_code}\n\n{detail}"
+        )
+        if customer_user_id:
+            await context.bot.send_message(chat_id=customer_user_id, text=delivery_message)
+    else:
+        db_finalize_serial(serial_id, order_id, success=False)  # return serial to pool
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=(
+                f"⚠️ Attempt did not clearly succeed for order #{order_id} — serial {serial_code} "
+                f"was returned to the pool. Check the response below, or handle manually.\n\n{detail}"
+            ),
+        )
 
 
-async def attempt_imd_registration(email: str, username: str, password: str, serial: str):
-    """Automatic submission to iMD's registration form using a real headless
-    Chromium browser (via Playwright), since a plain HTTP POST is blocked
-    by Cloudflare. Returns (success: bool, detail: str).
+async def attempt_imd_action(url: str, field_map: dict, values: dict):
+    """Automatic form submission using a real headless Chromium browser
+    (via Playwright), since plain HTTP requests are blocked by Cloudflare.
+    Shared by both registration (register/index.php) and renewal
+    (ess.php) — the only difference is the URL, field map, and values.
 
     Note: the post-submit page can still show a Cloudflare interstitial
-    even when the registration itself went through server-side (confirmed
-    by testing — accounts were created despite this page showing). So a
-    lingering 'Just a moment' title after submit is NOT treated as a
-    failure here; only an actual exception (network error, timeout, field
-    not found, etc.) counts as one. The response snippet is still returned
-    for the admin's own reference in case something looks genuinely wrong."""
+    even when the action itself went through server-side (confirmed by
+    testing on the registration flow — accounts were created despite
+    this page showing). So a lingering 'Just a moment' title after
+    submit is NOT treated as a failure; only an actual exception counts.
+    Returns (success: bool, detail: str)."""
     from playwright.async_api import async_playwright
 
     try:
@@ -914,10 +1144,8 @@ async def attempt_imd_registration(email: str, username: str, password: str, ser
             )
             page = await context.new_page()
 
-            await page.goto(IMD_REGISTRATION_URL, wait_until="networkidle", timeout=30000)
+            await page.goto(url, wait_until="networkidle", timeout=30000)
 
-            # Give Cloudflare's JS challenge time to run and redirect through
-            # before we try to interact with the form itself.
             for _ in range(4):
                 title = await page.title()
                 if "Just a moment" not in title:
@@ -930,18 +1158,13 @@ async def attempt_imd_registration(email: str, username: str, password: str, ser
                 await browser.close()
                 return False, f"Still blocked by Cloudflare before the form loaded. Title: {title}\n{content[:500]}"
 
-            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["username"]}"]', username)
-            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["password"]}"]', password)
-            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["verify_password"]}"]', password)
-            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["email"]}"]', email)
-            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["serial"]}"]', serial)
+            for key, field_name in field_map.items():
+                if key in values and values[key] is not None:
+                    await page.fill(f'input[name="{field_name}"]', values[key])
 
             await page.click("#submit")
             await page.wait_for_load_state("networkidle", timeout=30000)
 
-            # Give a post-submit Cloudflare interstitial a chance to clear
-            # too, purely for a cleaner response snippet — doesn't affect
-            # the success/failure outcome below.
             for _ in range(3):
                 result_title = await page.title()
                 if "Just a moment" not in result_title:
@@ -959,14 +1182,16 @@ async def attempt_imd_registration(email: str, username: str, password: str, ser
         return False, f"Browser automation failed: {exc}"
 
 
-def build_imd_delivery_message(username: str, password: str) -> str:
-    """The exact account-delivery message format used for iMD orders."""
+def build_imd_delivery_message(username: str, password: str = None) -> str:
+    """The exact account-delivery message format used for iMD orders.
+    Omits the password line for renewals (password param left as None)."""
     date_str = datetime.now().strftime("%Y-%m-%d")
+    password_line = f"Password: {password}\n" if password else ""
     return (
         "✅ IMD 1 year Full Access \n\n"
         f"Date: {date_str}\n\n"
         f"Username: {username}\n"
-        f"Password: {password}\n\n"
+        f"{password_line}\n"
         "⭕️ This account is restricted to simultaneous use on a single device. "
         "Device changes are permitted; however, logging in on a new device will "
         "automatically terminate the session on the previous one.\n\n"
@@ -999,46 +1224,12 @@ async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catches the admin's next text message. Two things it might be:
-    the serial for an iMD auto-registration, or manual credentials to
-    forward for any other order."""
+    """Catches the admin's next text message after tapping 'Send Credentials'
+    (the generic manual delivery flow for non-iMD products) and forwards
+    it to the customer as their account details."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
-    # Case 1: admin is providing a serial to complete an iMD registration.
-    serial_order_id = context.user_data.get("awaiting_serial_for_order")
-    if serial_order_id:
-        context.user_data.pop("awaiting_serial_for_order", None)
-        serial = update.message.text.strip()
-
-        pending = context.application.bot_data.get("pending_registrations", {})
-        data = pending.pop(serial_order_id, None)
-        if not data:
-            await update.message.reply_text(f"No pending registration data found for order #{serial_order_id}.")
-            return
-
-        await update.message.reply_text("Attempting registration...")
-        success, detail = await attempt_imd_registration(
-            data.get("email"), data.get("username"), data.get("password"), serial
-        )
-
-        order = db_get_order(serial_order_id)
-        customer_user_id = order[1] if order else None
-
-        if success:
-            delivery_message = build_imd_delivery_message(data.get("username"), data.get("password"))
-            db_save_delivery(serial_order_id, delivery_message)
-            await update.message.reply_text(f"✅ Registration attempt finished.\n\n{detail}")
-            if customer_user_id:
-                await context.bot.send_message(chat_id=customer_user_id, text=delivery_message)
-        else:
-            await update.message.reply_text(
-                f"⚠️ Registration attempt did not clearly succeed — check the response below, "
-                f"or register manually for this customer.\n\n{detail}"
-            )
-        return
-
-    # Case 2: manual credential delivery (existing flow, any other product).
     order_id = context.user_data.get("awaiting_credentials_for_order")
     if not order_id:
         return  # admin isn't in the middle of delivering anything
@@ -1059,6 +1250,51 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_save_delivery(order_id, credentials_text)
     context.user_data.pop("awaiting_credentials_for_order", None)
     await update.message.reply_text(f"✅ Credentials sent to the customer for order #{order_id}.")
+
+
+async def add_serials_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: /addserials <6m|1y> <code1> <code2> ... — bulk-adds
+    serials to the auto-assignment pool. Codes can be separated by spaces
+    or pasted on separate lines in the same message."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /addserials <6m|1y> <code1> <code2> ...\n"
+            "You can paste many codes at once, one per line or space-separated."
+        )
+        return
+
+    duration_arg = context.args[0].lower()
+    if duration_arg in ("6m", "6month", "6months"):
+        duration = "6m"
+    elif duration_arg in ("1y", "1year", "12m"):
+        duration = "1y"
+    else:
+        await update.message.reply_text("Duration must be '6m' or '1y'.")
+        return
+
+    codes = context.args[1:]
+    added = db_add_serials(duration, codes)
+    total_available = db_count_serials(duration)
+    duration_label = "1 Year" if duration == "1y" else "6 Months"
+    await update.message.reply_text(
+        f"Added {added} new {duration_label} serial(s) (duplicates skipped).\n"
+        f"Total available now: {total_available}"
+    )
+
+
+async def serials_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: /serials — shows how many serials are left in each pool."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    six_month = db_count_serials("6m")
+    one_year = db_count_serials("1y")
+    await update.message.reply_text(
+        f"Available serials:\n6 Months: {six_month}\n1 Year: {one_year}"
+    )
 
 
 async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1208,10 +1444,14 @@ def main():
     app.add_handler(CommandHandler("customers", customer_history))
     app.add_handler(CommandHandler("customer", customer_lookup))
     app.add_handler(CommandHandler("order", order_lookup))
+    app.add_handler(CommandHandler("addserials", add_serials_command))
+    app.add_handler(CommandHandler("serials", serials_status))
     app.add_handler(CallbackQueryHandler(order_action, pattern=r"^(paid|cancel):"))
     app.add_handler(CallbackQueryHandler(admin_action, pattern=r"^admin_(confirm|reject):"))
     app.add_handler(CallbackQueryHandler(deliver_start, pattern=r"^deliver:"))
-    app.add_handler(CallbackQueryHandler(reg_serial_start, pattern=r"^reg_serial:"))
+    app.add_handler(CallbackQueryHandler(reg_go, pattern=r"^reg_go:"))
+    app.add_handler(CallbackQueryHandler(imd_menu_start, pattern=r"^imd_menu$"))
+    app.add_handler(CallbackQueryHandler(imd_type_selected, pattern=r"^imd_type:"))
     app.add_handler(CallbackQueryHandler(pay_with_stars, pattern=r"^pay_stars:"))
     app.add_handler(CallbackQueryHandler(local_pay_start, pattern=r"^local_pay:"))
     app.add_handler(CallbackQueryHandler(local_country_selected, pattern=r"^local_country:"))
