@@ -34,8 +34,6 @@ import os
 import sqlite3
 from datetime import datetime
 
-import httpx
-
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -78,22 +76,19 @@ MENU = {
 }
 
 # ------------------------------------------------------------------
-# iMD AUTO-REGISTRATION
+# iMD FORM COLLECTION
 # ------------------------------------------------------------------
 
 # Which item(s) trigger the automatic email/username/password collection
-# and (optionally) auto-registration flow after payment is confirmed.
+# and auto-registration flow after payment is confirmed.
 IMD_TRIGGER_ITEMS = {"item2"}
 
-IMD_REGISTRATION_URL = "https://imedicaldoctor.net/register/"
+IMD_REGISTRATION_URL = "https://imedicaldoctor.net/register/index.php"
 
-# Confirmed directly from the page's HTML source (2026-08-17).
-# No CSRF token present. There IS a required hidden field, `register`,
-# submitted with an empty value — included below.
-# Note: the page also loads Cloudflare's bot-challenge script. That may or
-# may not block a plain form POST depending on their security settings —
-# the response preview after each attempt will show if that's happening
-# (e.g. an HTML challenge page instead of a normal response).
+# Confirmed directly from the page's HTML source.
+# Real field names (not the visible labels): username, password,
+# passwordverify (no underscore), email, serial. There's also a required
+# hidden field, `register`, sent with an empty value.
 IMD_FORM_FIELD_MAP = {
     "username": "username",
     "password": "password",
@@ -856,8 +851,9 @@ async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT
         if not order_id or not ADMIN_CHAT_ID:
             return
 
-        # Stash the collected info where the admin's later reply (the serial)
-        # can find it. bot_data is shared across all users, unlike user_data.
+        # Stash the collected info where the admin can pick it up once
+        # they've registered the account manually. bot_data is shared
+        # across all users, unlike user_data.
         context.application.bot_data.setdefault("pending_registrations", {})[order_id] = data
 
         await context.bot.send_message(
@@ -891,14 +887,8 @@ async def reg_serial_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def attempt_imd_registration(email: str, username: str, password: str, serial: str):
     """Automatic submission to iMD's registration form using a real headless
-    Chromium browser (via Playwright), since the site's Cloudflare
-    bot-protection blocks plain HTTP requests (confirmed: a direct httpx
-    POST got an HTTP 403 'Just a moment...' challenge page instead of
-    reaching the form). A real browser can execute Cloudflare's JS
-    challenge; a bare POST cannot. This still isn't guaranteed to work —
-    Cloudflare can also detect headless browsers — but it's the only
-    realistic way to get past this specific block.
-    Returns (success: bool, detail: str)."""
+    Chromium browser (via Playwright), since a plain HTTP POST is blocked
+    by Cloudflare. Returns (success: bool, detail: str)."""
     from playwright.async_api import async_playwright
 
     try:
@@ -1015,8 +1005,8 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
         else:
             await update.message.reply_text(
-                f"⚠️ Registration attempt did not clearly succeed — check the response below and "
-                f"verify IMD_FORM_FIELD_MAP field names, or register manually for this customer.\n\n{detail}"
+                f"⚠️ Registration attempt did not clearly succeed — check the response below, "
+                f"or register manually for this customer.\n\n{detail}"
             )
         return
 
