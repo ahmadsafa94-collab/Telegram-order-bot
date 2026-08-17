@@ -1219,9 +1219,8 @@ async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT
 
 async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict):
     """Common finish step for both the new-account and renewal collection
-    flows: notify the admin with a one-tap 'complete this' button. The
-    serial is pulled automatically from the pool when that button is
-    tapped — the admin doesn't need to type one in."""
+    flows. Runs the registration/renewal immediately — no admin tap
+    needed — and just reports the outcome to the admin afterward."""
     order_id = context.user_data.pop("registration_order", None)
     is_renew = context.user_data.pop("registration_is_renew", False)
     duration = context.user_data.pop("registration_duration", None)
@@ -1232,7 +1231,7 @@ async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TY
         "Thanks! We're setting up your account now — you'll get your login details here shortly."
     )
 
-    if not order_id or not ADMIN_CHAT_ID:
+    if not order_id:
         return
 
     context.application.bot_data.setdefault("pending_registrations", {})[order_id] = {
@@ -1241,37 +1240,30 @@ async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TY
         "duration": duration,
     }
 
-    available = db_count_serials(duration)
-    duration_label = "1 Year" if duration == "1y" else "6 Months"
-
-    if is_renew:
-        summary = f"Previous username: {data.get('prev_username')}"
-        action_label = "✅ Complete Renewal"
-    else:
-        summary = (
-            f"Email: {data.get('email')}\n"
-            f"Username: {data.get('username')}\n"
-            f"Password: {data.get('password')}"
+    if ADMIN_CHAT_ID:
+        duration_label = "1 Year" if duration == "1y" else "6 Months"
+        if is_renew:
+            summary = f"Previous username: {data.get('prev_username')}"
+        else:
+            summary = (
+                f"Email: {data.get('email')}\n"
+                f"Username: {data.get('username')}\n"
+                f"Password: {data.get('password')}"
+            )
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=(
+                f"🎓 iMD {'renewal' if is_renew else 'registration'} — Order #{order_id}\n"
+                f"Duration: {duration_label}\n\n"
+                f"{summary}\n\nRunning automatically..."
+            ),
         )
-        action_label = "✅ Complete Registration"
 
-    await context.bot.send_message(
-        chat_id=ADMIN_CHAT_ID,
-        text=(
-            f"🎓 iMD {'renewal' if is_renew else 'registration'} request — Order #{order_id}\n"
-            f"Duration: {duration_label} ({available} serials available)\n\n"
-            f"{summary}"
-        ),
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton(action_label, callback_data=f"reg_go:{order_id}")]]
-        ),
-    )
+    await run_imd_registration(context, order_id)
 
 
 async def reg_go(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin tapped 'Complete Registration'/'Complete Renewal'. Pulls a
-    serial automatically from the pool matching this order's duration —
-    no manual serial entry needed."""
+    """Admin tapped the retry button on a previous failure."""
     query = update.callback_query
     if query.from_user.id != ADMIN_CHAT_ID:
         await query.answer("Not authorized.", show_alert=True)
@@ -1279,11 +1271,20 @@ async def reg_go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     order_id = int(query.data.split(":", 1)[1])
+    await run_imd_registration(context, order_id)
+
+
+async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int):
+    """Pulls a serial from the pool matching this order's duration and
+    performs the registration or renewal, then handles the outcome."""
     pending = context.application.bot_data.get("pending_registrations", {})
     data = pending.get(order_id)
 
     if not data:
-        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"No pending registration data found for order #{order_id}.")
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID, text=f"No pending registration data found for order #{order_id}."
+            )
         return
 
     duration = data.get("duration")
@@ -1292,17 +1293,20 @@ async def reg_go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     popped = db_pop_serial(duration)
     if not popped:
         duration_label = "1 Year" if duration == "1y" else "6 Months"
-        await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=(
-                f"⚠️ No available {duration_label} serials in stock for order #{order_id}.\n"
-                f"Add more with /addserials {duration} <code1> <code2> ... then tap the button again."
-            ),
-        )
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    f"⚠️ No available {duration_label} serials in stock for order #{order_id}.\n"
+                    f"Add some via ➕ Add Serials, then tap Retry below."
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔁 Retry", callback_data=f"reg_go:{order_id}")]]
+                ),
+            )
         return
 
     serial_id, serial_code = popped
-    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="Attempting registration...")
 
     if is_renew:
         status, detail, page_text = await attempt_imd_action(
