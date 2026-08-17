@@ -294,7 +294,18 @@ def menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(f"{name} — {CURRENCY}{price:.2f}", callback_data=f"add:{item_id}")]
         )
     rows.append([InlineKeyboardButton("🛒 View Cart / Checkout", callback_data="view_cart")])
+    rows.append([InlineKeyboardButton("⬅️ Main Menu", callback_data="main_menu")])
     return InlineKeyboardMarkup(rows)
+
+
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🛒 Buy New Subscription", callback_data="show_menu")],
+            [InlineKeyboardButton("📋 My Subscriptions", callback_data="view_my_subs")],
+            [InlineKeyboardButton("🆘 Support", url="https://t.me/uptodate_admin")],
+        ]
+    )
 
 
 def cart_keyboard() -> InlineKeyboardMarkup:
@@ -325,9 +336,35 @@ def admin_review_keyboard(order_id: int) -> InlineKeyboardMarkup:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault("cart", {})
     await update.message.reply_text(
-        "Welcome! Tap an item below to add it to your order.",
-        reply_markup=menu_keyboard(),
+        "Welcome! What would you like to do?",
+        reply_markup=main_menu_keyboard(),
     )
+
+
+async def main_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the three top-level buttons: Buy, My Subscriptions, and
+    navigating back to this menu from elsewhere."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "show_menu":
+        context.user_data.setdefault("cart", {})
+        await query.edit_message_text(
+            "Tap an item below to add it to your order.", reply_markup=menu_keyboard()
+        )
+
+    elif query.data == "view_my_subs":
+        rows = db_user_orders(query.from_user.id)
+        back_button = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu", callback_data="main_menu")]])
+        if not rows:
+            await query.edit_message_text("You have no orders yet.", reply_markup=back_button)
+            return
+        lines = [f"#{order_id} — {CURRENCY}{total:.2f} — {status}" for order_id, items_json, total, status, created_at in rows]
+        text = "Your recent orders:\n" + "\n".join(lines)
+        await query.edit_message_text(text, reply_markup=back_button)
+
+    elif query.data == "main_menu":
+        await query.edit_message_text("Welcome! What would you like to do?", reply_markup=main_menu_keyboard())
 
 
 async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -897,6 +934,7 @@ def main():
     app.add_handler(CallbackQueryHandler(local_country_selected, pattern=r"^local_country:"))
     app.add_handler(CallbackQueryHandler(pay_crypto, pattern=r"^pay_crypto:"))
     app.add_handler(CallbackQueryHandler(back_to_checkout, pattern=r"^back_to_checkout:"))
+    app.add_handler(CallbackQueryHandler(main_menu_button, pattern=r"^(show_menu|view_my_subs|main_menu)$"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, receipt_photo))
