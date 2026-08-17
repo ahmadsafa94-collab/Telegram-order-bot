@@ -165,6 +165,67 @@ IMD_EMAIL_ERROR_KEYWORDS = [
     "email address is",
 ]
 
+# ------------------------------------------------------------------
+# NON-iMD SUBSCRIPTIONS
+# ------------------------------------------------------------------
+# Everything that isn't iMD is fulfilled manually within 48 hours. The
+# bot still collects the customer's details up front so the admin has
+# everything needed.
+
+GENERIC_PASSWORD_SYMBOLS = "@_#$"
+
+GENERIC_RULES_TEXT = (
+    "• Username: at least 6 characters\n"
+    "• Password: at least 8 characters, including at least one number, "
+    f"one capital letter, and one symbol from {GENERIC_PASSWORD_SYMBOLS}"
+)
+
+DELIVERY_48H_MESSAGE = (
+    "✅ Thanks! Your subscription will be delivered here within the next 48 hours.\n\n"
+    "If you haven't heard from us after 48 hours, please contact support from the menu."
+)
+
+# The fields collected for non-iMD subscriptions, in order.
+GENERIC_FIELDS = [
+    ("first_name", "First name:"),
+    ("last_name", "Last name:"),
+    ("email", "Email address:"),
+    ("username", "Desired username (at least 6 characters):"),
+    (
+        "password",
+        "Desired password (at least 8 characters, with at least one number, "
+        f"one capital letter, and one symbol from {GENERIC_PASSWORD_SYMBOLS}):",
+    ),
+]
+
+
+def validate_generic_username(value: str):
+    """Returns None if valid, or an error message explaining the rule."""
+    if len(value) < 6:
+        return "Username must be at least 6 characters long. Please choose another one:"
+    return None
+
+
+def validate_generic_password(value: str):
+    """Returns None if valid, or an error message explaining the rules."""
+    problems = []
+    if len(value) < 8:
+        problems.append("at least 8 characters")
+    if not any(c.isdigit() for c in value):
+        problems.append("at least one number")
+    if not any(c.isupper() for c in value):
+        problems.append("at least one capital letter")
+    if not any(c in GENERIC_PASSWORD_SYMBOLS for c in value):
+        problems.append(f"at least one symbol from {GENERIC_PASSWORD_SYMBOLS}")
+    if problems:
+        return (
+            "That password doesn't meet the requirements. It needs "
+            + ", ".join(problems)
+            + ".\n\nPlease choose another password:"
+        )
+    return None
+
+
 # Payment instructions shown to the customer at checkout.
 PAYMENT_INSTRUCTIONS = (
     "Choose how you'd like to pay below.\n\n"
@@ -437,6 +498,20 @@ def db_update_status(order_id: int, status: str):
     conn.close()
 
 
+def db_user_delivered_orders(user_id: int):
+    """Orders for this customer that have actually been delivered, with the
+    exact message that was sent — used to power 'My Subscriptions'."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, items_json, credentials, delivered_at FROM orders "
+        "WHERE user_id = ? AND credentials IS NOT NULL AND credentials != '' "
+        "ORDER BY id DESC",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
 def db_user_orders(user_id: int, limit: int = 5):
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
@@ -519,6 +594,7 @@ async def imd_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # and the handler that checks incoming text against them).
 BUY_LABEL = "🛒 Buy New Subscription"
 MY_SUBS_LABEL = "📋 My Subscriptions"
+BASKET_LABEL = "🧺 Check the Basket and Pay"
 SUPPORT_LABEL = "🆘 Support"
 
 # Admin-only panel labels.
@@ -540,7 +616,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     """A persistent keyboard pinned to the bottom of the chat — stays visible
     across every message, not just the one it was attached to."""
     return ReplyKeyboardMarkup(
-        [[BUY_LABEL, MY_SUBS_LABEL], [SUPPORT_LABEL]],
+        [[BUY_LABEL, MY_SUBS_LABEL], [BASKET_LABEL], [SUPPORT_LABEL]],
         resize_keyboard=True,
     )
 
@@ -559,14 +635,20 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def cart_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("➕ Add more items", callback_data="back_to_menu")],
-            [InlineKeyboardButton("🗑 Clear cart", callback_data="clear_cart")],
-            [InlineKeyboardButton("✅ Checkout", callback_data="checkout")],
-        ]
-    )
+def cart_keyboard(cart: dict = None) -> InlineKeyboardMarkup:
+    """Basket view: a remove button per item, plus add-more and checkout."""
+    rows = []
+    if cart:
+        for item_id, qty in cart.items():
+            name = MENU.get(item_id, (item_id, 0))[0]
+            rows.append(
+                [InlineKeyboardButton(f"❌ Remove {name} ({qty})", callback_data=f"remove:{item_id}")]
+            )
+    rows.append([InlineKeyboardButton("➕ Add more items", callback_data="back_to_menu")])
+    if cart:
+        rows.append([InlineKeyboardButton("🗑 Clear basket", callback_data="clear_cart")])
+        rows.append([InlineKeyboardButton("✅ Checkout", callback_data="checkout")])
+    return InlineKeyboardMarkup(rows)
 
 
 def admin_review_keyboard(order_id: int) -> InlineKeyboardMarkup:
@@ -610,15 +692,13 @@ async def main_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif text == MY_SUBS_LABEL:
-        rows = db_user_orders(update.effective_user.id)
-        if not rows:
-            await update.message.reply_text("You have no orders yet.")
-            return
-        lines = [
-            f"#{order_id} — {CURRENCY}{total:.2f} — {status}"
-            for order_id, items_json, total, status, created_at in rows
-        ]
-        await update.message.reply_text("Your recent orders:\n" + "\n".join(lines))
+        await show_my_subscriptions(update, context)
+
+    elif text == BASKET_LABEL:
+        cart = context.user_data.setdefault("cart", {})
+        await update.message.reply_text(
+            format_cart(cart), parse_mode=ParseMode.MARKDOWN, reply_markup=cart_keyboard(cart)
+        )
 
     elif text == SUPPORT_LABEL:
         await update.message.reply_text(
@@ -629,36 +709,124 @@ async def main_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists the customer's delivered subscriptions as buttons. Tapping one
+    replays the exact message they were originally sent."""
+    rows = db_user_delivered_orders(update.effective_user.id)
+
+    if not rows:
+        await update.message.reply_text(
+            "You don't have any active subscriptions yet.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Back", callback_data="subs_back")]]
+            ),
+        )
+        return
+
+    buttons = []
+    for order_id, items_json, credentials, delivered_at in rows:
+        items = json.loads(items_json)
+        names = ", ".join(MENU[i][0] for i in items if i in MENU) or f"Order #{order_id}"
+        label = f"{names}" + (f" ({delivered_at[:10]})" if delivered_at else "")
+        buttons.append([InlineKeyboardButton(label[:60], callback_data=f"mysub:{order_id}")])
+
+    await update.message.reply_text(
+        "Your subscriptions — tap one to see its details:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def my_subscription_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Replays the delivery message for one of the customer's subscriptions."""
     query = update.callback_query
     await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT credentials FROM orders WHERE id = ? AND user_id = ?",
+        (order_id, query.from_user.id),
+    ).fetchone()
+    conn.close()
+
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="subs_back")]])
+    if not row or not row[0]:
+        await query.edit_message_text("Details for that subscription aren't available.", reply_markup=back)
+        return
+
+    await query.edit_message_text(row[0], reply_markup=back)
+
+
+async def subs_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Back button from the subscriptions view."""
+    query = update.callback_query
+    await query.answer()
+    rows = db_user_delivered_orders(query.from_user.id)
+
+    if not rows:
+        await query.edit_message_text("You don't have any active subscriptions yet.")
+        return
+
+    buttons = []
+    for order_id, items_json, credentials, delivered_at in rows:
+        items = json.loads(items_json)
+        names = ", ".join(MENU[i][0] for i in items if i in MENU) or f"Order #{order_id}"
+        label = f"{names}" + (f" ({delivered_at[:10]})" if delivered_at else "")
+        buttons.append([InlineKeyboardButton(label[:60], callback_data=f"mysub:{order_id}")])
+
+    await query.edit_message_text(
+        "Your subscriptions — tap one to see its details:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
     data = query.data
     cart = context.user_data.setdefault("cart", {})
 
     if data.startswith("add:"):
+        # Answer with the toast text FIRST — Telegram only honours the first
+        # answerCallbackQuery per tap, so answering blankly up top would
+        # silently swallow this popup.
         item_id = data.split(":", 1)[1]
         cart[item_id] = cart.get(item_id, 0) + 1
-        name = MENU[item_id][0]
-        await query.answer(f"Added {name}", show_alert=False)
-
-    elif data == "view_cart":
-        await query.edit_message_text(format_cart(cart), parse_mode=ParseMode.MARKDOWN, reply_markup=cart_keyboard())
+        await query.answer("✅ Added to the basket", show_alert=False)
+        await query.edit_message_reply_markup(reply_markup=menu_keyboard())
         return
 
-    elif data == "back_to_menu":
+    await query.answer()
+
+    if data.startswith("remove:"):
+        item_id = data.split(":", 1)[1]
+        if item_id in cart:
+            cart[item_id] -= 1
+            if cart[item_id] <= 0:
+                del cart[item_id]
+        await query.edit_message_text(
+            format_cart(cart), parse_mode=ParseMode.MARKDOWN, reply_markup=cart_keyboard(cart)
+        )
+        return
+
+    if data == "view_cart":
+        await query.edit_message_text(
+            format_cart(cart), parse_mode=ParseMode.MARKDOWN, reply_markup=cart_keyboard(cart)
+        )
+        return
+
+    if data == "back_to_menu":
         await query.edit_message_text("Tap an item below to add it to your order.", reply_markup=menu_keyboard())
         return
 
-    elif data == "clear_cart":
+    if data == "clear_cart":
         cart.clear()
-        await query.edit_message_text("Cart cleared. Tap an item to start again.", reply_markup=menu_keyboard())
+        await query.edit_message_text("Basket cleared. Tap an item to start again.", reply_markup=menu_keyboard())
         return
 
-    elif data == "checkout":
+    if data == "checkout":
         await start_checkout(update, context)
         return
 
-    # after adding an item, refresh the menu view with a small confirmation
     await query.edit_message_reply_markup(reply_markup=menu_keyboard())
 
 
@@ -855,7 +1023,7 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
         )
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
 
-        await start_imd_collection(context, order_id, user_id, items)
+        await start_order_fulfilment(context, order_id, user_id, items)
 
 
 async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -987,7 +1155,7 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # If this order includes an iMD item, start the guided form collection.
         items = json.loads(items_json)
-        await start_imd_collection(context, order_id, user_id, items)
+        await start_order_fulfilment(context, order_id, user_id, items)
 
     elif action == "admin_reject":
         db_update_status(order_id, "rejected")
@@ -1135,6 +1303,10 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await registration_field_reply(update, context)
         return
 
+    if context.user_data.get("awaiting_generic_field"):
+        await generic_field_reply(update, context)
+        return
+
     if update.effective_user.id == ADMIN_CHAT_ID:
         # Panel-button follow-ups take priority — they're the most recent
         # thing the admin explicitly asked to do.
@@ -1146,14 +1318,127 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
 
-async def start_imd_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int, items: dict):
-    """Kicks off the customer-facing form collection for an iMD order —
-    email/username/password for a new account, or just the previous
-    username for a renewal."""
-    imd_item = next((i for i in items if i in IMD_TRIGGER_ITEMS), None)
-    if not imd_item:
+async def start_order_fulfilment(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int, items: dict):
+    """Builds the fulfilment queue for a paid order and starts the first
+    item. iMD items go first because they're delivered instantly; the
+    rest are collected one at a time afterwards and fulfilled manually
+    within 48 hours."""
+    imd_items = [i for i in items if i in IMD_TRIGGER_ITEMS]
+    other_items = [i for i in items if i not in IMD_TRIGGER_ITEMS]
+
+    queue = imd_items + other_items
+    if not queue:
         return
 
+    customer_data = context.application.user_data[user_id]
+    customer_data["fulfil_queue"] = queue
+    customer_data["fulfil_order_id"] = order_id
+
+    await process_next_in_queue(context, user_id)
+
+
+async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    """Starts collection for the next unfulfilled item, or wraps up if the
+    queue is empty."""
+    customer_data = context.application.user_data[user_id]
+    queue = customer_data.get("fulfil_queue") or []
+    order_id = customer_data.get("fulfil_order_id")
+
+    if not queue:
+        customer_data.pop("fulfil_queue", None)
+        customer_data.pop("fulfil_order_id", None)
+        return
+
+    item_id = queue.pop(0)
+    customer_data["fulfil_queue"] = queue
+    item_name = MENU.get(item_id, (item_id, 0))[0]
+
+    if item_id in IMD_TRIGGER_ITEMS:
+        await start_imd_collection(context, order_id, user_id, item_id)
+    else:
+        customer_data["generic_item_id"] = item_id
+        customer_data["generic_order_id"] = order_id
+        customer_data["generic_data"] = {}
+        customer_data["awaiting_generic_field"] = GENERIC_FIELDS[0][0]
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=(
+                f"📝 Now let's set up your *{item_name}*.\n\n"
+                f"Please provide the following:\n{GENERIC_RULES_TEXT}\n\n"
+                f"{GENERIC_FIELDS[0][1]}"
+            ),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+
+async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Collects first name, last name, email, username and password for a
+    non-iMD subscription, validating the username and password rules and
+    re-asking until they're satisfied."""
+    field = context.user_data.get("awaiting_generic_field")
+    if not field:
+        return
+
+    value = update.message.text.strip()
+
+    if field == "username":
+        error = validate_generic_username(value)
+        if error:
+            await update.message.reply_text(error)
+            return
+    elif field == "password":
+        error = validate_generic_password(value)
+        if error:
+            await update.message.reply_text(error)
+            return
+
+    data = context.user_data.setdefault("generic_data", {})
+    data[field] = value
+
+    field_names = [f[0] for f in GENERIC_FIELDS]
+    idx = field_names.index(field)
+
+    if idx + 1 < len(GENERIC_FIELDS):
+        next_field, next_prompt = GENERIC_FIELDS[idx + 1]
+        context.user_data["awaiting_generic_field"] = next_field
+        await update.message.reply_text(next_prompt)
+        return
+
+    # All fields collected — hand off to the admin for manual fulfilment.
+    order_id = context.user_data.pop("generic_order_id", None)
+    item_id = context.user_data.pop("generic_item_id", None)
+    context.user_data.pop("awaiting_generic_field", None)
+    context.user_data.pop("generic_data", None)
+
+    await update.message.reply_text(DELIVERY_48H_MESSAGE)
+
+    if ADMIN_CHAT_ID and order_id:
+        item_name = MENU.get(item_id, (item_id, 0))[0]
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=(
+                f"📝 Manual fulfilment needed — Order #{order_id}\n"
+                f"Product: {item_name}\n\n"
+                f"First name: {data.get('first_name')}\n"
+                f"Last name: {data.get('last_name')}\n"
+                f"Email: {data.get('email')}\n"
+                f"Username: {data.get('username')}\n"
+                f"Password: {data.get('password')}\n\n"
+                "Deliver within 48 hours using the 📤 Send Credentials button on this order."
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("📤 Send Credentials", callback_data=f"deliver:{order_id}")]]
+            ),
+        )
+
+    # Move on to the next item in this order, if any.
+    await process_next_in_queue(context, update.effective_user.id)
+
+
+async def start_imd_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int, imd_item: str):
+    """Kicks off the customer-facing form collection for an iMD item —
+    email/username/password for a new account, or just the previous
+    username for a renewal."""
     is_renew = imd_item in IMD_RENEW_ITEMS
     duration = IMD_DURATION_MAP[imd_item]
 
@@ -1356,6 +1641,8 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
         )
         if customer_user_id:
             await context.bot.send_message(chat_id=customer_user_id, text=delivery_message)
+            # This order may contain more items — move on to the next one.
+            await process_next_in_queue(context, customer_user_id)
         return
 
     # Everything below is a non-success: the serial goes back to the pool
@@ -1879,10 +2166,12 @@ def main():
     app.add_handler(CallbackQueryHandler(local_country_selected, pattern=r"^local_country:"))
     app.add_handler(CallbackQueryHandler(pay_crypto, pattern=r"^pay_crypto:"))
     app.add_handler(CallbackQueryHandler(back_to_checkout, pattern=r"^back_to_checkout:"))
+    app.add_handler(CallbackQueryHandler(my_subscription_detail, pattern=r"^mysub:"))
+    app.add_handler(CallbackQueryHandler(subs_back, pattern=r"^subs_back$"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, receipt_photo))
-    app.add_handler(MessageHandler(filters.Text([BUY_LABEL, MY_SUBS_LABEL, SUPPORT_LABEL]), main_menu_text))
+    app.add_handler(MessageHandler(filters.Text([BUY_LABEL, MY_SUBS_LABEL, BASKET_LABEL, SUPPORT_LABEL]), main_menu_text))
     app.add_handler(MessageHandler(filters.Text(ADMIN_LABELS), admin_menu_text))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_state_router))
     app.add_handler(CallbackQueryHandler(menu_button))  # catch-all for menu/cart callbacks
