@@ -38,6 +38,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     LabeledPrice,
+    ReplyKeyboardMarkup,
     Update,
 )
 from telegram.constants import ParseMode
@@ -294,17 +295,22 @@ def menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(f"{name} — {CURRENCY}{price:.2f}", callback_data=f"add:{item_id}")]
         )
     rows.append([InlineKeyboardButton("🛒 View Cart / Checkout", callback_data="view_cart")])
-    rows.append([InlineKeyboardButton("⬅️ Main Menu", callback_data="main_menu")])
     return InlineKeyboardMarkup(rows)
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🛒 Buy New Subscription", callback_data="show_menu")],
-            [InlineKeyboardButton("📋 My Subscriptions", callback_data="view_my_subs")],
-            [InlineKeyboardButton("🆘 Support", url="https://t.me/uptodate_admin")],
-        ]
+# Persistent bottom keyboard labels (must match exactly between the keyboard
+# and the handler that checks incoming text against them).
+BUY_LABEL = "🛒 Buy New Subscription"
+MY_SUBS_LABEL = "📋 My Subscriptions"
+SUPPORT_LABEL = "🆘 Support"
+
+
+def main_menu_keyboard() -> ReplyKeyboardMarkup:
+    """A persistent keyboard pinned to the bottom of the chat — stays visible
+    across every message, not just the one it was attached to."""
+    return ReplyKeyboardMarkup(
+        [[BUY_LABEL, MY_SUBS_LABEL], [SUPPORT_LABEL]],
+        resize_keyboard=True,
     )
 
 
@@ -336,35 +342,40 @@ def admin_review_keyboard(order_id: int) -> InlineKeyboardMarkup:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault("cart", {})
     await update.message.reply_text(
-        "Welcome! What would you like to do?",
+        "Welcome! Use the buttons below any time.",
         reply_markup=main_menu_keyboard(),
     )
 
 
-async def main_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the three top-level buttons: Buy, My Subscriptions, and
-    navigating back to this menu from elsewhere."""
-    query = update.callback_query
-    await query.answer()
+async def main_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles taps on the persistent bottom keyboard: Buy, My Subscriptions,
+    Support."""
+    text = update.message.text
 
-    if query.data == "show_menu":
+    if text == BUY_LABEL:
         context.user_data.setdefault("cart", {})
-        await query.edit_message_text(
+        await update.message.reply_text(
             "Tap an item below to add it to your order.", reply_markup=menu_keyboard()
         )
 
-    elif query.data == "view_my_subs":
-        rows = db_user_orders(query.from_user.id)
-        back_button = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu", callback_data="main_menu")]])
+    elif text == MY_SUBS_LABEL:
+        rows = db_user_orders(update.effective_user.id)
         if not rows:
-            await query.edit_message_text("You have no orders yet.", reply_markup=back_button)
+            await update.message.reply_text("You have no orders yet.")
             return
-        lines = [f"#{order_id} — {CURRENCY}{total:.2f} — {status}" for order_id, items_json, total, status, created_at in rows]
-        text = "Your recent orders:\n" + "\n".join(lines)
-        await query.edit_message_text(text, reply_markup=back_button)
+        lines = [
+            f"#{order_id} — {CURRENCY}{total:.2f} — {status}"
+            for order_id, items_json, total, status, created_at in rows
+        ]
+        await update.message.reply_text("Your recent orders:\n" + "\n".join(lines))
 
-    elif query.data == "main_menu":
-        await query.edit_message_text("Welcome! What would you like to do?", reply_markup=main_menu_keyboard())
+    elif text == SUPPORT_LABEL:
+        await update.message.reply_text(
+            "Tap below to contact support:",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Open Support Chat", url="https://t.me/uptodate_admin")]]
+            ),
+        )
 
 
 async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -934,10 +945,10 @@ def main():
     app.add_handler(CallbackQueryHandler(local_country_selected, pattern=r"^local_country:"))
     app.add_handler(CallbackQueryHandler(pay_crypto, pattern=r"^pay_crypto:"))
     app.add_handler(CallbackQueryHandler(back_to_checkout, pattern=r"^back_to_checkout:"))
-    app.add_handler(CallbackQueryHandler(main_menu_button, pattern=r"^(show_menu|view_my_subs|main_menu)$"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, receipt_photo))
+    app.add_handler(MessageHandler(filters.Text([BUY_LABEL, MY_SUBS_LABEL, SUPPORT_LABEL]), main_menu_text))
     app.add_handler(MessageHandler(filters.TEXT & filters.User(user_id=ADMIN_CHAT_ID) & ~filters.COMMAND, credentials_reply))
     app.add_handler(CallbackQueryHandler(menu_button))  # catch-all for menu/cart callbacks
 
