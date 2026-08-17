@@ -34,6 +34,8 @@ import os
 import sqlite3
 from datetime import datetime
 
+import httpx
+
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -73,6 +75,41 @@ MENU = {
     "item2": ("iMD VIP - 1 year", 75.00),
     "item3": ("Uptodate Online + Offline", 30.00),
     "item4": ("Amboss Full Access - 1 year", 85.00),
+}
+
+# ------------------------------------------------------------------
+# iMD AUTO-REGISTRATION
+# ------------------------------------------------------------------
+
+# Which item(s) trigger the automatic email/username/password collection
+# and (optionally) auto-registration flow after payment is confirmed.
+IMD_TRIGGER_ITEMS = {"item2"}
+
+IMD_REGISTRATION_URL = "https://imedicaldoctor.net/register/"
+
+# !! VERIFY THESE BEFORE RELYING ON AUTO-REGISTRATION !!
+# These are the HTML <input name="..."> values the registration form
+# actually submits. I could only see the *visible labels* (Username,
+# Password, Verify Password, Email, Serial) — not the real underlying
+# field names or any hidden tokens the form might send (e.g. a CSRF
+# token). Guessing wrong here means the auto-registration attempt will
+# fail (safely — the code below surfaces the raw response to you so
+# you can see what went wrong and register manually instead).
+#
+# HOW TO GET THE REAL VALUES:
+# 1. Open https://imedicaldoctor.net/register/ in a desktop browser
+# 2. Right-click the Username field -> Inspect
+# 3. Find the <input> tag, note its `name="..."` attribute
+# 4. Repeat for Password, Verify Password, Email, Serial
+# 5. Also check if the <form> tag or a hidden <input> contains anything
+#    like csrf_token, _token, or similar — if so, that needs to be
+#    fetched from the page first and submitted alongside the form data
+IMD_FORM_FIELD_MAP = {
+    "username": "username",
+    "password": "password",
+    "verify_password": "verify_password",
+    "email": "email",
+    "serial": "serial",
 }
 
 # Payment instructions shown to the customer at checkout.
@@ -604,6 +641,19 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
         )
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
 
+        if any(item_id in IMD_TRIGGER_ITEMS for item_id in items):
+            customer_data = context.application.user_data[user_id]
+            customer_data["awaiting_registration_field"] = "email"
+            customer_data["registration_order"] = order_id
+            customer_data["registration_data"] = {}
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "🎓 Let's set up your iMD account. Please fill this form to register:\n\n"
+                    "Reply with your email address:"
+                ),
+            )
+
 
 async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -732,6 +782,26 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
         )
 
+        # If this order includes an iMD item, start the guided form collection
+        # (email -> username -> password) with the customer.
+        items = json.loads(items_json)
+        if any(item_id in IMD_TRIGGER_ITEMS for item_id in items):
+            # Set the flag on the CUSTOMER's user_data (not the admin's) —
+            # context.application.user_data lets us reach into any user's
+            # data store from here, since this handler runs in the admin's
+            # context.
+            customer_data = context.application.user_data[user_id]
+            customer_data["awaiting_registration_field"] = "email"
+            customer_data["registration_order"] = order_id
+            customer_data["registration_data"] = {}
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "🎓 Let's set up your iMD account. Please fill this form to register:\n\n"
+                    "Reply with your email address:"
+                ),
+            )
+
     elif action == "admin_reject":
         db_update_status(order_id, "rejected")
         await query.edit_message_caption(caption=f"❌ Order #{order_id} rejected.")
@@ -743,6 +813,116 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "or contact us directly."
             ),
         )
+
+
+async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Single entry point for all free-text messages that aren't the main
+    menu buttons. Dispatches based on what state the sender is in, so only
+    one handler ever needs to be registered for generic text — registering
+    two separate broad text handlers would cause them to silently steal
+    each other's messages."""
+    if context.user_data.get("awaiting_registration_field"):
+        await registration_field_reply(update, context)
+        return
+
+    if update.effective_user.id == ADMIN_CHAT_ID:
+        if context.user_data.get("awaiting_serial_for_order") or context.user_data.get(
+            "awaiting_credentials_for_order"
+        ):
+            await credentials_reply(update, context)
+            return
+
+
+async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Collects email -> username -> password from the customer, one message
+    at a time, after an iMD order is confirmed."""
+    field = context.user_data.get("awaiting_registration_field")
+    if not field:
+        return  # not in the middle of registration
+
+    value = update.message.text.strip()
+    data = context.user_data.setdefault("registration_data", {})
+    data[field] = value
+
+    if field == "email":
+        context.user_data["awaiting_registration_field"] = "username"
+        await update.message.reply_text("Desired username:")
+        return
+
+    if field == "username":
+        context.user_data["awaiting_registration_field"] = "password"
+        await update.message.reply_text("Desired password:")
+        return
+
+    if field == "password":
+        order_id = context.user_data.pop("registration_order", None)
+        context.user_data.pop("awaiting_registration_field", None)
+        context.user_data.pop("registration_data", None)
+
+        await update.message.reply_text(
+            "Thanks! We're setting up your account now — you'll get your login details here shortly."
+        )
+
+        if not order_id or not ADMIN_CHAT_ID:
+            return
+
+        # Stash the collected info where the admin's later reply (the serial)
+        # can find it. bot_data is shared across all users, unlike user_data.
+        context.application.bot_data.setdefault("pending_registrations", {})[order_id] = data
+
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=(
+                f"🎓 iMD registration request — Order #{order_id}\n\n"
+                f"Email: {data.get('email')}\n"
+                f"Username: {data.get('username')}\n"
+                f"Password: {data.get('password')}\n\n"
+                "Tap below when you have a serial ready to complete registration."
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔐 Enter Serial & Register", callback_data=f"reg_serial:{order_id}")]]
+            ),
+        )
+
+
+async def reg_serial_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped 'Enter Serial & Register' — wait for their next message
+    to be the serial number for this order."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    order_id = int(query.data.split(":", 1)[1])
+    context.user_data["awaiting_serial_for_order"] = order_id
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"Send the serial for order #{order_id}.")
+
+
+async def attempt_imd_registration(email: str, username: str, password: str, serial: str):
+    """Best-effort automatic submission to iMD's registration form.
+    Field names in IMD_FORM_FIELD_MAP are guesses based on the page's
+    visible labels and MUST be verified against the real HTML before this
+    can be trusted — see the comment above IMD_FORM_FIELD_MAP.
+    Returns (success: bool, detail: str)."""
+    payload = {
+        IMD_FORM_FIELD_MAP["email"]: email,
+        IMD_FORM_FIELD_MAP["username"]: username,
+        IMD_FORM_FIELD_MAP["password"]: password,
+        IMD_FORM_FIELD_MAP["verify_password"]: password,
+        IMD_FORM_FIELD_MAP["serial"]: serial,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            response = await client.post(IMD_REGISTRATION_URL, data=payload)
+        # We can't reliably know what a "success" page looks like without
+        # seeing the real one — surface the outcome so the admin can judge.
+        snippet = response.text[:500].replace("\n", " ")
+        if response.status_code == 200:
+            return True, f"HTTP {response.status_code}. Response preview:\n{snippet}"
+        return False, f"HTTP {response.status_code}. Response preview:\n{snippet}"
+    except Exception as exc:
+        return False, f"Request failed: {exc}"
 
 
 async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -763,14 +943,58 @@ async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catches the admin's next text message after a confirmation and
-    forwards it to the customer as their account credentials."""
+    """Catches the admin's next text message. Two things it might be:
+    the serial for an iMD auto-registration, or manual credentials to
+    forward for any other order."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
+    # Case 1: admin is providing a serial to complete an iMD registration.
+    serial_order_id = context.user_data.get("awaiting_serial_for_order")
+    if serial_order_id:
+        context.user_data.pop("awaiting_serial_for_order", None)
+        serial = update.message.text.strip()
+
+        pending = context.application.bot_data.get("pending_registrations", {})
+        data = pending.pop(serial_order_id, None)
+        if not data:
+            await update.message.reply_text(f"No pending registration data found for order #{serial_order_id}.")
+            return
+
+        await update.message.reply_text("Attempting registration...")
+        success, detail = await attempt_imd_registration(
+            data.get("email"), data.get("username"), data.get("password"), serial
+        )
+
+        order = db_get_order(serial_order_id)
+        customer_user_id = order[1] if order else None
+
+        if success:
+            db_save_delivery(
+                serial_order_id,
+                f"Email: {data.get('email')}\nUsername: {data.get('username')}\nPassword: {data.get('password')}",
+            )
+            await update.message.reply_text(f"✅ Registration attempt finished.\n\n{detail}")
+            if customer_user_id:
+                await context.bot.send_message(
+                    chat_id=customer_user_id,
+                    text=(
+                        f"✅ Your iMD account is ready!\n\n"
+                        f"Username: {data.get('username')}\n"
+                        f"Password: {data.get('password')}"
+                    ),
+                )
+        else:
+            await update.message.reply_text(
+                f"⚠️ Registration attempt did not clearly succeed — check the response below and "
+                f"verify IMD_FORM_FIELD_MAP field names, or register manually for this customer.\n\n{detail}"
+            )
+        return
+
+    # Case 2: manual credential delivery (existing flow, any other product).
     order_id = context.user_data.get("awaiting_credentials_for_order")
     if not order_id:
-        return  # admin isn't in the middle of delivering credentials
+        return  # admin isn't in the middle of delivering anything
 
     order = db_get_order(order_id)
     if not order:
@@ -940,6 +1164,7 @@ def main():
     app.add_handler(CallbackQueryHandler(order_action, pattern=r"^(paid|cancel):"))
     app.add_handler(CallbackQueryHandler(admin_action, pattern=r"^admin_(confirm|reject):"))
     app.add_handler(CallbackQueryHandler(deliver_start, pattern=r"^deliver:"))
+    app.add_handler(CallbackQueryHandler(reg_serial_start, pattern=r"^reg_serial:"))
     app.add_handler(CallbackQueryHandler(pay_with_stars, pattern=r"^pay_stars:"))
     app.add_handler(CallbackQueryHandler(local_pay_start, pattern=r"^local_pay:"))
     app.add_handler(CallbackQueryHandler(local_country_selected, pattern=r"^local_country:"))
@@ -949,7 +1174,7 @@ def main():
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, receipt_photo))
     app.add_handler(MessageHandler(filters.Text([BUY_LABEL, MY_SUBS_LABEL, SUPPORT_LABEL]), main_menu_text))
-    app.add_handler(MessageHandler(filters.TEXT & filters.User(user_id=ADMIN_CHAT_ID) & ~filters.COMMAND, credentials_reply))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_state_router))
     app.add_handler(CallbackQueryHandler(menu_button))  # catch-all for menu/cart callbacks
 
     logger.info("Bot starting...")
