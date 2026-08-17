@@ -374,7 +374,8 @@ def checkout_view(order_id: int):
     items = json.loads(items_json)
     lines = [f"{qty}x {MENU[i][0]} — {CURRENCY}{MENU[i][1] * qty:.2f}" for i, qty in items.items()]
     text = (
-        f"*Order #{order_id} created*\n\n"
+        f"*Order #{order_id} created*\n"
+        f"Your Telegram ID: `{user_id}`\n\n"
         + "\n".join(lines)
         + f"\n\n*Total: {CURRENCY}{total:.2f}*\n\n"
         + PAYMENT_INSTRUCTIONS
@@ -537,7 +538,8 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     db_update_status(order_id, "paid")
 
     await update.message.reply_text(
-        f"✅ Payment received via Telegram Stars for order #{order_id}! We're preparing it now."
+        f"✅ Payment received via Telegram Stars for order #{order_id}! We're preparing it now.\n"
+        f"Your Telegram ID: {update.effective_user.id} (keep this for any support requests)."
     )
 
     order = db_get_order(order_id)
@@ -615,7 +617,7 @@ async def notify_admin_receipt(context: ContextTypes.DEFAULT_TYPE, order_row, ph
     # to send. No parse_mode here avoids that entirely.
     caption = (
         f"🧾 Receipt received — Order #{order_id}\n"
-        f"From: @{username or user_id}\n\n"
+        f"From: {username or 'unknown'} (ID: {user_id})\n\n"
         + "\n".join(lines)
         + f"\n\nTotal: {CURRENCY}{total:.2f}\n\n"
         "Check the receipt, then confirm or reject below."
@@ -676,7 +678,10 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"✅ Payment confirmed for order #{order_id}! We're preparing it now.",
+            text=(
+                f"✅ Payment confirmed for order #{order_id}! We're preparing it now.\n"
+                f"Your Telegram ID: {user_id} (keep this for any support requests)."
+            ),
         )
 
     elif action == "admin_reject":
@@ -737,6 +742,58 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Credentials sent to the customer for order #{order_id}.")
 
 
+async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: every order for one specific customer, by Telegram user
+    ID or @username."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /customer <user_id or @username>")
+        return
+
+    query_arg = context.args[0]
+    conn = sqlite3.connect(DB_PATH)
+
+    if query_arg.startswith("@"):
+        username = query_arg[1:]
+        rows = conn.execute(
+            "SELECT id, items_json, total, status, created_at, delivered_at, credentials "
+            "FROM orders WHERE username = ? ORDER BY id DESC",
+            (username,),
+        ).fetchall()
+    else:
+        try:
+            user_id = int(query_arg)
+        except ValueError:
+            await update.message.reply_text("Provide a numeric Telegram user ID or @username.")
+            return
+        rows = conn.execute(
+            "SELECT id, items_json, total, status, created_at, delivered_at, credentials "
+            "FROM orders WHERE user_id = ? ORDER BY id DESC",
+            (user_id,),
+        ).fetchall()
+
+    conn.close()
+
+    if not rows:
+        await update.message.reply_text(f"No orders found for {query_arg}.")
+        return
+
+    lines = [f"Orders for {query_arg}:"]
+    for order_id, items_json, total, status, created_at, delivered_at, credentials in rows:
+        items = json.loads(items_json)
+        item_names = ", ".join(MENU[i][0] for i in items if i in MENU)
+        line = f"\n#{order_id} — {item_names} — {CURRENCY}{total:.2f} — {status}"
+        if delivered_at:
+            line += f"\nDelivered: {delivered_at[:19]}\nCredentials: {credentials}"
+        lines.append(line)
+
+    text = "".join(lines)
+    for i in range(0, len(text), 3500):
+        await update.message.reply_text(text[i:i + 3500])
+
+
 async def customer_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only: overview of recent orders and their delivery status."""
     if update.effective_user.id != ADMIN_CHAT_ID:
@@ -744,7 +801,7 @@ async def customer_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT id, username, items_json, total, status, delivered_at "
+        "SELECT id, user_id, username, items_json, total, status, delivered_at "
         "FROM orders ORDER BY id DESC LIMIT 30"
     ).fetchall()
     conn.close()
@@ -754,10 +811,10 @@ async def customer_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lines = []
-    for order_id, username, items_json, total, status, delivered_at in rows:
+    for order_id, user_id, username, items_json, total, status, delivered_at in rows:
         items = json.loads(items_json)
         item_names = ", ".join(MENU[i][0] for i in items if i in MENU)
-        line = f"#{order_id} @{username or 'unknown'} — {item_names} — {status}"
+        line = f"#{order_id} {username or 'unknown'} (ID: {user_id}) — {item_names} — {status}"
         if delivered_at:
             line += f" (delivered {delivered_at[:10]})"
         lines.append(line)
@@ -801,7 +858,7 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"Order #{oid}\n"
-        f"Customer: @{username or user_id}\n"
+        f"Customer: {username or 'unknown'} (ID: {user_id})\n"
         f"Items: {item_names}\n"
         f"Total: {CURRENCY}{total:.2f}\n"
         f"Status: {status}\n"
@@ -830,6 +887,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myorders", my_orders))
     app.add_handler(CommandHandler("customers", customer_history))
+    app.add_handler(CommandHandler("customer", customer_lookup))
     app.add_handler(CommandHandler("order", order_lookup))
     app.add_handler(CallbackQueryHandler(order_action, pattern=r"^(paid|cancel):"))
     app.add_handler(CallbackQueryHandler(admin_action, pattern=r"^admin_(confirm|reject):"))
