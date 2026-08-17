@@ -645,7 +645,12 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # The admin message here is a photo (caption), so edit the caption, not the text.
     if action == "admin_confirm":
         db_update_status(order_id, "paid")
-        await query.edit_message_caption(caption=f"✅ Order #{order_id} confirmed as paid.")
+        await query.edit_message_caption(
+            caption=f"✅ Order #{order_id} confirmed as paid.\n\nTap below when ready to send login details.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("📤 Send Credentials", callback_data=f"deliver:{order_id}")]]
+            ),
+        )
         await context.bot.send_message(
             chat_id=user_id,
             text=f"✅ Payment confirmed for order #{order_id}! We're preparing it now.",
@@ -664,6 +669,51 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '📤 Send Credentials' on a specific order — start waiting
+    for their next text message, tied to this exact order."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    order_id = int(query.data.split(":", 1)[1])
+    context.user_data["awaiting_credentials_for_order"] = order_id
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=f"Reply with the username & password for order #{order_id}.",
+    )
+
+
+async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Catches the admin's next text message after a confirmation and
+    forwards it to the customer as their account credentials."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    order_id = context.user_data.get("awaiting_credentials_for_order")
+    if not order_id:
+        return  # admin isn't in the middle of delivering credentials
+
+    order = db_get_order(order_id)
+    if not order:
+        await update.message.reply_text("Order not found.")
+        context.user_data.pop("awaiting_credentials_for_order", None)
+        return
+
+    _, user_id, username, items_json, total, status, created_at = order
+    credentials_text = update.message.text
+
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=f"🔑 Here are your account details for order #{order_id}:\n\n{credentials_text}",
+    )
+    db_update_status(order_id, "delivered")
+    context.user_data.pop("awaiting_credentials_for_order", None)
+    await update.message.reply_text(f"✅ Credentials sent to the customer for order #{order_id}.")
+
+
 # ------------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------------
@@ -680,6 +730,7 @@ def main():
     app.add_handler(CommandHandler("myorders", my_orders))
     app.add_handler(CallbackQueryHandler(order_action, pattern=r"^(paid|cancel):"))
     app.add_handler(CallbackQueryHandler(admin_action, pattern=r"^admin_(confirm|reject):"))
+    app.add_handler(CallbackQueryHandler(deliver_start, pattern=r"^deliver:"))
     app.add_handler(CallbackQueryHandler(pay_with_stars, pattern=r"^pay_stars:"))
     app.add_handler(CallbackQueryHandler(local_pay_start, pattern=r"^local_pay:"))
     app.add_handler(CallbackQueryHandler(local_country_selected, pattern=r"^local_country:"))
@@ -688,6 +739,7 @@ def main():
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, receipt_photo))
+    app.add_handler(MessageHandler(filters.TEXT & filters.User(user_id=ADMIN_CHAT_ID) & ~filters.COMMAND, credentials_reply))
     app.add_handler(CallbackQueryHandler(menu_button))  # catch-all for menu/cart callbacks
 
     logger.info("Bot starting...")
@@ -696,5 +748,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
