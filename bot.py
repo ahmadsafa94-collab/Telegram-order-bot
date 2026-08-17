@@ -34,6 +34,8 @@ import os
 import sqlite3
 from datetime import datetime
 
+import httpx
+
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -76,15 +78,29 @@ MENU = {
 }
 
 # ------------------------------------------------------------------
-# iMD FORM COLLECTION
+# iMD AUTO-REGISTRATION
 # ------------------------------------------------------------------
 
 # Which item(s) trigger the automatic email/username/password collection
-# after payment is confirmed. Registering the account on iMD's site itself
-# is a manual step for the admin (their Cloudflare protection blocks
-# automated submissions — both a plain HTTP POST and a headless-browser
-# attempt were tried and blocked).
+# and (optionally) auto-registration flow after payment is confirmed.
 IMD_TRIGGER_ITEMS = {"item2"}
+
+IMD_REGISTRATION_URL = "https://imedicaldoctor.net/register/"
+
+# Confirmed directly from the page's HTML source (2026-08-17).
+# No CSRF token present. There IS a required hidden field, `register`,
+# submitted with an empty value — included below.
+# Note: the page also loads Cloudflare's bot-challenge script. That may or
+# may not block a plain form POST depending on their security settings —
+# the response preview after each attempt will show if that's happening
+# (e.g. an HTML challenge page instead of a normal response).
+IMD_FORM_FIELD_MAP = {
+    "username": "username",
+    "password": "password",
+    "verify_password": "passwordverify",
+    "email": "email",
+    "serial": "serial",
+}
 
 # Payment instructions shown to the customer at checkout.
 PAYMENT_INSTRUCTIONS = (
@@ -800,7 +816,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if update.effective_user.id == ADMIN_CHAT_ID:
-        if context.user_data.get("awaiting_credentials_for_order"):
+        if context.user_data.get("awaiting_serial_for_order") or context.user_data.get(
+            "awaiting_credentials_for_order"
+        ):
             await credentials_reply(update, context)
             return
 
@@ -838,9 +856,8 @@ async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT
         if not order_id or not ADMIN_CHAT_ID:
             return
 
-        # Stash the collected info where the admin can pick it up once
-        # they've registered the account manually. bot_data is shared
-        # across all users, unlike user_data.
+        # Stash the collected info where the admin's later reply (the serial)
+        # can find it. bot_data is shared across all users, unlike user_data.
         context.application.bot_data.setdefault("pending_registrations", {})[order_id] = data
 
         await context.bot.send_message(
@@ -850,18 +867,17 @@ async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT
                 f"Email: {data.get('email')}\n"
                 f"Username: {data.get('username')}\n"
                 f"Password: {data.get('password')}\n\n"
-                "Register this on imedicaldoctor.net, then tap below to notify the customer."
+                "Tap below when you have a serial ready to complete registration."
             ),
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("✅ Registered — Notify Customer", callback_data=f"reg_done:{order_id}")]]
+                [[InlineKeyboardButton("🔐 Enter Serial & Register", callback_data=f"reg_serial:{order_id}")]]
             ),
         )
 
 
-async def reg_mark_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin tapped 'Registered — Notify Customer' after manually creating
-    the account on iMD's site. Sends the login details to the customer and
-    records the delivery."""
+async def reg_serial_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped 'Enter Serial & Register' — wait for their next message
+    to be the serial number for this order."""
     query = update.callback_query
     if query.from_user.id != ADMIN_CHAT_ID:
         await query.answer("Not authorized.", show_alert=True)
@@ -869,31 +885,73 @@ async def reg_mark_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     order_id = int(query.data.split(":", 1)[1])
-    pending = context.application.bot_data.get("pending_registrations", {})
-    data = pending.pop(order_id, None)
+    context.user_data["awaiting_serial_for_order"] = order_id
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"Send the serial for order #{order_id}.")
 
-    if not data:
-        await query.edit_message_text(f"No pending registration data found for order #{order_id}.")
-        return
 
-    order = db_get_order(order_id)
-    customer_user_id = order[1] if order else None
+async def attempt_imd_registration(email: str, username: str, password: str, serial: str):
+    """Automatic submission to iMD's registration form using a real headless
+    Chromium browser (via Playwright), since the site's Cloudflare
+    bot-protection blocks plain HTTP requests (confirmed: a direct httpx
+    POST got an HTTP 403 'Just a moment...' challenge page instead of
+    reaching the form). A real browser can execute Cloudflare's JS
+    challenge; a bare POST cannot. This still isn't guaranteed to work —
+    Cloudflare can also detect headless browsers — but it's the only
+    realistic way to get past this specific block.
+    Returns (success: bool, detail: str)."""
+    from playwright.async_api import async_playwright
 
-    credentials_text = (
-        f"Email: {data.get('email')}\nUsername: {data.get('username')}\nPassword: {data.get('password')}"
-    )
-    db_save_delivery(order_id, credentials_text)
-    await query.edit_message_text(f"✅ Order #{order_id} marked as registered & delivered.")
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+            )
+            page = await context.new_page()
 
-    if customer_user_id:
-        await context.bot.send_message(
-            chat_id=customer_user_id,
-            text=(
-                f"✅ Your iMD account is ready!\n\n"
-                f"Username: {data.get('username')}\n"
-                f"Password: {data.get('password')}"
-            ),
-        )
+            await page.goto(IMD_REGISTRATION_URL, wait_until="networkidle", timeout=30000)
+
+            # Give Cloudflare's JS challenge time to run and redirect through,
+            # checking a few times rather than one fixed long wait.
+            for _ in range(4):
+                title = await page.title()
+                if "Just a moment" not in title:
+                    break
+                await page.wait_for_timeout(3000)
+
+            title = await page.title()
+            if "Just a moment" in title:
+                content = await page.content()
+                await browser.close()
+                return False, f"Still blocked by Cloudflare after waiting. Title: {title}\n{content[:500]}"
+
+            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["username"]}"]', username)
+            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["password"]}"]', password)
+            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["verify_password"]}"]', password)
+            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["email"]}"]', email)
+            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["serial"]}"]', serial)
+
+            await page.click("#submit")
+            await page.wait_for_load_state("networkidle", timeout=30000)
+
+            result_title = await page.title()
+            content = await page.content()
+            await browser.close()
+
+            snippet = content[:800].replace("\n", " ")
+            if "Just a moment" in result_title or "Attention Required" in content:
+                return False, f"Blocked by Cloudflare on submit. Title: {result_title}\n{snippet}"
+            return True, f"Submitted. Page title after: {result_title}\n{snippet}"
+
+    except Exception as exc:
+        return False, f"Browser automation failed: {exc}"
 
 
 async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -914,11 +972,55 @@ async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catches the admin's next text message after tapping 'Send Credentials'
-    and forwards it to the customer as their account details."""
+    """Catches the admin's next text message. Two things it might be:
+    the serial for an iMD auto-registration, or manual credentials to
+    forward for any other order."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
+    # Case 1: admin is providing a serial to complete an iMD registration.
+    serial_order_id = context.user_data.get("awaiting_serial_for_order")
+    if serial_order_id:
+        context.user_data.pop("awaiting_serial_for_order", None)
+        serial = update.message.text.strip()
+
+        pending = context.application.bot_data.get("pending_registrations", {})
+        data = pending.pop(serial_order_id, None)
+        if not data:
+            await update.message.reply_text(f"No pending registration data found for order #{serial_order_id}.")
+            return
+
+        await update.message.reply_text("Attempting registration...")
+        success, detail = await attempt_imd_registration(
+            data.get("email"), data.get("username"), data.get("password"), serial
+        )
+
+        order = db_get_order(serial_order_id)
+        customer_user_id = order[1] if order else None
+
+        if success:
+            db_save_delivery(
+                serial_order_id,
+                f"Email: {data.get('email')}\nUsername: {data.get('username')}\nPassword: {data.get('password')}",
+            )
+            await update.message.reply_text(f"✅ Registration attempt finished.\n\n{detail}")
+            if customer_user_id:
+                await context.bot.send_message(
+                    chat_id=customer_user_id,
+                    text=(
+                        f"✅ Your iMD account is ready!\n\n"
+                        f"Username: {data.get('username')}\n"
+                        f"Password: {data.get('password')}"
+                    ),
+                )
+        else:
+            await update.message.reply_text(
+                f"⚠️ Registration attempt did not clearly succeed — check the response below and "
+                f"verify IMD_FORM_FIELD_MAP field names, or register manually for this customer.\n\n{detail}"
+            )
+        return
+
+    # Case 2: manual credential delivery (existing flow, any other product).
     order_id = context.user_data.get("awaiting_credentials_for_order")
     if not order_id:
         return  # admin isn't in the middle of delivering anything
@@ -1091,7 +1193,7 @@ def main():
     app.add_handler(CallbackQueryHandler(order_action, pattern=r"^(paid|cancel):"))
     app.add_handler(CallbackQueryHandler(admin_action, pattern=r"^admin_(confirm|reject):"))
     app.add_handler(CallbackQueryHandler(deliver_start, pattern=r"^deliver:"))
-    app.add_handler(CallbackQueryHandler(reg_mark_done, pattern=r"^reg_done:"))
+    app.add_handler(CallbackQueryHandler(reg_serial_start, pattern=r"^reg_serial:"))
     app.add_handler(CallbackQueryHandler(pay_with_stars, pattern=r"^pay_stars:"))
     app.add_handler(CallbackQueryHandler(local_pay_start, pattern=r"^local_pay:"))
     app.add_handler(CallbackQueryHandler(local_country_selected, pattern=r"^local_country:"))
