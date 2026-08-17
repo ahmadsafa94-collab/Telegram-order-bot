@@ -198,6 +198,14 @@ GENERIC_FIELDS = [
     ),
 ]
 
+# Used when re-prompting a customer who has an unfinished order.
+IMD_FIELD_PROMPTS = {
+    "prev_username": "Reply with your previous iMD username:",
+    "email": "Reply with your email address:",
+    "username": "Reply with your desired username:",
+    "password": "Reply with your desired password:",
+}
+
 
 def validate_generic_username(value: str):
     """Returns None if valid, or an error message explaining the rule."""
@@ -372,8 +380,93 @@ def db_init():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS deliveries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            item_id TEXT,
+            message TEXT NOT NULL,
+            delivered_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
     conn.close()
+
+
+def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str):
+    """Records one delivered subscription. An order with several products
+    produces several rows here, so 'My Subscriptions' can list them
+    separately instead of lumping a whole order into one entry."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO deliveries (order_id, user_id, item_id, message, delivered_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (order_id, user_id, item_id, message, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_user_deliveries(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, order_id, item_id, message, delivered_at FROM deliveries "
+        "WHERE user_id = ? ORDER BY id DESC",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def db_get_delivery(delivery_id: int, user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT message FROM deliveries WHERE id = ? AND user_id = ?",
+        (delivery_id, user_id),
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def db_user_pending_items(user_id: int):
+    """Items the customer has ordered that haven't been delivered yet.
+    Returns (order_id, item_id, status). Compares each order's items
+    against the deliveries table, so a part-delivered order correctly
+    shows only its outstanding items."""
+    conn = sqlite3.connect(DB_PATH)
+    orders = conn.execute(
+        "SELECT id, items_json, status FROM orders "
+        "WHERE user_id = ? AND status NOT IN ('cancelled', 'rejected') "
+        "ORDER BY id DESC",
+        (user_id,),
+    ).fetchall()
+    delivered = conn.execute(
+        "SELECT order_id, item_id FROM deliveries WHERE user_id = ?", (user_id,)
+    ).fetchall()
+    conn.close()
+
+    delivered_pairs = {(o, i) for o, i in delivered}
+    delivered_orders_no_item = {o for o, i in delivered if i is None}
+
+    pending = []
+    for order_id, items_json, status in orders:
+        try:
+            items = json.loads(items_json)
+        except (TypeError, ValueError):
+            continue
+        for item_id in items:
+            if (order_id, item_id) in delivered_pairs:
+                continue
+            # A delivery recorded without an item id (older/manual ones)
+            # can't be matched to a specific product, so treat the whole
+            # order as handled rather than nagging the customer.
+            if order_id in delivered_orders_no_item:
+                continue
+            pending.append((order_id, item_id, status))
+    return pending
 
 
 def db_add_serials(duration: str, codes: list) -> int:
@@ -497,19 +590,6 @@ def db_update_status(order_id: int, status: str):
     conn.commit()
     conn.close()
 
-
-def db_user_delivered_orders(user_id: int):
-    """Orders for this customer that have actually been delivered, with the
-    exact message that was sent — used to power 'My Subscriptions'."""
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        "SELECT id, items_json, credentials, delivered_at FROM orders "
-        "WHERE user_id = ? AND credentials IS NOT NULL AND credentials != '' "
-        "ORDER BY id DESC",
-        (user_id,),
-    ).fetchall()
-    conn.close()
-    return rows
 
 
 def db_user_orders(user_id: int, limit: int = 5):
@@ -709,30 +789,158 @@ async def main_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def show_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lists the customer's delivered subscriptions as buttons. Tapping one
-    replays the exact message they were originally sent."""
-    rows = db_user_delivered_orders(update.effective_user.id)
+def subs_menu_keyboard() -> InlineKeyboardMarkup:
+    """The two-way split under 'My Subscriptions'."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Registered Subscriptions", callback_data="subs_registered")],
+            [InlineKeyboardButton("⏳ Pending Orders", callback_data="subs_pending")],
+        ]
+    )
 
+
+def subscriptions_keyboard(user_id: int):
+    """One button per delivered subscription — a multi-product order shows
+    up as several separate entries, not one lumped-together button."""
+    rows = db_user_deliveries(user_id)
     if not rows:
-        await update.message.reply_text(
-            "You don't have any active subscriptions yet.",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ Back", callback_data="subs_back")]]
-            ),
+        return None
+    buttons = []
+    for delivery_id, order_id, item_id, message, delivered_at in rows:
+        name = MENU.get(item_id, (None,))[0] if item_id else None
+        if not name:
+            name = f"Order #{order_id}"
+        label = name + (f" ({delivered_at[:10]})" if delivered_at else "")
+        buttons.append([InlineKeyboardButton(label[:60], callback_data=f"mysub:{delivery_id}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="subs_menu")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def pending_keyboard(user_id: int):
+    """One button per ordered-but-undelivered item."""
+    rows = db_user_pending_items(user_id)
+    if not rows:
+        return None
+    buttons = []
+    for order_id, item_id, status in rows:
+        name = MENU.get(item_id, (item_id,))[0]
+        buttons.append(
+            [InlineKeyboardButton(f"#{order_id} — {name}"[:60], callback_data=f"pend:{order_id}:{item_id}")]
+        )
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="subs_menu")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def show_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Top level of 'My Subscriptions' — registered vs pending."""
+    await update.message.reply_text(
+        "What would you like to see?", reply_markup=subs_menu_keyboard()
+    )
+
+
+async def subs_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("What would you like to see?", reply_markup=subs_menu_keyboard())
+
+
+async def subs_registered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists delivered subscriptions, one per product."""
+    query = update.callback_query
+    await query.answer()
+    keyboard = subscriptions_keyboard(query.from_user.id)
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="subs_menu")]])
+
+    if not keyboard:
+        await query.edit_message_text(
+            "You don't have any active subscriptions yet.", reply_markup=back
         )
         return
 
-    buttons = []
-    for order_id, items_json, credentials, delivered_at in rows:
-        items = json.loads(items_json)
-        names = ", ".join(MENU[i][0] for i in items if i in MENU) or f"Order #{order_id}"
-        label = f"{names}" + (f" ({delivered_at[:10]})" if delivered_at else "")
-        buttons.append([InlineKeyboardButton(label[:60], callback_data=f"mysub:{order_id}")])
+    await query.edit_message_text(
+        "Your subscriptions — tap one to see its details:", reply_markup=keyboard
+    )
 
-    await update.message.reply_text(
-        "Your subscriptions — tap one to see its details:",
-        reply_markup=InlineKeyboardMarkup(buttons),
+
+async def subs_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists orders that haven't been delivered yet."""
+    query = update.callback_query
+    await query.answer()
+    keyboard = pending_keyboard(query.from_user.id)
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="subs_menu")]])
+
+    if not keyboard:
+        await query.edit_message_text("You don't have any pending orders.", reply_markup=back)
+        return
+
+    await query.edit_message_text(
+        "Your pending orders — tap one for its status:", reply_markup=keyboard
+    )
+
+
+async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows what's holding up a pending item: either the bot is waiting on
+    information from the customer (in which case it re-asks for exactly
+    the missing field), or it's with us and they just need to wait."""
+    query = update.callback_query
+    await query.answer()
+    _, order_id_str, item_id = query.data.split(":", 2)
+    order_id = int(order_id_str)
+
+    name = MENU.get(item_id, (item_id,))[0]
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="subs_pending")]])
+
+    order = db_get_order(order_id)
+    status = order[5] if order else None
+
+    # Not paid for yet.
+    if status in ("awaiting_payment", "awaiting_receipt", "awaiting_confirmation"):
+        if status == "awaiting_confirmation":
+            text = (
+                f"⏳ *{name}* (Order #{order_id})\n\n"
+                "We've received your receipt and are verifying your payment. "
+                "You'll hear from us as soon as it's confirmed."
+            )
+        else:
+            text = (
+                f"⏳ *{name}* (Order #{order_id})\n\n"
+                "We haven't received your payment yet. Please complete the payment, "
+                "then tap *I've Paid* and upload your receipt."
+            )
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=back)
+        return
+
+    # The bot is mid-conversation with this customer about this order.
+    reg_field = context.user_data.get("awaiting_registration_field")
+    if reg_field and context.user_data.get("registration_order") == order_id:
+        prompt = IMD_FIELD_PROMPTS.get(reg_field, "Please send the requested information:")
+        await query.edit_message_text(
+            f"📝 *{name}* (Order #{order_id})\n\nWe still need some information from you.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=back,
+        )
+        await context.bot.send_message(chat_id=query.from_user.id, text=prompt)
+        return
+
+    gen_field = context.user_data.get("awaiting_generic_field")
+    if gen_field and context.user_data.get("generic_order_id") == order_id:
+        prompt = dict(GENERIC_FIELDS).get(gen_field, "Please send the requested information:")
+        await query.edit_message_text(
+            f"📝 *{name}* (Order #{order_id})\n\nWe still need some information from you.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=back,
+        )
+        await context.bot.send_message(chat_id=query.from_user.id, text=prompt)
+        return
+
+    # Paid and all details in — it's on our side now.
+    await query.edit_message_text(
+        f"⏳ *{name}* (Order #{order_id})\n\n"
+        "Your payment is confirmed and we have everything we need. Your account is being "
+        "prepared and will be delivered here shortly — please bear with us.\n\n"
+        "If it's been more than 48 hours, contact support from the menu.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=back,
     )
 
 
@@ -740,44 +948,16 @@ async def my_subscription_detail(update: Update, context: ContextTypes.DEFAULT_T
     """Replays the delivery message for one of the customer's subscriptions."""
     query = update.callback_query
     await query.answer()
-    order_id = int(query.data.split(":", 1)[1])
+    delivery_id = int(query.data.split(":", 1)[1])
 
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute(
-        "SELECT credentials FROM orders WHERE id = ? AND user_id = ?",
-        (order_id, query.from_user.id),
-    ).fetchone()
-    conn.close()
+    message = db_get_delivery(delivery_id, query.from_user.id)
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="subs_registered")]])
 
-    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="subs_back")]])
-    if not row or not row[0]:
+    if not message:
         await query.edit_message_text("Details for that subscription aren't available.", reply_markup=back)
         return
 
-    await query.edit_message_text(row[0], reply_markup=back)
-
-
-async def subs_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Back button from the subscriptions view."""
-    query = update.callback_query
-    await query.answer()
-    rows = db_user_delivered_orders(query.from_user.id)
-
-    if not rows:
-        await query.edit_message_text("You don't have any active subscriptions yet.")
-        return
-
-    buttons = []
-    for order_id, items_json, credentials, delivered_at in rows:
-        items = json.loads(items_json)
-        names = ", ".join(MENU[i][0] for i in items if i in MENU) or f"Order #{order_id}"
-        label = f"{names}" + (f" ({delivered_at[:10]})" if delivered_at else "")
-        buttons.append([InlineKeyboardButton(label[:60], callback_data=f"mysub:{order_id}")])
-
-    await query.edit_message_text(
-        "Your subscriptions — tap one to see its details:",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
+    await query.edit_message_text(message, reply_markup=back)
 
 
 async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1427,7 +1607,7 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "Deliver within 48 hours using the 📤 Send Credentials button on this order."
             ),
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("📤 Send Credentials", callback_data=f"deliver:{order_id}")]]
+                [[InlineKeyboardButton("📤 Send Credentials", callback_data=f"deliver:{order_id}:{item_id}")]]
             ),
         )
 
@@ -1449,6 +1629,7 @@ async def start_imd_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int
     customer_data["registration_data"] = {}
     customer_data["registration_is_renew"] = is_renew
     customer_data["registration_duration"] = duration
+    customer_data["registration_item_id"] = imd_item
 
     if is_renew:
         customer_data["awaiting_registration_field"] = "prev_username"
@@ -1509,6 +1690,7 @@ async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TY
     order_id = context.user_data.pop("registration_order", None)
     is_renew = context.user_data.pop("registration_is_renew", False)
     duration = context.user_data.pop("registration_duration", None)
+    item_id = context.user_data.pop("registration_item_id", None)
     context.user_data.pop("awaiting_registration_field", None)
     context.user_data.pop("registration_data", None)
 
@@ -1523,6 +1705,7 @@ async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TY
         **data,
         "is_renew": is_renew,
         "duration": duration,
+        "item_id": item_id,
     }
 
     if ADMIN_CHAT_ID:
@@ -1635,6 +1818,7 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
             )
 
         db_save_delivery(order_id, delivery_message)
+        db_add_delivery(order_id, customer_user_id, data.get("item_id"), delivery_message)
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
             text=f"✅ {action_label} confirmed for order #{order_id}. Serial used: {serial_code}\n\n{detail}",
@@ -1890,26 +2074,34 @@ def build_imd_delivery_message(username: str, password: str = None, date_str: st
 
 
 async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin tapped '📤 Send Credentials' on a specific order — start waiting
-    for their next text message, tied to this exact order."""
+    """Admin tapped '📤 Send Credentials'. The callback data may carry the
+    specific item this delivery is for (deliver:<order>:<item>), so the
+    subscription gets listed under its own name for the customer."""
     query = update.callback_query
     if query.from_user.id != ADMIN_CHAT_ID:
         await query.answer("Not authorized.", show_alert=True)
         return
     await query.answer()
 
-    order_id = int(query.data.split(":", 1)[1])
+    parts = query.data.split(":")
+    order_id = int(parts[1])
+    item_id = parts[2] if len(parts) > 2 else None
+
     context.user_data["awaiting_credentials_for_order"] = order_id
+    context.user_data["awaiting_credentials_item"] = item_id
+
+    label = MENU.get(item_id, (None,))[0] if item_id else None
+    suffix = f" ({label})" if label else ""
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
-        text=f"Reply with the username & password for order #{order_id}.",
+        text=f"Reply with the username & password for order #{order_id}{suffix}.",
     )
 
 
 async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Catches the admin's next text message after tapping 'Send Credentials'
-    (the generic manual delivery flow for non-iMD products) and forwards
-    it to the customer as their account details."""
+    (the manual delivery flow) and forwards it to the customer as their
+    account details."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
@@ -1921,18 +2113,34 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not order:
         await update.message.reply_text("Order not found.")
         context.user_data.pop("awaiting_credentials_for_order", None)
+        context.user_data.pop("awaiting_credentials_item", None)
         return
 
     _, user_id, username, items_json, total, status, created_at = order
     credentials_text = update.message.text
+    item_id = context.user_data.pop("awaiting_credentials_item", None)
 
     await context.bot.send_message(
         chat_id=user_id,
         text=f"🔑 Here are your account details for order #{order_id}:\n\n{credentials_text}",
     )
     db_save_delivery(order_id, credentials_text)
+    db_add_delivery(order_id, user_id, item_id, credentials_text)
     context.user_data.pop("awaiting_credentials_for_order", None)
     await update.message.reply_text(f"✅ Credentials sent to the customer for order #{order_id}.")
+
+    # A manual delivery finishes whatever item the customer was on, so any
+    # half-finished collection for it is stale — clear it and move the
+    # order's queue forward, otherwise remaining items are never asked for.
+    customer_data = context.application.user_data[user_id]
+    for key in (
+        "awaiting_registration_field", "registration_order", "registration_data",
+        "registration_is_renew", "registration_duration", "registration_item_id",
+        "registration_retry_field", "awaiting_generic_field", "generic_data",
+        "generic_order_id", "generic_item_id",
+    ):
+        customer_data.pop(key, None)
+    await process_next_in_queue(context, user_id)
 
 
 async def add_serials_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2167,7 +2375,10 @@ def main():
     app.add_handler(CallbackQueryHandler(pay_crypto, pattern=r"^pay_crypto:"))
     app.add_handler(CallbackQueryHandler(back_to_checkout, pattern=r"^back_to_checkout:"))
     app.add_handler(CallbackQueryHandler(my_subscription_detail, pattern=r"^mysub:"))
-    app.add_handler(CallbackQueryHandler(subs_back, pattern=r"^subs_back$"))
+    app.add_handler(CallbackQueryHandler(subs_menu, pattern=r"^subs_menu$"))
+    app.add_handler(CallbackQueryHandler(subs_registered, pattern=r"^subs_registered$"))
+    app.add_handler(CallbackQueryHandler(subs_pending, pattern=r"^subs_pending$"))
+    app.add_handler(CallbackQueryHandler(pending_detail, pattern=r"^pend:"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, receipt_photo))
