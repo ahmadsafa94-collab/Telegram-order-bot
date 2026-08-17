@@ -890,34 +890,68 @@ async def reg_serial_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def attempt_imd_registration(email: str, username: str, password: str, serial: str):
-    """Best-effort automatic submission to iMD's registration form.
-    Field names in IMD_FORM_FIELD_MAP are guesses based on the page's
-    visible labels and MUST be verified against the real HTML before this
-    can be trusted — see the comment above IMD_FORM_FIELD_MAP.
+    """Automatic submission to iMD's registration form using a real headless
+    Chromium browser (via Playwright), since the site's Cloudflare
+    bot-protection blocks plain HTTP requests (confirmed: a direct httpx
+    POST got an HTTP 403 'Just a moment...' challenge page instead of
+    reaching the form). A real browser can execute Cloudflare's JS
+    challenge; a bare POST cannot. This still isn't guaranteed to work —
+    Cloudflare can also detect headless browsers — but it's the only
+    realistic way to get past this specific block.
     Returns (success: bool, detail: str)."""
-    payload = {
-        IMD_FORM_FIELD_MAP["email"]: email,
-        IMD_FORM_FIELD_MAP["username"]: username,
-        IMD_FORM_FIELD_MAP["password"]: password,
-        IMD_FORM_FIELD_MAP["verify_password"]: password,
-        IMD_FORM_FIELD_MAP["serial"]: serial,
-        "register": "",  # required hidden field the real form always sends
-    }
+    from playwright.async_api import async_playwright
+
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            response = await client.post(IMD_REGISTRATION_URL, data=payload)
-        # We can't reliably know what a "success" page looks like without
-        # seeing one first-hand — surface the outcome so the admin can judge.
-        # Watch for signs of a Cloudflare challenge page (e.g. "Just a
-        # moment", "cf-challenge", "Attention Required") in the preview —
-        # that would mean the request got blocked before reaching the form
-        # handler at all, regardless of field names being correct.
-        snippet = response.text[:500].replace("\n", " ")
-        if response.status_code == 200:
-            return True, f"HTTP {response.status_code}. Response preview:\n{snippet}"
-        return False, f"HTTP {response.status_code}. Response preview:\n{snippet}"
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+            )
+            page = await context.new_page()
+
+            await page.goto(IMD_REGISTRATION_URL, wait_until="networkidle", timeout=30000)
+
+            # Give Cloudflare's JS challenge time to run and redirect through,
+            # checking a few times rather than one fixed long wait.
+            for _ in range(4):
+                title = await page.title()
+                if "Just a moment" not in title:
+                    break
+                await page.wait_for_timeout(3000)
+
+            title = await page.title()
+            if "Just a moment" in title:
+                content = await page.content()
+                await browser.close()
+                return False, f"Still blocked by Cloudflare after waiting. Title: {title}\n{content[:500]}"
+
+            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["username"]}"]', username)
+            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["password"]}"]', password)
+            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["verify_password"]}"]', password)
+            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["email"]}"]', email)
+            await page.fill(f'input[name="{IMD_FORM_FIELD_MAP["serial"]}"]', serial)
+
+            await page.click("#submit")
+            await page.wait_for_load_state("networkidle", timeout=30000)
+
+            result_title = await page.title()
+            content = await page.content()
+            await browser.close()
+
+            snippet = content[:800].replace("\n", " ")
+            if "Just a moment" in result_title or "Attention Required" in content:
+                return False, f"Blocked by Cloudflare on submit. Title: {result_title}\n{snippet}"
+            return True, f"Submitted. Page title after: {result_title}\n{snippet}"
+
     except Exception as exc:
-        return False, f"Request failed: {exc}"
+        return False, f"Browser automation failed: {exc}"
 
 
 async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
