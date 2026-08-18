@@ -33,7 +33,7 @@ import logging
 import os
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from telegram import (
     InlineKeyboardButton,
@@ -65,6 +65,11 @@ ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", "0"))  # your Telegram user 
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "orders.db"))
 
 CURRENCY = "$"
+
+# Hours ahead of UTC for sales-report day boundaries. Order timestamps are
+# stored in UTC, so without this "Today" would end at UTC midnight rather
+# than your local one. Set via the REPORT_UTC_OFFSET variable in Railway.
+REPORT_UTC_OFFSET = float(os.environ.get("REPORT_UTC_OFFSET", "3"))
 
 # Telegram Stars pricing: ~50 Stars per $1 (based on the in-app purchase
 # packages, e.g. 100 Stars = $2.00). Adjust if Telegram's pricing changes.
@@ -605,6 +610,31 @@ def db_user_delivered_units(user_id: int):
     return rows
 
 
+def db_sales_since(since_iso: str):
+    """Units sold per product since a timestamp, counting only orders that
+    were actually paid for. Returns (list of (item_id, qty), revenue)."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT items_json, total FROM orders "
+        "WHERE created_at >= ? AND status NOT IN ('awaiting_payment', 'awaiting_receipt', "
+        "'awaiting_confirmation', 'cancelled', 'rejected')",
+        (since_iso,),
+    ).fetchall()
+    conn.close()
+
+    counts = {}
+    revenue = 0.0
+    for items_json, total in rows:
+        try:
+            items = json.loads(items_json)
+        except (TypeError, ValueError):
+            continue
+        for item_id, qty in items.items():
+            counts[item_id] = counts.get(item_id, 0) + int(qty)
+        revenue += float(total or 0)
+    return sorted(counts.items(), key=lambda kv: -kv[1]), revenue
+
+
 def db_add_serials(duration: str, codes: list) -> int:
     """Adds serials to the pool. Duplicate codes are silently skipped
     (UNIQUE constraint). Returns how many were actually added."""
@@ -830,13 +860,14 @@ A_ADD_SERIALS = "➕ Add Serials"
 A_REMOVE_SERIAL = "🗑 Remove Serial"
 A_RECENT_ORDERS = "📊 Recent Orders"
 A_PENDING = "⏳ Pending Orders"
+A_INPUT = "📈 Input"
 A_FIND_ORDER = "🔎 Find Order"
 A_FIND_CUSTOMER = "👤 Find Customer"
 A_CUSTOMER_VIEW = "🛍 Customer Menu"
 
 ADMIN_LABELS = [
     A_VIEW_SERIALS, A_ADD_SERIALS, A_REMOVE_SERIAL,
-    A_RECENT_ORDERS, A_PENDING, A_FIND_ORDER, A_FIND_CUSTOMER, A_CUSTOMER_VIEW,
+    A_RECENT_ORDERS, A_PENDING, A_INPUT, A_FIND_ORDER, A_FIND_CUSTOMER, A_CUSTOMER_VIEW,
 ]
 
 
@@ -856,7 +887,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
         [
             [A_VIEW_SERIALS, A_ADD_SERIALS],
             [A_REMOVE_SERIAL, A_RECENT_ORDERS],
-            [A_PENDING],
+            [A_PENDING, A_INPUT],
             [A_FIND_ORDER, A_FIND_CUSTOMER],
             [A_CUSTOMER_VIEW],
         ],
@@ -886,7 +917,8 @@ def admin_review_keyboard(order_id: int) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("✅ Confirm Payment", callback_data=f"admin_confirm:{order_id}"),
                 InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject:{order_id}"),
-            ]
+            ],
+            [InlineKeyboardButton("💬 Send Comment", callback_data=f"admin_comment:{order_id}")],
         ]
     )
 
@@ -1552,6 +1584,9 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == A_PENDING:
         await admin_pending_list(update, context)
 
+    elif text == A_INPUT:
+        await admin_input_menu(update, context)
+
     elif text == A_FIND_ORDER:
         context.user_data["awaiting_admin_input"] = "find_order"
         await update.message.reply_text("Send the order number:")
@@ -1584,6 +1619,113 @@ def format_fulfilment_info(item_id: str, info_json: str) -> str:
         "prev_username": "Previous username",
     }
     return "\n".join(f"{labels.get(k, k)}: {v}" for k, v in info.items())
+
+
+async def admin_input_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sales summary — pick a period."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    await update.message.reply_text(
+        "Show sales for:",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Today", callback_data="sales:today")],
+                [InlineKeyboardButton("This Week", callback_data="sales:week")],
+                [InlineKeyboardButton("This Month", callback_data="sales:month")],
+            ]
+        ),
+    )
+
+
+async def admin_sales_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Totals sold per product for the chosen period."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    period = query.data.split(":", 1)[1]
+    offset = timedelta(hours=REPORT_UTC_OFFSET)
+    local_now = datetime.utcnow() + offset
+
+    if period == "today":
+        local_since = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        label = "Today"
+    elif period == "week":
+        local_since = (local_now - timedelta(days=local_now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        label = "This week"
+    else:
+        local_since = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        label = "This month"
+
+    # Convert the local boundary back to UTC, since that's how orders are stored.
+    counts, revenue = db_sales_since((local_since - offset).isoformat())
+
+    back = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Today", callback_data="sales:today"),
+                InlineKeyboardButton("Week", callback_data="sales:week"),
+                InlineKeyboardButton("Month", callback_data="sales:month"),
+            ]
+        ]
+    )
+
+    if not counts:
+        await query.edit_message_text(f"📈 {label}\n\nNo sales in this period.", reply_markup=back)
+        return
+
+    lines = [f"📈 {label}", ""]
+    total_units = 0
+    for item_id, qty in counts:
+        name = MENU.get(item_id, (item_id,))[0]
+        lines.append(f"{qty} × {name}")
+        total_units += qty
+    lines.append("")
+    lines.append(f"Total accounts: {total_units}")
+    lines.append(f"Revenue: {CURRENCY}{revenue:.2f}")
+
+    await query.edit_message_text("\n".join(lines), reply_markup=back)
+
+
+async def admin_comment_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped 'Send Comment' on a receipt — wait for the message text
+    and pass it on to the customer. Leaves the order's status untouched so
+    it can still be confirmed or rejected afterwards."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    order_id = int(query.data.split(":", 1)[1])
+    context.user_data["awaiting_comment_for_order"] = order_id
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=f"Type the message to send to the customer about order #{order_id}:",
+    )
+
+
+async def admin_comment_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends the admin's typed comment to the customer."""
+    order_id = context.user_data.pop("awaiting_comment_for_order", None)
+    if not order_id:
+        return
+
+    order = db_get_order(order_id)
+    if not order:
+        await update.message.reply_text("Order not found.")
+        return
+
+    _, user_id, username, items_json, total, status, created_at = order
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=f"💬 Message about your order #{order_id}:\n\n{update.message.text}",
+    )
+    await update.message.reply_text(f"✅ Comment sent to the customer for order #{order_id}.")
 
 
 async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1641,7 +1783,13 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
 
     buttons = []
     if state == "awaiting_delivery":
-        buttons.append([InlineKeyboardButton("📤 Deliver to Customer", callback_data=f"deliver:{fulfilment_id}")])
+        buttons.append([InlineKeyboardButton("📤 Deliver Manually", callback_data=f"deliver:{fulfilment_id}")])
+        # iMD normally registers automatically; offer a retry here so a
+        # failed attempt doesn't force manual handling.
+        if item_id in IMD_TRIGGER_ITEMS:
+            buttons.append(
+                [InlineKeyboardButton("🔁 Retry Auto Registration", callback_data=f"reg_go:{order_id}")]
+            )
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="apend_back")])
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -1770,6 +1918,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # thing the admin explicitly asked to do.
         if context.user_data.get("awaiting_admin_input"):
             await admin_input_reply(update, context)
+            return
+        if context.user_data.get("awaiting_comment_for_order"):
+            await admin_comment_reply(update, context)
             return
         if context.user_data.get("awaiting_credentials_fulfilment"):
             await credentials_reply(update, context)
@@ -2005,6 +2156,13 @@ async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TY
         "item_id": item_id,
         "fulfilment_id": fulfilment_id,
     }
+
+    # Persist the customer's details on the fulfilment row too, so they show
+    # in Pending Orders and survive a restart — bot_data alone would leave
+    # the admin with nothing to work from if auto-registration fails.
+    if fulfilment_id:
+        db_set_fulfilment_info(fulfilment_id, data)
+        db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
 
     if ADMIN_CHAT_ID:
         duration_label = "1 Year" if duration == "1y" else "6 Months"
@@ -2685,6 +2843,7 @@ def main():
     app.add_handler(CommandHandler("removeserial", remove_serial_command))
     app.add_handler(CallbackQueryHandler(order_action, pattern=r"^(paid|cancel):"))
     app.add_handler(CallbackQueryHandler(admin_action, pattern=r"^admin_(confirm|reject):"))
+    app.add_handler(CallbackQueryHandler(admin_comment_start, pattern=r"^admin_comment:"))
     app.add_handler(CallbackQueryHandler(deliver_start, pattern=r"^deliver:"))
     app.add_handler(CallbackQueryHandler(reg_go, pattern=r"^reg_go:"))
     app.add_handler(CallbackQueryHandler(add_serials_pick_duration, pattern=r"^addser:"))
@@ -2702,6 +2861,7 @@ def main():
     app.add_handler(CallbackQueryHandler(pending_detail, pattern=r"^pend:"))
     app.add_handler(CallbackQueryHandler(admin_pending_detail, pattern=r"^apend:"))
     app.add_handler(CallbackQueryHandler(admin_pending_back, pattern=r"^apend_back$"))
+    app.add_handler(CallbackQueryHandler(admin_sales_report, pattern=r"^sales:"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, receipt_photo))
