@@ -401,6 +401,14 @@ CRYPTO_INSTRUCTIONS = (
 # for it to be sent automatically.
 INDIA_QR_PATH = os.path.join(os.path.dirname(__file__), "assets", "india_qr.jpg")
 
+# Card payment tutorial screenshots, shown when a customer taps
+# "Pay using Visa/Mastercard".
+CARD_TUTORIAL_IMAGES = [
+    os.path.join(os.path.dirname(__file__), "assets", "card_step1.jpg"),
+    os.path.join(os.path.dirname(__file__), "assets", "card_step2.jpg"),
+    os.path.join(os.path.dirname(__file__), "assets", "card_step3.jpg"),
+]
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -648,6 +656,15 @@ def db_get_fulfilment(fulfilment_id: int):
     ).fetchone()
     conn.close()
     return row
+
+
+def db_delete_fulfilment(fulfilment_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("DELETE FROM fulfilment WHERE id = ?", (fulfilment_id,))
+    conn.commit()
+    deleted = cur.rowcount
+    conn.close()
+    return bool(deleted)
 
 
 def db_order_undelivered_items(order_id: int):
@@ -1501,7 +1518,7 @@ def checkout_view(order_id: int):
 
     buttons = [
         [InlineKeyboardButton("⭐ Pay with Telegram Stars", callback_data=f"pay_stars:{order_id}")],
-        [InlineKeyboardButton("💳 Pay using Visa/Mastercard", url=PAYMENT_LINK_BASE_URL)],
+        [InlineKeyboardButton("💳 Pay using Visa/Mastercard", callback_data=f"pay_card:{order_id}")],
         [InlineKeyboardButton("🌍 Pay using local payment methods", callback_data=f"local_pay:{order_id}")],
         [InlineKeyboardButton("₿ Pay with Cryptocurrency", callback_data=f"pay_crypto:{order_id}")],
         [InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")],
@@ -1634,6 +1651,43 @@ async def usa_app_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⬅️ Back", callback_data=f"local_country:{order_id}:USA")],
     ]
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def pay_card_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the step-by-step tutorial for paying by Visa/Mastercard,
+    with real screenshots, before sending the customer to the payment link."""
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+
+    order = db_get_order(order_id)
+    total = order[4] if order else 0
+
+    text = (
+        "*💳 Pay using Visa/Mastercard*\n\n"
+        f"Amount to pay: *{CURRENCY}{total:.2f}*\n\n"
+        "1️⃣ Choose \"Pay online with your card\"\n\n"
+        "2️⃣ Fill in the details:\n"
+        "• From whom is the gift? — type your first name\n"
+        f"• How much do you want to gift? — enter *{total:.2f}* (exact amount in USD)\n"
+        "• Message (optional) — leave this empty\n\n"
+        "3️⃣ Enter your Visa/Mastercard details and proceed\n\n"
+        "✅ Done!"
+    )
+    buttons = [
+        [InlineKeyboardButton("💳 Open Payment Link", url=PAYMENT_LINK_BASE_URL)],
+        [InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")],
+        [InlineKeyboardButton("⬅️ Back", callback_data=f"back_to_checkout:{order_id}")],
+    ]
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
+
+    for path in CARD_TUTORIAL_IMAGES:
+        if os.path.exists(path):
+            try:
+                with open(path, "rb") as img_file:
+                    await context.bot.send_photo(chat_id=query.message.chat_id, photo=img_file)
+            except Exception:
+                logger.exception("Failed to send card tutorial image: %s", path)
 
 
 async def pay_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2371,9 +2425,68 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     elif state == "awaiting_delivery":
         buttons.append([InlineKeyboardButton("📤 Deliver Manually", callback_data=f"deliver:{fulfilment_id}")])
     buttons.append([InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{order_id}")])
+    buttons.append([InlineKeyboardButton("🗑 Delete", callback_data=f"pdel:{fulfilment_id}")])
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="apend_back")])
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def pending_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '🗑 Delete' — ask for confirmation before actually
+    removing it, since this can't be undone."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    fulfilment_id = int(query.data.split(":", 1)[1])
+    row = db_get_fulfilment(fulfilment_id)
+    if not row:
+        await query.edit_message_text("That item no longer exists.")
+        return
+
+    _, order_id, user_id, item_id, unit_no, state, info_json = row
+    name = MENU.get(item_id, (item_id,))[0]
+
+    await query.edit_message_text(
+        f"Delete {name}{f' #{unit_no}' if unit_no > 1 else ''} from Order #{order_id}?\n\n"
+        "This removes it from Pending Orders permanently — the customer will NOT be notified "
+        "and this can't be undone.",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✅ Yes, delete it", callback_data=f"pdel_yes:{fulfilment_id}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data=f"apend:{fulfilment_id}")],
+            ]
+        ),
+    )
+
+
+async def pending_delete_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Actually deletes the pending item after confirmation."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    fulfilment_id = int(query.data.split(":", 1)[1])
+    row = db_get_fulfilment(fulfilment_id)
+
+    if not row:
+        await query.edit_message_text("That item no longer exists.")
+        return
+
+    _, order_id, user_id, item_id, unit_no, state, info_json = row
+    name = MENU.get(item_id, (item_id,))[0]
+
+    db_delete_fulfilment(fulfilment_id)
+
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Pending Orders", callback_data="apend_back")]])
+    await query.edit_message_text(
+        f"🗑 Deleted: {name}{f' #{unit_no}' if unit_no > 1 else ''} — Order #{order_id}",
+        reply_markup=back,
+    )
 
 
 async def imd_manual_deliver(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3575,6 +3688,7 @@ def main():
     app.add_handler(CallbackQueryHandler(local_pay_start, pattern=r"^local_pay:"))
     app.add_handler(CallbackQueryHandler(local_country_selected, pattern=r"^local_country:"))
     app.add_handler(CallbackQueryHandler(usa_app_selected, pattern=r"^usa_app:"))
+    app.add_handler(CallbackQueryHandler(pay_card_start, pattern=r"^pay_card:"))
     app.add_handler(CallbackQueryHandler(pay_crypto, pattern=r"^pay_crypto:"))
     app.add_handler(CallbackQueryHandler(back_to_checkout, pattern=r"^back_to_checkout:"))
     app.add_handler(CallbackQueryHandler(my_subscription_detail, pattern=r"^mysub:"))
@@ -3583,6 +3697,8 @@ def main():
     app.add_handler(CallbackQueryHandler(subs_pending, pattern=r"^subs_pending$"))
     app.add_handler(CallbackQueryHandler(pending_detail, pattern=r"^pend:"))
     app.add_handler(CallbackQueryHandler(admin_pending_detail, pattern=r"^apend:"))
+    app.add_handler(CallbackQueryHandler(pending_delete_confirm, pattern=r"^pdel:"))
+    app.add_handler(CallbackQueryHandler(pending_delete_execute, pattern=r"^pdel_yes:"))
     app.add_handler(CallbackQueryHandler(admin_msg_start, pattern=r"^admin_msg:"))
     app.add_handler(CallbackQueryHandler(customer_reply_start, pattern=r"^cust_reply:"))
     app.add_handler(CallbackQueryHandler(inbox_list, pattern=r"^inbox:"))
