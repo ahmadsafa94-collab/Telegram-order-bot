@@ -743,6 +743,17 @@ def db_user_orders(user_id: int, limit: int = 5):
 # HELPERS
 # ------------------------------------------------------------------
 
+def md_escape(text: str) -> str:
+    """Escapes Telegram Markdown control characters. Product names or
+    customer-supplied values containing _ * ` [ would otherwise make
+    Telegram reject the entire message with a parse error."""
+    if text is None:
+        return ""
+    for ch in ("\\", "_", "*", "`", "["):
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
 def format_cart(cart: dict) -> str:
     if not cart:
         return "Your cart is empty."
@@ -1050,13 +1061,13 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if status in ("awaiting_payment", "awaiting_receipt", "awaiting_confirmation"):
         if status == "awaiting_confirmation":
             text = (
-                f"⏳ *{name}* (Order #{order_id})\n\n"
+                f"⏳ *{md_escape(name)}* (Order #{order_id})\n\n"
                 "We've received your receipt and are verifying your payment. "
                 "You'll hear from us as soon as it's confirmed."
             )
         else:
             text = (
-                f"⏳ *{name}* (Order #{order_id})\n\n"
+                f"⏳ *{md_escape(name)}* (Order #{order_id})\n\n"
                 "We haven't received your payment yet. Please complete the payment, "
                 "then tap *I've Paid* and upload your receipt."
             )
@@ -1075,7 +1086,7 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             # Nothing in progress for this unit — restart its collection.
             await query.edit_message_text(
-                f"📝 *{name}* (Order #{order_id})\n\nWe still need some details from you.",
+                f"📝 *{md_escape(name)}* (Order #{order_id})\n\nWe still need some details from you.",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=back,
             )
@@ -1083,7 +1094,7 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         await query.edit_message_text(
-            f"📝 *{name}* (Order #{order_id})\n\nWe still need some information from you.",
+            f"📝 *{md_escape(name)}* (Order #{order_id})\n\nWe still need some information from you.",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=back,
         )
@@ -1091,7 +1102,7 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.edit_message_text(
-        f"⏳ *{name}* (Order #{order_id})\n\n"
+        f"⏳ *{md_escape(name)}* (Order #{order_id})\n\n"
         "Your payment is confirmed and we have everything we need. Your account is being "
         "prepared and will be delivered here shortly — please bear with us.\n\n"
         "If it's been more than 48 hours, contact support from the menu.",
@@ -1819,12 +1830,14 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
         customer_data["awaiting_generic_field"] = GENERIC_FIELDS[0][0]
         await context.bot.send_message(
             chat_id=user_id,
+            # Plain text on purpose: the password rules mention the symbols
+            # @ _ # $, and the underscore makes Telegram's Markdown parser
+            # reject the whole message ("can't find end of the entity").
             text=(
-                f"📝 Now let's set up your *{item_name}*.\n\n"
+                f"📝 Now let's set up your {item_name}.\n\n"
                 f"Please provide the following:\n{GENERIC_RULES_TEXT}\n\n"
                 f"{GENERIC_FIELDS[0][1]}"
             ),
-            parse_mode=ParseMode.MARKDOWN,
         )
 
 
