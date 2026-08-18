@@ -181,12 +181,6 @@ IMD_EMAIL_ERROR_KEYWORDS = [
 
 GENERIC_PASSWORD_SYMBOLS = "@_#$"
 
-GENERIC_RULES_TEXT = (
-    "• Username: at least 6 characters\n"
-    "• Password: at least 8 characters, including at least one number, "
-    f"one capital letter, and one symbol from {GENERIC_PASSWORD_SYMBOLS}"
-)
-
 DELIVERY_48H_MESSAGE = (
     "✅ Thanks! Your subscription will be delivered here within the next 48 hours.\n\n"
     "If you haven't heard from us after 48 hours, please contact support from the menu."
@@ -1165,13 +1159,28 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cart = context.user_data.setdefault("cart", {})
 
     if data.startswith("add:"):
-        # Answer with the toast text FIRST — Telegram only honours the first
-        # answerCallbackQuery per tap, so answering blankly up top would
-        # silently swallow this popup.
         item_id = data.split(":", 1)[1]
         cart[item_id] = cart.get(item_id, 0) + 1
-        await query.answer("✅ Added to the basket", show_alert=False)
-        await query.edit_message_reply_markup(reply_markup=menu_keyboard())
+        name = MENU.get(item_id, (item_id,))[0]
+        await query.answer()
+
+        # Put the confirmation in the message body rather than a toast — a
+        # toast flashes briefly at the top of the screen and is easy to
+        # miss, while this sits right above the buttons the customer is
+        # already looking at.
+        total_units = sum(cart.values())
+        summary = (
+            "Tap an item below to add it to your order.\n\n"
+            f"✅ Added to the basket: {name}\n"
+            f"🧺 Basket: {total_units} item{'s' if total_units != 1 else ''} — "
+            f"{CURRENCY}{cart_total(cart):.2f}"
+        )
+        try:
+            await query.edit_message_text(summary, reply_markup=menu_keyboard())
+        except Exception:
+            # Same text as before (e.g. re-tapping in an odd order) — the
+            # cart still updated, so this is safe to ignore.
+            await query.edit_message_reply_markup(reply_markup=menu_keyboard())
         return
 
     await query.answer()
@@ -1782,17 +1791,89 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
     buttons = []
-    if state == "awaiting_delivery":
-        buttons.append([InlineKeyboardButton("📤 Deliver Manually", callback_data=f"deliver:{fulfilment_id}")])
-        # iMD normally registers automatically; offer a retry here so a
-        # failed attempt doesn't force manual handling.
-        if item_id in IMD_TRIGGER_ITEMS:
+    if item_id in IMD_TRIGGER_ITEMS:
+        # The customer already supplied the username/password, so manual
+        # delivery just needs to send the standard iMD template — no
+        # retyping. Offered regardless of state so a stuck item can always
+        # be pushed through.
+        if info_json:
             buttons.append(
-                [InlineKeyboardButton("🔁 Retry Auto Registration", callback_data=f"reg_go:{order_id}")]
+                [InlineKeyboardButton("📤 Send iMD Details Now", callback_data=f"imddeliver:{fulfilment_id}")]
             )
+        buttons.append(
+            [InlineKeyboardButton("🔁 Retry Auto Registration", callback_data=f"reg_go:{order_id}")]
+        )
+        buttons.append(
+            [InlineKeyboardButton("✍️ Type Details Instead", callback_data=f"deliver:{fulfilment_id}")]
+        )
+    elif state == "awaiting_delivery":
+        buttons.append([InlineKeyboardButton("📤 Deliver Manually", callback_data=f"deliver:{fulfilment_id}")])
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="apend_back")])
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def imd_manual_deliver(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends the standard iMD delivery message using the details the
+    customer already submitted — used when automatic registration failed
+    but the admin has registered the account by hand."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    fulfilment_id = int(query.data.split(":", 1)[1])
+    row = db_get_fulfilment(fulfilment_id)
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="apend_back")]])
+
+    if not row:
+        await query.edit_message_text("That item no longer exists.", reply_markup=back)
+        return
+
+    _, order_id, user_id, item_id, unit_no, state, info_json = row
+
+    try:
+        info = json.loads(info_json) if info_json else {}
+    except (TypeError, ValueError):
+        info = {}
+
+    if not info:
+        await query.edit_message_text(
+            "No details on file for this item — use ✍️ Type Details Instead.", reply_markup=back
+        )
+        return
+
+    is_renew = item_id in IMD_RENEW_ITEMS
+    duration = IMD_DURATION_MAP.get(item_id)
+
+    if is_renew:
+        username = info.get("prev_username")
+        password = None
+    else:
+        username = info.get("username")
+        password = info.get("password")
+
+    if not username:
+        await query.edit_message_text(
+            "No username on file for this item — use ✍️ Type Details Instead.", reply_markup=back
+        )
+        return
+
+    message = build_imd_delivery_message(username, password, duration=duration)
+
+    await context.bot.send_message(chat_id=user_id, text=message)
+    db_save_delivery(order_id, message)
+    db_add_delivery(order_id, user_id, item_id, message)
+    db_set_fulfilment_state(fulfilment_id, "delivered")
+    context.application.bot_data.get("pending_registrations", {}).pop(order_id, None)
+
+    await query.edit_message_text(
+        f"✅ iMD details sent to the customer (Order #{order_id}).", reply_markup=back
+    )
+
+    # Continue with any remaining items in the same order.
+    await process_next_in_queue(context, user_id, order_id)
 
 
 async def admin_pending_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1986,7 +2067,6 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
             # reject the whole message ("can't find end of the entity").
             text=(
                 f"📝 Now let's set up your {item_name}.\n\n"
-                f"Please provide the following:\n{GENERIC_RULES_TEXT}\n\n"
                 f"{GENERIC_FIELDS[0][1]}"
             ),
         )
@@ -2861,6 +2941,7 @@ def main():
     app.add_handler(CallbackQueryHandler(pending_detail, pattern=r"^pend:"))
     app.add_handler(CallbackQueryHandler(admin_pending_detail, pattern=r"^apend:"))
     app.add_handler(CallbackQueryHandler(admin_pending_back, pattern=r"^apend_back$"))
+    app.add_handler(CallbackQueryHandler(imd_manual_deliver, pattern=r"^imddeliver:"))
     app.add_handler(CallbackQueryHandler(admin_sales_report, pattern=r"^sales:"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
