@@ -1666,13 +1666,15 @@ async def pay_card_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "*💳 Pay using Visa/Mastercard*\n\n"
         f"Amount to pay: *{CURRENCY}{total:.2f}*\n\n"
-        "1️⃣ Choose \"Pay online with your card\"\n\n"
-        "2️⃣ Fill in the details:\n"
+        "1️⃣ First click on the \"Open Payment Link\" button\n\n"
+        "2️⃣ Choose \"Pay online with your card\"\n\n"
+        "3️⃣ Fill in the details:\n"
         "• From whom is the gift? — type your first name\n"
         f"• How much do you want to gift? — enter *{total:.2f}* (exact amount in USD)\n"
         "• Message (optional) — leave this empty\n\n"
-        "3️⃣ Enter your Visa/Mastercard details and proceed\n\n"
-        "✅ Done!"
+        "4️⃣ Enter your Visa/Mastercard details and proceed\n\n"
+        "✅ Done!\n\n"
+        "5️⃣ Click *I've Paid* below after the payment is done."
     )
     buttons = [
         [InlineKeyboardButton("💳 Open Payment Link", url=PAYMENT_LINK_BASE_URL)],
@@ -1700,8 +1702,9 @@ async def pay_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")],
         [InlineKeyboardButton("⬅️ Back", callback_data=f"back_to_checkout:{order_id}")],
     ]
+    text = CRYPTO_INSTRUCTIONS + "\n\nClick *I've Paid* below after the payment is done."
     await query.edit_message_text(
-        CRYPTO_INSTRUCTIONS, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons)
+        text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 
@@ -1758,7 +1761,12 @@ async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fires automatically once a Stars payment completes — no manual confirmation needed."""
+    """Fires automatically once a Stars payment completes — no manual
+    confirmation needed. Structured to match the manual-confirm path:
+    order fulfilment (iMD/generic collection, delivery, Pending Orders
+    tracking) must start regardless of whether the informational admin
+    notification below succeeds — a failed cosmetic step must never
+    silently strand the order."""
     payload = update.message.successful_payment.invoice_payload
     order_id = int(payload.split("_", 1)[1])
 
@@ -1770,9 +1778,22 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     )
 
     order = db_get_order(order_id)
-    if order and ADMIN_CHAT_ID:
-        _, user_id, username, items_json, total, status, created_at = order
-        items = json.loads(items_json)
+    if not order:
+        logger.error("Stars payment succeeded for order #%s but no matching order record was found", order_id)
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    f"⚠️ Stars payment received for order #{order_id}, but no matching order "
+                    "record exists — please check this manually."
+                ),
+            )
+        return
+
+    _, user_id, username, items_json, total, status, created_at = order
+    items = json.loads(items_json)
+
+    if ADMIN_CHAT_ID:
         lines = [f"{qty}x {MENU[i][0]}" for i, qty in items.items()]
         text = (
             f"⭐ Stars payment received — Order #{order_id}\n"
@@ -1781,9 +1802,15 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
             + f"\n\nTotal: {CURRENCY}{total:.2f}\n"
             "Paid automatically via Telegram Stars — no action needed."
         )
-        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
+        try:
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
+        except Exception:
+            # Non-fatal — this is informational only. Fulfilment proceeds
+            # below no matter what happens here, same as how the manual
+            # path isolates its cosmetic caption edit.
+            logger.exception("Failed to notify admin of Stars payment for order #%s", order_id)
 
-        await start_order_fulfilment(context, order_id, user_id, items)
+    await start_order_fulfilment(context, order_id, user_id, items)
 
 
 async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
