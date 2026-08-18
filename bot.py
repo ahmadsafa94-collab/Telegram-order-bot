@@ -585,7 +585,12 @@ def db_all_pending_items():
     rows = conn.execute(
         "SELECT f.id, f.order_id, f.user_id, o.username, f.item_id, f.unit_no, f.state "
         "FROM fulfilment f JOIN orders o ON o.id = f.order_id "
-        "WHERE f.state != 'delivered' AND o.status = 'paid' "
+        # NOT an `o.status = 'paid'` check: delivering the first item of a
+        # multi-item order flips the whole order's status to 'delivered',
+        # which would then hide its remaining items from this list.
+        "WHERE f.state != 'delivered' "
+        "AND o.status NOT IN ('cancelled', 'rejected', 'awaiting_payment', "
+        "'awaiting_receipt', 'awaiting_confirmation') "
         "ORDER BY f.order_id, f.id",
     ).fetchall()
     conn.close()
