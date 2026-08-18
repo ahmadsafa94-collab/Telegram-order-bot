@@ -448,6 +448,20 @@ def db_init():
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            direction TEXT NOT NULL,
+            body TEXT NOT NULL,
+            is_read INTEGER NOT NULL DEFAULT 0,
+            delivered INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS deliveries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             order_id INTEGER NOT NULL,
@@ -699,6 +713,56 @@ def db_sales_since(since_iso: str):
     return sorted(counts.items(), key=lambda kv: -kv[1]), revenue
 
 
+def db_add_message(order_id: int, user_id: int, direction: str, body: str, delivered: bool = True) -> int:
+    """Records one message in either direction. `delivered` tracks whether
+    the live push to Telegram actually succeeded — if not, the Inbox is
+    still where the admin can find it, so a failed live send is never a
+    dead end."""
+    conn = sqlite3.connect(DB_PATH)
+    # Outgoing (admin -> customer) messages are authored by the admin, so
+    # there's nothing to "read" — only incoming ones start unread.
+    is_read = 1 if direction == "to_customer" else 0
+    cur = conn.execute(
+        "INSERT INTO messages (order_id, user_id, direction, body, is_read, delivered, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (order_id, user_id, direction, body, is_read, int(delivered), datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    message_id = cur.lastrowid
+    conn.close()
+    return message_id
+
+
+def db_inbox_messages(read: bool):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT m.id, m.order_id, o.username, m.body, m.created_at, m.delivered "
+        "FROM messages m LEFT JOIN orders o ON o.id = m.order_id "
+        "WHERE m.direction = 'from_customer' AND m.is_read = ? "
+        "ORDER BY m.id DESC",
+        (0 if not read else 1,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def db_get_message(message_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT id, order_id, user_id, direction, body, created_at, delivered FROM messages WHERE id = ?",
+        (message_id,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def db_mark_message_read(message_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE messages SET is_read = 1 WHERE id = ?", (message_id,))
+    conn.commit()
+    conn.close()
+
+
 def db_add_serials(duration: str, codes: list) -> int:
     """Adds serials to the pool. Duplicate codes are silently skipped
     (UNIQUE constraint). Returns how many were actually added."""
@@ -925,13 +989,14 @@ A_REMOVE_SERIAL = "🗑 Remove Serial"
 A_RECENT_ORDERS = "📊 Recent Orders"
 A_PENDING = "⏳ Pending Orders"
 A_INPUT = "📈 Input"
+A_INBOX = "📥 Inbox"
 A_FIND_ORDER = "🔎 Find Order"
 A_FIND_CUSTOMER = "👤 Find Customer"
 A_CUSTOMER_VIEW = "🛍 Customer Menu"
 
 ADMIN_LABELS = [
     A_VIEW_SERIALS, A_ADD_SERIALS, A_REMOVE_SERIAL,
-    A_RECENT_ORDERS, A_PENDING, A_INPUT, A_FIND_ORDER, A_FIND_CUSTOMER, A_CUSTOMER_VIEW,
+    A_RECENT_ORDERS, A_PENDING, A_INPUT, A_INBOX, A_FIND_ORDER, A_FIND_CUSTOMER, A_CUSTOMER_VIEW,
 ]
 
 
@@ -952,6 +1017,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [A_VIEW_SERIALS, A_ADD_SERIALS],
             [A_REMOVE_SERIAL, A_RECENT_ORDERS],
             [A_PENDING, A_INPUT],
+            [A_INBOX],
             [A_FIND_ORDER, A_FIND_CUSTOMER],
             [A_CUSTOMER_VIEW],
         ],
@@ -1761,6 +1827,9 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == A_INPUT:
         await admin_input_menu(update, context)
 
+    elif text == A_INBOX:
+        await inbox_menu(update, context)
+
     elif text == A_FIND_ORDER:
         context.user_data["awaiting_admin_input"] = "find_order"
         await update.message.reply_text("Send the order number:")
@@ -1927,6 +1996,103 @@ async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+def _inbox_summary_keyboard() -> InlineKeyboardMarkup:
+    unread = len(db_inbox_messages(read=False))
+    read = len(db_inbox_messages(read=True))
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(f"📩 Unread ({unread})", callback_data="inbox:unread")],
+            [InlineKeyboardButton(f"📖 Read ({read})", callback_data="inbox:read")],
+        ]
+    )
+
+
+async def inbox_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: top of the Inbox — unread vs read customer messages.
+    A permanent fallback that doesn't depend on the live chat push having
+    worked — every incoming customer message lands here regardless."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    await update.message.reply_text("Inbox:", reply_markup=_inbox_summary_keyboard())
+
+
+async def inbox_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists messages in the chosen Unread/Read bucket."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    which = query.data.split(":", 1)[1]
+    rows = db_inbox_messages(read=(which == "read"))
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="inbox_back")]])
+
+    if not rows:
+        label = "read" if which == "read" else "unread"
+        await query.edit_message_text(f"No {label} messages.", reply_markup=back)
+        return
+
+    buttons = []
+    for message_id, order_id, username, body, created_at, delivered in rows:
+        who = f"@{username}" if username else f"Order #{order_id}"
+        preview = body.replace("\n", " ")[:30]
+        flag = "" if delivered else "⚠️ "
+        buttons.append(
+            [InlineKeyboardButton(f"{flag}{who}: {preview}"[:60], callback_data=f"inboxmsg:{message_id}")]
+        )
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="inbox_back")])
+
+    await query.edit_message_text(
+        f"{'📖 Read' if which == 'read' else '📩 Unread'} messages:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def inbox_message_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows one message in full, marks it read, and offers a Reply button."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    message_id = int(query.data.split(":", 1)[1])
+    row = db_get_message(message_id)
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="inbox_back")]])
+
+    if not row:
+        await query.edit_message_text("That message no longer exists.", reply_markup=back)
+        return
+
+    _, order_id, user_id, direction, body, created_at, delivered = row
+    db_mark_message_read(message_id)
+
+    order = db_get_order(order_id)
+    username = order[2] if order else None
+    who = f"@{username}" if username else str(user_id)
+
+    text = (
+        f"From: {who} (Order #{order_id})\n"
+        f"Sent: {created_at[:19]}\n"
+        + ("⚠️ Live delivery to admin failed — found via Inbox only.\n" if not delivered else "")
+        + f"\n{body}"
+    )
+    buttons = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💬 Reply", callback_data=f"admin_msg:{order_id}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="inbox_back")],
+        ]
+    )
+    await query.edit_message_text(text, reply_markup=buttons)
+
+
+async def inbox_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Inbox:", reply_markup=_inbox_summary_keyboard())
+
+
 async def admin_msg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin tapped '💬 Message Customer' — wait for their next text and
     forward it, tagged with which order it's about."""
@@ -1945,7 +2111,8 @@ async def admin_msg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_message_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends the admin's typed message to the customer, with a Reply button
-    so they can answer directly from within the message."""
+    so they can answer directly from within the message. Recorded in the
+    message log regardless of whether the live send succeeds."""
     order_id = context.user_data.pop("awaiting_admin_message_for_order", None)
     if not order_id:
         return
@@ -1956,14 +2123,26 @@ async def admin_message_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     user_id = order[1]
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=f"💬 Message about your order #{order_id}:\n\n{update.message.text}",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("↩️ Reply", callback_data=f"cust_reply:{order_id}")]]
-        ),
-    )
-    await update.message.reply_text(f"✅ Message sent to the customer for order #{order_id}.")
+    body = update.message.text
+
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"💬 Message about your order #{order_id}:\n\n{body}",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ Reply", callback_data=f"cust_reply:{order_id}")]]
+            ),
+        )
+        db_add_message(order_id, user_id, "to_customer", body, delivered=True)
+        await update.message.reply_text(f"✅ Message sent to the customer for order #{order_id}.")
+    except Exception:
+        logger.exception("Failed to deliver admin message for order #%s", order_id)
+        db_add_message(order_id, user_id, "to_customer", body, delivered=False)
+        await update.message.reply_text(
+            f"⚠️ Could not deliver this to the customer for order #{order_id} — it's saved, "
+            "but they may not have received it live. They may have blocked the bot, or it "
+            "couldn't reach them."
+        )
 
 
 async def customer_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1978,22 +2157,37 @@ async def customer_reply_start(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def customer_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Forwards the customer's reply to the admin, with a Reply button of
-    its own so the conversation can continue."""
+    its own so the conversation can continue. Always recorded in the
+    message log — including when the live push fails — so 📥 Inbox is a
+    reliable fallback the admin can check even if the chat notification
+    never arrived."""
     order_id = context.user_data.pop("awaiting_customer_reply_for_order", None)
-    if not order_id or not ADMIN_CHAT_ID:
+    if not order_id:
         return
 
     order = db_get_order(order_id)
     username = order[2] if order else None
     who = f"@{username}" if username else str(update.effective_user.id)
+    body = update.message.text
 
-    await context.bot.send_message(
-        chat_id=ADMIN_CHAT_ID,
-        text=f"💬 Reply from {who} — Order #{order_id}:\n\n{update.message.text}",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("💬 Reply", callback_data=f"admin_msg:{order_id}")]]
-        ),
-    )
+    message_id = db_add_message(order_id, update.effective_user.id, "from_customer", body, delivered=bool(ADMIN_CHAT_ID))
+
+    if not ADMIN_CHAT_ID:
+        return
+
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"💬 Reply from {who} — Order #{order_id}:\n\n{body}",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("💬 Reply", callback_data=f"admin_msg:{order_id}")]]
+            ),
+        )
+    except Exception:
+        # The live push failed, but the message is already in the Inbox
+        # (recorded above) — nothing is lost, it just needs to be checked
+        # there instead of appearing directly in chat.
+        logger.exception("Failed to deliver customer reply for order #%s to admin", order_id)
 
 
 async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3227,6 +3421,9 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_pending_detail, pattern=r"^apend:"))
     app.add_handler(CallbackQueryHandler(admin_msg_start, pattern=r"^admin_msg:"))
     app.add_handler(CallbackQueryHandler(customer_reply_start, pattern=r"^cust_reply:"))
+    app.add_handler(CallbackQueryHandler(inbox_list, pattern=r"^inbox:"))
+    app.add_handler(CallbackQueryHandler(inbox_message_detail, pattern=r"^inboxmsg:"))
+    app.add_handler(CallbackQueryHandler(inbox_back, pattern=r"^inbox_back$"))
     app.add_handler(CallbackQueryHandler(admin_pending_back, pattern=r"^apend_back$"))
     app.add_handler(CallbackQueryHandler(imd_manual_deliver, pattern=r"^imddeliver:"))
     app.add_handler(CallbackQueryHandler(admin_sales_report, pattern=r"^sales:"))
