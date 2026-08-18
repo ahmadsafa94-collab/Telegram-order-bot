@@ -252,6 +252,36 @@ PAYMENT_LINK_BASE_URL = "https://payments.suyool.com/pay/g401_MD"
 # Countries offered under "Pay using local payment methods."
 LOCAL_PAYMENT_COUNTRIES = ["Lebanon", "Jordan", "India", "Ghana", "Pakistan", "Europe", "USA", "KSA", "Russia"]
 
+COUNTRY_FLAGS = {
+    "Lebanon": "🇱🇧", "Jordan": "🇯🇴", "India": "🇮🇳", "Ghana": "🇬🇭",
+    "Pakistan": "🇵🇰", "Europe": "🇪🇺", "USA": "🇺🇸", "KSA": "🇸🇦", "Russia": "🇷🇺",
+}
+
+# 1 USD in the local currency, and the currency code to display it in.
+# "USD" as the code means no conversion is shown (paid in USD directly).
+CURRENCY_RATES = {
+    "Lebanon": ("USD", 1),
+    "Jordan": ("JOD", 0.716),
+    "India": ("INR", 94.5),
+    "Ghana": ("GHS", 11.8),
+    "Pakistan": ("PKR", 280),
+    "Europe": ("USD", 1),
+    "USA": ("USD", 1),
+    "KSA": ("SAR", 3.8),
+    "Russia": ("RUB", 85.5),
+}
+
+
+def convert_for_country(total_usd: float, country: str) -> str:
+    """The order total converted into that country's currency, with the
+    USD amount shown alongside for reference."""
+    code, rate = CURRENCY_RATES.get(country, ("USD", 1))
+    if code == "USD":
+        return f"{CURRENCY}{total_usd:.2f}"
+    converted = total_usd * rate
+    return f"{converted:,.2f} {code} (≈{CURRENCY}{total_usd:.2f})"
+
+
 # Payment instructions per country. Wrapped in backticks where possible so
 # the ID/number is tap-to-copy in Telegram.
 LOCAL_PAYMENT_INSTRUCTIONS = {
@@ -263,20 +293,12 @@ LOCAL_PAYMENT_INSTRUCTIONS = {
         "Tap on one of the cliq IDs below to copy:\n\n"
         "CLIQ ALIAS: `WKS777`\n(Orange Money)\nWALEED SHAQFEH\n\n"
         "CLIQ ALIAS: `WKS999`\n(Etihad bank)\nWALEED SHAQFEH\n\n"
-        "CLIQ ALIAS: `WKS555`\n(Zain Cash)\nMohammad shamalti\n\n"
-        "🧾 After the payment is done, please send a screenshot of the receipt "
-        "and your name on cliq.\n\n"
-        "We will reach out back at the earliest to register your account. Please be patient."
+        "CLIQ ALIAS: `WKS555`\n(Zain Cash)\nMohammad shamalti"
     ),
     "India": (
         "UPI ID (tap to copy)\n`s4005194160889795@slc`\n\n"
         "Name: Shilpaben karetiya\n\n"
         "‼️ Important Remarks:\n\n"
-        "➖ This ID is valid for the next 48 hours. Confirm with us before you do "
-        "the payment if you are doing it after 48 hours.\n\n"
-        "➖ Upon completion of the payment, please send the full receipt (with the "
-        "transaction ID or UTR shown) and await our response and confirmation. "
-        "We will contact you promptly to proceed with your account registration.\n\n"
         "➖ STRICTLY don't mention anything regarding the subscription in the "
         "comments/remarks of the payment. Just leave it empty.\n\n"
         "➖ If you could not complete the payment in whole, do it in parts. "
@@ -288,7 +310,14 @@ LOCAL_PAYMENT_INSTRUCTIONS = {
         "📲 `0204860754`\nTelecel/Vodafone\nSaibu Mahamadu\n\n"
         "Strictly do not call the number please. Just do the payment."
     ),
-    "Pakistan": "Local payment details for Pakistan go here.",
+    "Pakistan": (
+        "Tap on the account/IBAN number to copy.\n\n"
+        "Bank: HBL\n"
+        "Name: MUHAMMAD BILAL\n"
+        "Account Number: `03577900871203`\n"
+        "IBAN: `PK08HABB0003577900871203`\n"
+        "Branch: TOTALAI"
+    ),
     "Europe": (
         "Revolut (visa to visa)\n\n"
         "1) Open your Revolut app/website\n"
@@ -298,15 +327,14 @@ LOCAL_PAYMENT_INSTRUCTIONS = {
         "Name: Alijon Karimov\n"
         "Country: Tajikistan"
     ),
-    "USA": "Local payment details for the USA (Zelle, etc.) go here.",
     "KSA": (
         "(Tap to copy)\n\n"
         "`SA8710000006857309000101`\n\n"
         "`SA0510000062300187719603`\n\n"
         "Bank: Ahli Bank\n"
         "Name: Jamil Hajji\n\n"
-        "Please make sure the purpose of the payment be Friends and family or "
-        "personal NOT goods or services."
+        "*Please make sure the purpose of the payment be Friends and family or "
+        "personal NOT goods or services.*"
     ),
     "Russia": (
         "1- Open the Sberbank app/website.\n"
@@ -320,6 +348,39 @@ LOCAL_PAYMENT_INSTRUCTIONS = {
         "Name: Alijon Karimov\n"
         "Recipient Bank: Alif Bank"
     ),
+
+}
+
+# USA offers a choice of remittance apps instead of one fixed method.
+USA_PAYMENT_APPS = ["TapTap Send", "Ria", "Paysend", "Remitly", "Revolut"]
+
+_RIA_PAYSEND_REMITLY_TEXT = (
+    "1- Enter the payment app/website\n"
+    "2- Send to Country: Lebanon\n"
+    "3- Choose \"Purpl\"\n"
+    "4- Enter the Mobile Number `0096181666579`\n"
+    "5- First Name: Ahmad\n"
+    "6- Last Name: Safa\n"
+    "7- Purpose: Educational/Personal\n"
+    "8- Date of Birth: 17/09/1994"
+)
+
+USA_APP_INSTRUCTIONS = {
+    "TapTap Send": (
+        "1- Open the Taptap Send app\n"
+        "2- Choose Country: Lebanon\n"
+        "3- Choose Whish Money Wallet\n"
+        "Make sure you choose Whish Money wallet not Cash pickup\n"
+        "4: Enter the details: (tap to copy)\n\n"
+        "Phone Number: `0096181666579`\n"
+        "First Name: Ahmad\n"
+        "Last Name: Safa\n"
+        "Year of Birth: 1994"
+    ),
+    "Ria": _RIA_PAYSEND_REMITLY_TEXT,
+    "Paysend": _RIA_PAYSEND_REMITLY_TEXT,
+    "Remitly": _RIA_PAYSEND_REMITLY_TEXT,
+    "Revolut": LOCAL_PAYMENT_INSTRUCTIONS["Europe"],
 }
 
 # Crypto wallet addresses shown under "Pay with Cryptocurrency."
@@ -1286,7 +1347,9 @@ async def local_pay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i in range(0, len(LOCAL_PAYMENT_COUNTRIES), 2):
         pair = LOCAL_PAYMENT_COUNTRIES[i:i + 2]
         rows.append([
-            InlineKeyboardButton(country, callback_data=f"local_country:{order_id}:{country}")
+            InlineKeyboardButton(
+                f"{COUNTRY_FLAGS.get(country, '')} {country}", callback_data=f"local_country:{order_id}:{country}"
+            )
             for country in pair
         ])
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"back_to_checkout:{order_id}")])
@@ -1297,18 +1360,20 @@ async def local_pay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def local_country_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shows local payment instructions for the chosen country."""
-    query = update.callback_query
-    await query.answer()
-    _, order_id_str, country = query.data.split(":", 2)
-    order_id = int(order_id_str)
+def _country_instructions_view(order_id: int, country: str):
+    """Builds the (text, keyboard) for a country's payment instructions,
+    including the converted amount. Shared by the direct-country path and
+    the USA app sub-menu."""
+    order = db_get_order(order_id)
+    total = order[4] if order else 0
 
     instructions = LOCAL_PAYMENT_INSTRUCTIONS.get(
         country, "Contact us directly for payment instructions in your country."
     )
+    flag = COUNTRY_FLAGS.get(country, "")
     text = (
-        f"*Payment instructions — {country}*\n\n"
+        f"*Payment instructions — {flag} {country}*\n\n"
+        f"*Amount to pay: {convert_for_country(total, country)}*\n\n"
         f"{instructions}\n\n"
         "After paying, tap *I've Paid* below."
     )
@@ -1316,7 +1381,32 @@ async def local_country_selected(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")],
         [InlineKeyboardButton("⬅️ Back", callback_data=f"local_pay:{order_id}")],
     ]
-    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
+    return text, InlineKeyboardMarkup(buttons)
+
+
+async def local_country_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows local payment instructions for the chosen country — or, for
+    the USA, a choice of remittance apps first."""
+    query = update.callback_query
+    await query.answer()
+    _, order_id_str, country = query.data.split(":", 2)
+    order_id = int(order_id_str)
+
+    if country == "USA":
+        rows = [
+            [InlineKeyboardButton(app, callback_data=f"usa_app:{order_id}:{app}")]
+            for app in USA_PAYMENT_APPS
+        ]
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"local_pay:{order_id}")])
+        await query.edit_message_text(
+            f"{COUNTRY_FLAGS['USA']} USA — choose how you'd like to pay:",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    context.user_data["selected_country"] = country
+    text, keyboard = _country_instructions_view(order_id, country)
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
     # India includes a QR code image — send it as a follow-up photo if present.
     if country == "India" and os.path.exists(INDIA_QR_PATH):
@@ -1325,6 +1415,32 @@ async def local_country_selected(update: Update, context: ContextTypes.DEFAULT_T
                 await context.bot.send_photo(chat_id=query.message.chat_id, photo=qr_file)
         except Exception:
             logger.exception("Failed to send India QR code image")
+
+
+async def usa_app_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows instructions for the chosen USA remittance app."""
+    query = update.callback_query
+    await query.answer()
+    _, order_id_str, app = query.data.split(":", 2)
+    order_id = int(order_id_str)
+
+    context.user_data["selected_country"] = "USA"
+
+    order = db_get_order(order_id)
+    total = order[4] if order else 0
+    instructions = USA_APP_INSTRUCTIONS.get(app, "Contact us directly for payment instructions.")
+
+    text = (
+        f"*Payment instructions — {COUNTRY_FLAGS['USA']} USA ({app})*\n\n"
+        f"*Amount to pay: {convert_for_country(total, 'USA')}*\n\n"
+        f"{instructions}\n\n"
+        "After paying, tap *I've Paid* below."
+    )
+    buttons = [
+        [InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")],
+        [InlineKeyboardButton("⬅️ Back", callback_data=f"local_country:{order_id}:USA")],
+    ]
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def pay_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1438,11 +1554,21 @@ async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Don't notify the admin yet — first ask the customer for a receipt photo.
         db_update_status(order_id, "awaiting_receipt")
         context.user_data["awaiting_receipt_for_order"] = order_id
-        await query.edit_message_text(
-            f"Order #{order_id}: please upload a *photo* of your payment receipt "
-            "(screenshot is fine) as your next message here.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+
+        if context.user_data.get("selected_country") == "India":
+            await query.edit_message_text(
+                "Please send the full receipt showing clearly the amount paid and "
+                "transaction ID or UTR.\n\n"
+                "*Receipts that are missing the paid amount or the transaction ID "
+                "won't be approved.*",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await query.edit_message_text(
+                f"Order #{order_id}: please upload a *photo* of your payment receipt "
+                "(screenshot is fine) as your next message here.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
 
     elif action == "cancel":
         db_update_status(order_id, "cancelled")
@@ -1450,7 +1576,9 @@ async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles a photo sent by the customer after tapping 'I've Paid'."""
+    """Handles a photo sent by the customer after tapping 'I've Paid'. Asks
+    for the payer's full name next, rather than notifying the admin
+    immediately — that name goes into the admin's review message."""
     order_id = context.user_data.get("awaiting_receipt_for_order")
 
     if not order_id:
@@ -1463,18 +1591,44 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("awaiting_receipt_for_order", None)
         return
 
-    db_update_status(order_id, "awaiting_confirmation")
     context.user_data.pop("awaiting_receipt_for_order", None)
+    context.user_data["awaiting_payer_name_for_order"] = order_id
+    context.user_data["pending_receipt_photo"] = update.message.photo[-1].file_id
+
+    await update.message.reply_text(
+        "Please send the Full Name of the person who did the payment, as mentioned on the receipt:"
+    )
+
+
+async def payer_name_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Catches the payer's name after the receipt photo, then notifies the
+    admin with both."""
+    order_id = context.user_data.pop("awaiting_payer_name_for_order", None)
+    if not order_id:
+        return
+
+    photo_file_id = context.user_data.pop("pending_receipt_photo", None)
+    payer_name = update.message.text.strip()
+
+    order = db_get_order(order_id)
+    if not order:
+        await update.message.reply_text("Order not found — please start over with /start.")
+        return
+
+    db_update_status(order_id, "awaiting_confirmation")
 
     await update.message.reply_text(
         f"Thanks! Receipt received for order #{order_id}. "
         "We're verifying it and will confirm shortly."
     )
 
-    await notify_admin_receipt(context, order, update.message.photo[-1].file_id)
+    if photo_file_id:
+        await notify_admin_receipt(context, order, photo_file_id, payer_name=payer_name)
 
 
-async def notify_admin_receipt(context: ContextTypes.DEFAULT_TYPE, order_row, photo_file_id: str):
+async def notify_admin_receipt(
+    context: ContextTypes.DEFAULT_TYPE, order_row, photo_file_id: str, payer_name: str = None
+):
     order_id, user_id, username, items_json, total, status, created_at = order_row
     items = json.loads(items_json)
     lines = [f"{qty}x {MENU[i][0]}" for i, qty in items.items()]
@@ -1483,7 +1637,9 @@ async def notify_admin_receipt(context: ContextTypes.DEFAULT_TYPE, order_row, ph
     # to send. No parse_mode here avoids that entirely.
     caption = (
         f"🧾 Receipt received — Order #{order_id}\n"
-        f"From: {username or 'unknown'} (ID: {user_id})\n\n"
+        f"From: {username or 'unknown'} (ID: {user_id})\n"
+        + (f"Payer name on receipt: {payer_name}\n" if payer_name else "")
+        + "\n"
         + "\n".join(lines)
         + f"\n\nTotal: {CURRENCY}{total:.2f}\n\n"
         "Check the receipt, then confirm or reject below."
@@ -1771,6 +1927,75 @@ async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+async def admin_msg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '💬 Message Customer' — wait for their next text and
+    forward it, tagged with which order it's about."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    order_id = int(query.data.split(":", 1)[1])
+    context.user_data["awaiting_admin_message_for_order"] = order_id
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID, text=f"Type the message to send the customer about order #{order_id}:"
+    )
+
+
+async def admin_message_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends the admin's typed message to the customer, with a Reply button
+    so they can answer directly from within the message."""
+    order_id = context.user_data.pop("awaiting_admin_message_for_order", None)
+    if not order_id:
+        return
+
+    order = db_get_order(order_id)
+    if not order:
+        await update.message.reply_text("Order not found.")
+        return
+
+    user_id = order[1]
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=f"💬 Message about your order #{order_id}:\n\n{update.message.text}",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("↩️ Reply", callback_data=f"cust_reply:{order_id}")]]
+        ),
+    )
+    await update.message.reply_text(f"✅ Message sent to the customer for order #{order_id}.")
+
+
+async def customer_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer tapped '↩️ Reply' — wait for their next text and forward it
+    to the admin, tagged with the same order."""
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+    context.user_data["awaiting_customer_reply_for_order"] = order_id
+    await context.bot.send_message(chat_id=query.from_user.id, text="Type your reply:")
+
+
+async def customer_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Forwards the customer's reply to the admin, with a Reply button of
+    its own so the conversation can continue."""
+    order_id = context.user_data.pop("awaiting_customer_reply_for_order", None)
+    if not order_id or not ADMIN_CHAT_ID:
+        return
+
+    order = db_get_order(order_id)
+    username = order[2] if order else None
+    who = f"@{username}" if username else str(update.effective_user.id)
+
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=f"💬 Reply from {who} — Order #{order_id}:\n\n{update.message.text}",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("💬 Reply", callback_data=f"admin_msg:{order_id}")]]
+        ),
+    )
+
+
 async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Shows the details a customer submitted, with a deliver button."""
     query = update.callback_query
@@ -1817,6 +2042,7 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     elif state == "awaiting_delivery":
         buttons.append([InlineKeyboardButton("📤 Deliver Manually", callback_data=f"deliver:{fulfilment_id}")])
+    buttons.append([InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{order_id}")])
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="apend_back")])
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -2003,6 +2229,14 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await generic_field_reply(update, context)
         return
 
+    if context.user_data.get("awaiting_payer_name_for_order"):
+        await payer_name_reply(update, context)
+        return
+
+    if context.user_data.get("awaiting_customer_reply_for_order"):
+        await customer_reply_text(update, context)
+        return
+
     if update.effective_user.id == ADMIN_CHAT_ID:
         # Panel-button follow-ups take priority — they're the most recent
         # thing the admin explicitly asked to do.
@@ -2011,6 +2245,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if context.user_data.get("awaiting_comment_for_order"):
             await admin_comment_reply(update, context)
+            return
+        if context.user_data.get("awaiting_admin_message_for_order"):
+            await admin_message_reply(update, context)
             return
         if context.user_data.get("awaiting_credentials_fulfilment"):
             await credentials_reply(update, context)
@@ -2462,16 +2699,30 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
         return
 
     # ---- Unknown / automation error: never assume success.
+    # Renewals in particular are often blocked by Cloudflare before the form
+    # even loads, so put the one-tap manual delivery right here rather than
+    # making the admin go hunting for it in Pending Orders.
+    fulfilment_id = data.get("fulfilment_id")
+    fallback_buttons = []
+    if fulfilment_id:
+        fallback_buttons.append(
+            [InlineKeyboardButton("📤 Send iMD Details Now", callback_data=f"imddeliver:{fulfilment_id}")]
+        )
+    fallback_buttons.append(
+        [InlineKeyboardButton(f"🔁 Retry {action_label}", callback_data=f"reg_go:{order_id}")]
+    )
+
+    who = data.get("prev_username") if is_renew else data.get("username")
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
         text=(
             f"⚠️ COULD NOT CONFIRM — Order #{order_id} ({action_label})\n\n"
-            f"The result page didn't clearly say whether this worked, so nothing was sent to the customer "
-            f"and serial {serial_code} was returned to the pool.\n\n"
-            f"Please check iMD manually. If it DID go through, deliver with the 📤 Send Credentials button "
-            f"on the order's payment message.\n\n{detail}"
+            f"Nothing was sent to the customer and serial {serial_code} went back to the pool.\n\n"
+            f"Username: {who}\n"
+            f"Serial to use: {serial_code} (still available in the pool)\n\n"
+            f"Register this manually on iMD, then tap 📤 Send iMD Details Now to deliver it.\n\n{detail}"
         ),
-        reply_markup=retry_button,
+        reply_markup=InlineKeyboardMarkup(fallback_buttons),
     )
 
 
@@ -2965,6 +3216,7 @@ def main():
     app.add_handler(CallbackQueryHandler(pay_with_stars, pattern=r"^pay_stars:"))
     app.add_handler(CallbackQueryHandler(local_pay_start, pattern=r"^local_pay:"))
     app.add_handler(CallbackQueryHandler(local_country_selected, pattern=r"^local_country:"))
+    app.add_handler(CallbackQueryHandler(usa_app_selected, pattern=r"^usa_app:"))
     app.add_handler(CallbackQueryHandler(pay_crypto, pattern=r"^pay_crypto:"))
     app.add_handler(CallbackQueryHandler(back_to_checkout, pattern=r"^back_to_checkout:"))
     app.add_handler(CallbackQueryHandler(my_subscription_detail, pattern=r"^mysub:"))
@@ -2973,6 +3225,8 @@ def main():
     app.add_handler(CallbackQueryHandler(subs_pending, pattern=r"^subs_pending$"))
     app.add_handler(CallbackQueryHandler(pending_detail, pattern=r"^pend:"))
     app.add_handler(CallbackQueryHandler(admin_pending_detail, pattern=r"^apend:"))
+    app.add_handler(CallbackQueryHandler(admin_msg_start, pattern=r"^admin_msg:"))
+    app.add_handler(CallbackQueryHandler(customer_reply_start, pattern=r"^cust_reply:"))
     app.add_handler(CallbackQueryHandler(admin_pending_back, pattern=r"^apend_back$"))
     app.add_handler(CallbackQueryHandler(imd_manual_deliver, pattern=r"^imddeliver:"))
     app.add_handler(CallbackQueryHandler(admin_sales_report, pattern=r"^sales:"))
