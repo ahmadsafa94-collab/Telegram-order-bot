@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import os
+import math
 import re
 import sqlite3
 from datetime import datetime, timedelta
@@ -304,7 +305,7 @@ IMD_EMAIL_ERROR_KEYWORDS = [
 # bot still collects the customer's details up front so the admin has
 # everything needed.
 
-GENERIC_PASSWORD_SYMBOLS = "@_#$"
+GENERIC_PASSWORD_SYMBOLS = "-_.#@"
 
 DELIVERY_48H_MESSAGE = (
     "✅ Thanks! Your subscription will be delivered here within the next 48 hours.\n\n"
@@ -315,13 +316,28 @@ DELIVERY_48H_MESSAGE = (
 GENERIC_FIELDS = [
     ("first_name", "First name:"),
     ("last_name", "Last name:"),
-    ("email", "Email address:"),
-    ("username", "Desired username (at least 6 characters):"),
+    (
+        "email",
+        "Email address:\n\n(This must be an email you have never used to register on "
+        "this website before.)",
+    ),
+    (
+        "username",
+        "Desired username (at least 6 characters):\n\n(This must be a username you have "
+        "never used to register on this website before.)",
+    ),
     (
         "password",
         "Desired password (at least 8 characters, with at least one number, "
         f"one capital letter, and one symbol from {GENERIC_PASSWORD_SYMBOLS}):",
     ),
+]
+
+# Renewal is much simpler — just the existing login, no uniqueness rules
+# (they're relaying credentials that already exist, not creating new ones).
+RENEWAL_FIELDS = [
+    ("login_username", "Username or email used to login to the account:"),
+    ("login_password", "Password used to login to the account:"),
 ]
 
 # Used when re-prompting a customer who has an unfinished order.
@@ -331,6 +347,11 @@ IMD_FIELD_PROMPTS = {
     "username": "Reply with your desired username:",
     "password": "Reply with your desired password:",
 }
+
+# Combined lookup for re-prompting a non-iMD field, covering both the New
+# Account and Renewal field sets.
+GENERIC_FIELD_PROMPTS = dict(GENERIC_FIELDS)
+GENERIC_FIELD_PROMPTS.update(dict(RENEWAL_FIELDS))
 
 
 def validate_generic_username(value: str):
@@ -636,6 +657,45 @@ def db_init():
             item_id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             price REAL NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS used_credentials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            item_id TEXT NOT NULL,
+            email TEXT,
+            username TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS book_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            link TEXT NOT NULL,
+            price REAL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            order_id INTEGER,
+            created_at TEXT NOT NULL,
+            priced_at TEXT,
+            resolved_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS book_menu_items (
+            item_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            price REAL NOT NULL,
+            request_id INTEGER NOT NULL,
             created_at TEXT NOT NULL
         )
         """
@@ -1154,6 +1214,113 @@ def db_load_custom_items():
     return rows
 
 
+def db_credential_already_used(user_id: int, item_id: str, field: str, value: str) -> bool:
+    """Checks whether this customer has already used this email or
+    username in a previous New Account registration for this same
+    subscription. Case-insensitive, since emails/usernames are.
+    field must be 'email' or 'username'."""
+    assert field in ("email", "username"), "field must be 'email' or 'username' — never user input"
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        f"SELECT 1 FROM used_credentials WHERE user_id = ? AND item_id = ? AND LOWER({field}) = LOWER(?)",
+        (user_id, item_id, value),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def db_record_used_credentials(user_id: int, item_id: str, email: str, username: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO used_credentials (user_id, item_id, email, username, created_at) VALUES (?, ?, ?, ?, ?)",
+        (user_id, item_id, email, username, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_create_book_request(user_id: int, username: str, link: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        "INSERT INTO book_requests (user_id, username, link, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+        (user_id, username, link, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    request_id = cur.lastrowid
+    conn.close()
+    return request_id
+
+
+def db_get_book_request(request_id: int):
+    """Returns (id, user_id, username, link, price, status, order_id,
+    created_at, priced_at, resolved_at)."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT id, user_id, username, link, price, status, order_id, created_at, priced_at, resolved_at "
+        "FROM book_requests WHERE id = ?",
+        (request_id,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def db_set_book_price(request_id: int, price: float):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE book_requests SET price = ?, status = 'priced', priced_at = ? WHERE id = ?",
+        (price, datetime.utcnow().isoformat(), request_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_set_book_status(request_id: int, status: str, order_id: int = None):
+    conn = sqlite3.connect(DB_PATH)
+    if order_id is not None:
+        conn.execute(
+            "UPDATE book_requests SET status = ?, order_id = ?, resolved_at = ? WHERE id = ?",
+            (status, order_id, datetime.utcnow().isoformat(), request_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE book_requests SET status = ?, resolved_at = ? WHERE id = ?",
+            (status, datetime.utcnow().isoformat(), request_id),
+        )
+    conn.commit()
+    conn.close()
+
+
+def db_list_book_requests(status: str):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, user_id, username, link, price, created_at FROM book_requests "
+        "WHERE status = ? ORDER BY id DESC",
+        (status,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def db_add_book_menu_item(item_id: str, name: str, price: float, request_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO book_menu_items (item_id, name, price, request_id, created_at) VALUES (?, ?, ?, ?, ?)",
+        (item_id, name, price, request_id, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_load_book_menu_items():
+    """Only loaded into MENU (for lookups to work), never into
+    SINGLE_MAIN_ITEMS — these are one-off private items for whichever
+    customer requested them, not part of the general catalog."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT item_id, name, price FROM book_menu_items").fetchall()
+    conn.close()
+    return rows
+
+
 def generate_item_id(name: str) -> str:
     """Slugifies a subscription name into an item_id, guaranteed unique
     against whatever's currently in MENU (adds a numeric suffix on
@@ -1550,6 +1717,7 @@ JOIN_CHANNEL_LABEL = "📡 Join Channel"
 TICKET_LABEL = "🎫 Send a Ticket"
 GET_FREE_LABEL = "🎁 Get Free Accounts"
 MY_CREDITS_LABEL = "💳 My Credits"
+BOOK_REQUEST_LABEL = "📚 Request a Book"
 SUPPORT_LABEL = "🆘 Support"
 
 # Admin-only panel labels.
@@ -1567,13 +1735,14 @@ A_STOCK = "📦 Manage Stock"
 A_TICKETS = "🎫 Tickets"
 A_CREDITS = "💳 Customer Credits"
 A_ADD_SUBSCRIPTION = "➕ Add New Subscription"
+A_BOOK_REQUESTS = "📚 Book Requests"
 A_CUSTOMER_VIEW = "🛍 Customer Menu"
 
 ADMIN_LABELS = [
     A_VIEW_SERIALS, A_ADD_SERIALS, A_REMOVE_SERIAL,
     A_RECENT_ORDERS, A_PENDING, A_INPUT, A_INBOX, A_BROADCAST,
     A_FIND_ORDER, A_FIND_CUSTOMER, A_STOCK, A_TICKETS, A_CREDITS,
-    A_ADD_SUBSCRIPTION, A_CUSTOMER_VIEW,
+    A_ADD_SUBSCRIPTION, A_BOOK_REQUESTS, A_CUSTOMER_VIEW,
 ]
 
 
@@ -1585,7 +1754,8 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
             [BUY_LABEL, MY_SUBS_LABEL], [BASKET_LABEL],
             [ANNOUNCEMENTS_LABEL, JOIN_CHANNEL_LABEL],
             [GET_FREE_LABEL, MY_CREDITS_LABEL],
-            [TICKET_LABEL, SUPPORT_LABEL],
+            [BOOK_REQUEST_LABEL, TICKET_LABEL],
+            [SUPPORT_LABEL],
         ],
         resize_keyboard=True,
     )
@@ -1603,6 +1773,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [A_FIND_ORDER, A_FIND_CUSTOMER],
             [A_STOCK, A_TICKETS],
             [A_CREDITS, A_ADD_SUBSCRIPTION],
+            [A_BOOK_REQUESTS],
             [A_CUSTOMER_VIEW],
         ],
         resize_keyboard=True,
@@ -1726,6 +1897,10 @@ async def main_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == MY_CREDITS_LABEL:
         await show_my_credits(update, context)
 
+    elif text == BOOK_REQUEST_LABEL:
+        context.user_data["awaiting_book_link"] = True
+        await update.message.reply_text("Please send the link of the book you're looking for:")
+
     elif text == SUPPORT_LABEL:
         await update.message.reply_text(
             "Tap below to contact support:",
@@ -1839,8 +2014,8 @@ async def announcement_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
 GET_FREE_ACCOUNTS_INTRO = (
     "By sharing the bot with your friends, you can earn credits and use them to get free accounts.\n\n"
     "It's so Easy, proceed to get a personalised link of the bot, share it with your friends. "
-    "Whenever your friends do a purchase through the bot link you sent to them you will earn 4 Credits.\n\n"
-    "Each Credit = 5 USD\n\n"
+    "Whenever your friends do a purchase through the bot link you sent to them you will earn 1 Credit.\n\n"
+    "Each Credit = 4 USD\n\n"
     "Whenever your credits are equal to the price of any of the subscriptions we sell, you can get it for free."
 )
 
@@ -1903,7 +2078,7 @@ async def show_my_credits(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def send_my_credits(context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int, edit_query=None):
     credits = db_get_credits(user_id)
-    usd = credits * 5
+    usd = credits * 4
     bot_username = await get_bot_username(context)
     link = referral_link(bot_username, user_id)
 
@@ -1912,7 +2087,7 @@ async def send_my_credits(context: ContextTypes.DEFAULT_TYPE, user_id: int, chat
         f"Equivalent: {CURRENCY}{usd}\n\n"
         f"Your personalised link:\n`{link}`\n\n"
         "Share more to earn more. The credits will be added whenever someone starts the bot "
-        "using your personalised link and buys any subscription — you'll earn 4 credits every "
+        "using your personalised link and buys any subscription — you'll earn 1 credit every "
         "time they purchase, and you'll be notified when it happens."
     )
 
@@ -1920,6 +2095,132 @@ async def send_my_credits(context: ContextTypes.DEFAULT_TYPE, user_id: int, chat
         await edit_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
     else:
         await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+
+
+async def book_link_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Catches the link the customer sends after tapping Request a Book."""
+    if not context.user_data.get("awaiting_book_link"):
+        return
+    context.user_data.pop("awaiting_book_link", None)
+
+    link = update.message.text.strip()
+    user_id = update.effective_user.id
+    username = update.effective_user.username
+
+    request_id = db_create_book_request(user_id, username, link)
+    await update.message.reply_text("Thanks! Please wait for an update from us regarding pricing.")
+
+    if ADMIN_CHAT_ID:
+        who = f"@{username}" if username else str(user_id)
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"📚 New book request #{request_id} — {who}\n\n{link}",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("💰 Set Price", callback_data=f"bookprice:{request_id}")]]
+            ),
+        )
+
+
+async def book_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '💰 Set Price' — wait for the price."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    request_id = int(query.data.split(":", 1)[1])
+    context.user_data["awaiting_book_price_for"] = request_id
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID, text=f"Enter the price in USD for book request #{request_id}:"
+    )
+
+
+async def book_price_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin's typed price — sends the customer the price with Proceed/Cancel."""
+    request_id = context.user_data.pop("awaiting_book_price_for", None)
+    if not request_id:
+        return
+
+    try:
+        price = float(update.message.text.strip())
+        if price <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Please send a valid positive number for the price:")
+        context.user_data["awaiting_book_price_for"] = request_id
+        return
+
+    request = db_get_book_request(request_id)
+    if not request:
+        await update.message.reply_text("That book request no longer exists.")
+        return
+    _, user_id, username, link, _, status, order_id, created_at, priced_at, resolved_at = request
+
+    db_set_book_price(request_id, price)
+    await update.message.reply_text(f"✅ Price set — the customer has been notified.")
+
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=(
+            f"📚 Your book request has a price!\n\n"
+            f"Link: {link}\n"
+            f"Price: {CURRENCY}{price:.2f}\n\n"
+            "Would you like to proceed?"
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✅ Proceed with Payment", callback_data=f"bookproceed:{request_id}")],
+                [InlineKeyboardButton("❌ Cancel Request", callback_data=f"bookcancel:{request_id}")],
+            ]
+        ),
+    )
+
+
+async def book_proceed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer tapped 'Proceed with Payment' — creates a one-off order for
+    this exact price and hands off to the normal checkout screen, reusing
+    every existing payment method (Stars/Card/local/crypto/Credits)."""
+    query = update.callback_query
+    await query.answer()
+    request_id = int(query.data.split(":", 1)[1])
+
+    request = db_get_book_request(request_id)
+    if not request:
+        await query.edit_message_text("This book request no longer exists.")
+        return
+    _, user_id, username, link, price, status, order_id, created_at, priced_at, resolved_at = request
+
+    if status != "priced":
+        await query.edit_message_text("This request isn't awaiting payment anymore.")
+        return
+
+    item_id = f"book_{request_id}"
+    # Deliberately NOT embedding the raw link here — checkout_view renders
+    # this with parse_mode=MARKDOWN, and a link containing underscores,
+    # asterisks, or brackets would break Telegram's parser (this bot has
+    # hit that exact failure mode before). The customer already knows
+    # which book they asked for; the reference number is enough context.
+    item_name = f"Requested Book #{request_id}"
+
+    db_add_book_menu_item(item_id, item_name, price, request_id)
+    MENU[item_id] = (item_name, price)  # in-memory now; NOT added to SINGLE_MAIN_ITEMS —
+    # private to this customer's order, never shown in the general catalog.
+
+    new_order_id = db_create_order(user_id, username, {item_id: 1}, price)
+    db_set_book_status(request_id, "ordered", order_id=new_order_id)
+
+    text, keyboard = checkout_view(new_order_id)
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+
+
+async def book_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer tapped 'Cancel Request'."""
+    query = update.callback_query
+    await query.answer()
+    request_id = int(query.data.split(":", 1)[1])
+    db_set_book_status(request_id, "cancelled")
+    await query.edit_message_text("Your book request has been cancelled.")
 
 
 async def show_ticket_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2122,8 +2423,9 @@ COLLECTION_STATE_KEYS = [
     "registration_is_renew", "registration_duration", "registration_item_id",
     "registration_fulfilment_id", "registration_retry_field",
     "awaiting_generic_field", "generic_data", "generic_order_id",
-    "generic_item_id", "generic_fulfilment_id",
+    "generic_item_id", "generic_fulfilment_id", "generic_account_type",
     "awaiting_payer_name_for_order", "pending_receipt_photo", "awaiting_receipt_for_order",
+    "awaiting_book_link",
 ]
 
 
@@ -2157,8 +2459,25 @@ async def restore_collection_state(context: ContextTypes.DEFAULT_TYPE, user_data
 
     gen_field = stash.get("awaiting_generic_field")
     if gen_field:
-        prompt = dict(GENERIC_FIELDS).get(gen_field, "Please send the requested information:")
+        prompt = GENERIC_FIELD_PROMPTS.get(gen_field, "Please send the requested information:")
         await context.bot.send_message(chat_id=chat_id, text=f"Let's continue where we left off.\n\n{prompt}")
+        return
+
+    # Was stuck at the New Account / Renewal question itself (before
+    # answering, so no awaiting_generic_field was set yet).
+    if stash.get("generic_fulfilment_id") and not stash.get("awaiting_generic_field"):
+        item_id = stash.get("generic_item_id")
+        item_name = MENU.get(item_id, (item_id, 0))[0]
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Let's continue where we left off. 📝 {item_name}. Is this a:",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("🆕 New Account", callback_data="gentype:new")],
+                    [InlineKeyboardButton("🔄 Renewal of a previous account", callback_data="gentype:renew")],
+                ]
+            ),
+        )
         return
 
     if stash.get("awaiting_receipt_for_order"):
@@ -2321,7 +2640,7 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if reg_field and context.user_data.get("registration_fulfilment_id") == fulfilment_id:
             prompt = IMD_FIELD_PROMPTS.get(reg_field, "Please send the requested information:")
         elif gen_field and context.user_data.get("generic_fulfilment_id") == fulfilment_id:
-            prompt = dict(GENERIC_FIELDS).get(gen_field, "Please send the requested information:")
+            prompt = GENERIC_FIELD_PROMPTS.get(gen_field, "Please send the requested information:")
         else:
             # Nothing in progress for this unit — restart its collection.
             await query.edit_message_text(
@@ -2636,8 +2955,10 @@ async def pay_card_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def pay_credits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """'Pay using my own Credits' — instant like Stars, no 'I've Paid' step.
-    All subscription prices are multiples of $5 (1 credit = $5), so the
-    required credit count is always exact with no fractional remainder."""
+    1 credit = $4, and most prices aren't clean multiples of that, so the
+    required credit count is rounded UP (math.ceil) — the customer always
+    pays with credits worth at least the price, never less. Any leftover
+    value from that rounding just stays in their balance untouched."""
     query = update.callback_query
     await query.answer()
     order_id = int(query.data.split(":", 1)[1])
@@ -2649,7 +2970,7 @@ async def pay_credits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     _, order_user_id, username, items_json, total, status, created_at = order
 
-    required_credits = round(total / 5)
+    required_credits = math.ceil(total / 4)
     balance = db_get_credits(user_id)
 
     if balance < required_credits:
@@ -3042,18 +3363,18 @@ async def post_subscription_to_channel(context: ContextTypes.DEFAULT_TYPE, order
 
 async def award_referral_credit(context: ContextTypes.DEFAULT_TYPE, paying_user_id: int):
     """Called once per successfully paid order. If the paying customer was
-    referred, their referrer gets 4 credits — every single time that
+    referred, their referrer gets 1 credit — every single time that
     customer completes an order, not just their first."""
     referrer_id = db_get_referred_by(paying_user_id)
     if not referrer_id:
         return
 
-    new_balance = db_add_credits(referrer_id, 4)
+    new_balance = db_add_credits(referrer_id, 1)
     try:
         await context.bot.send_message(
             chat_id=referrer_id,
             text=(
-                f"🎉 You just earned 4 credits — someone you referred made a purchase!\n\n"
+                f"🎉 You just earned 1 credit — someone you referred made a purchase!\n\n"
                 f"Your credits: {new_balance} ({CURRENCY}{new_balance * 5})"
             ),
         )
@@ -3254,6 +3575,9 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["new_sub_data"] = {}
         await update.message.reply_text("Enter the name of the new subscription:")
 
+    elif text == A_BOOK_REQUESTS:
+        await book_requests_menu(update, context)
+
     elif text == A_CUSTOMER_VIEW:
         await update.message.reply_text(
             "Switched to the customer menu. Send /start to return to the admin panel.",
@@ -3276,6 +3600,7 @@ def format_fulfilment_info(item_id: str, info_json: str) -> str:
         "first_name": "First name", "last_name": "Last name", "email": "Email",
         "username": "Username", "password": "Password",
         "prev_username": "Previous username",
+        "login_username": "Username/Email", "login_password": "Password",
     }
     return "\n".join(f"{labels.get(k, k)}: {v}" for k, v in info.items())
 
@@ -3500,6 +3825,101 @@ async def new_subscription_field_reply(update: Update, context: ContextTypes.DEF
         )
 
 
+def _book_requests_summary_keyboard() -> InlineKeyboardMarkup:
+    pending = len(db_list_book_requests("pending"))
+    priced = len(db_list_book_requests("priced"))
+    ordered = len(db_list_book_requests("ordered"))
+    cancelled = len(db_list_book_requests("cancelled"))
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(f"🆕 Pending ({pending})", callback_data="bookreqs:pending")],
+            [InlineKeyboardButton(f"💰 Awaiting Customer ({priced})", callback_data="bookreqs:priced")],
+            [InlineKeyboardButton(f"✅ Ordered ({ordered})", callback_data="bookreqs:ordered")],
+            [InlineKeyboardButton(f"❌ Cancelled ({cancelled})", callback_data="bookreqs:cancelled")],
+        ]
+    )
+
+
+async def book_requests_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: top of the Book Requests tab — one bucket per status,
+    so a request the admin didn't act on immediately isn't lost."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    await update.message.reply_text("📚 Book Requests:", reply_markup=_book_requests_summary_keyboard())
+
+
+async def book_requests_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    status = query.data.split(":", 1)[1]
+    rows = db_list_book_requests(status)
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="bookreqs_back")]])
+
+    labels = {"pending": "Pending", "priced": "Awaiting Customer", "ordered": "Ordered", "cancelled": "Cancelled"}
+    label = labels.get(status, status)
+
+    if not rows:
+        await query.edit_message_text(f"No {label.lower()} book requests.", reply_markup=back)
+        return
+
+    buttons = []
+    for request_id, user_id, username, link, price, created_at in rows:
+        who = f"@{username}" if username else str(user_id)
+        price_str = f" — {CURRENCY}{price:.2f}" if price else ""
+        buttons.append(
+            [InlineKeyboardButton(f"#{request_id} — {who}{price_str}", callback_data=f"bookreqview:{request_id}")]
+        )
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="bookreqs_back")])
+
+    await query.edit_message_text(f"{label} book requests:", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def book_requests_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("📚 Book Requests:", reply_markup=_book_requests_summary_keyboard())
+
+
+async def book_request_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Full detail for one book request. Sent as a new message (not an
+    edit) so the link is always plain text, never at risk of Telegram
+    trying to parse it as Markdown."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    request_id = int(query.data.split(":", 1)[1])
+    request = db_get_book_request(request_id)
+    if not request:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That book request no longer exists.")
+        return
+
+    _, user_id, username, link, price, status, order_id, created_at, priced_at, resolved_at = request
+    who = f"@{username}" if username else str(user_id)
+
+    text = (
+        f"📚 Book Request #{request_id} — {who} (ID: {user_id})\n"
+        f"Status: {status}\n"
+        f"Requested: {created_at[:19]}\n"
+        + (f"Price: {CURRENCY}{price:.2f}\n" if price else "")
+        + (f"Order: #{order_id}\n" if order_id else "")
+        + f"\nLink:\n{link}"
+    )
+
+    buttons = []
+    if status == "pending":
+        buttons.append([InlineKeyboardButton("💰 Set Price", callback_data=f"bookprice:{request_id}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"bookreqs:{status}")])
+
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
 async def credits_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only: every customer holding credits, highest balance first."""
     if update.effective_user.id != ADMIN_CHAT_ID:
@@ -3513,7 +3933,7 @@ async def credits_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["💳 Customer Credits:", ""]
     for user_id, username, credits in rows:
         who = f"@{username}" if username else str(user_id)
-        lines.append(f"{who} (ID: {user_id}) — {credits} credits ({CURRENCY}{credits * 5})")
+        lines.append(f"{who} (ID: {user_id}) — {credits} credits ({CURRENCY}{credits * 4})")
 
     text = "\n".join(lines)
     for i in range(0, len(text), 3500):
@@ -4210,6 +4630,14 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await new_subscription_field_reply(update, context)
         return
 
+    if update.effective_user.id == ADMIN_CHAT_ID and context.user_data.get("awaiting_book_price_for"):
+        await book_price_reply(update, context)
+        return
+
+    if context.user_data.get("awaiting_book_link"):
+        await book_link_reply(update, context)
+        return
+
     if context.user_data.get("awaiting_ticket_field") == "message":
         await ticket_field_reply(update, context)
         return
@@ -4289,53 +4717,114 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
 
     if item_id in IMD_TRIGGER_ITEMS:
         await start_imd_collection(context, order_id, user_id, item_id, fulfilment_id)
+    elif item_id.startswith("book_"):
+        # A book request already has everything it needs (the link was
+        # collected up front, before payment) — skip straight to the
+        # admin delivering it, same as any other manual delivery.
+        db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    f"📚 Book paid — Order #{order_id}\n"
+                    f"{item_name}\n\n"
+                    "Deliver it using the 📤 Send Book button on this order."
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("📤 Send Book", callback_data=f"deliver:{fulfilment_id}")]]
+                ),
+            )
     else:
+        # Store which unit this is for, but wait for New/Renewal before
+        # starting either field list.
         customer_data["generic_fulfilment_id"] = fulfilment_id
         customer_data["generic_item_id"] = item_id
         customer_data["generic_order_id"] = order_id
-        customer_data["generic_data"] = {}
-        customer_data["awaiting_generic_field"] = GENERIC_FIELDS[0][0]
         await context.bot.send_message(
             chat_id=user_id,
-            # Plain text on purpose: the password rules mention the symbols
-            # @ _ # $, and the underscore makes Telegram's Markdown parser
-            # reject the whole message ("can't find end of the entity").
-            text=(
-                f"📝 Now let's set up your {item_name}.\n\n"
-                f"{GENERIC_FIELDS[0][1]}"
+            text=f"📝 Let's set up your {item_name}. Is this a:",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("🆕 New Account", callback_data="gentype:new")],
+                    [InlineKeyboardButton("🔄 Renewal of a previous account", callback_data="gentype:renew")],
+                ]
             ),
         )
 
 
+async def generic_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer answered New Account vs Renewal — starts whichever field
+    list applies. Not used for iMD, which already has its own separate
+    New/Renew purchase choice made before checkout."""
+    query = update.callback_query
+    await query.answer()
+    account_type = query.data.split(":", 1)[1]  # "new" or "renew"
+
+    fulfilment_id = context.user_data.get("generic_fulfilment_id")
+    item_id = context.user_data.get("generic_item_id")
+    if not fulfilment_id or not item_id:
+        await query.edit_message_text("This step has expired — please check 📋 My Subscriptions to continue.")
+        return
+
+    item_name = MENU.get(item_id, (item_id, 0))[0]
+    context.user_data["generic_account_type"] = account_type
+    context.user_data["generic_data"] = {}
+
+    fields = GENERIC_FIELDS if account_type == "new" else RENEWAL_FIELDS
+    context.user_data["awaiting_generic_field"] = fields[0][0]
+
+    label = "New Account" if account_type == "new" else "Renewal"
+    # Plain text on purpose: the password rules mention symbols like _ and
+    # #, and Telegram's Markdown parser breaks on unescaped underscores.
+    await query.edit_message_text(f"📝 {item_name} — {label}\n\n{fields[0][1]}")
+
+
 async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Collects first name, last name, email, username and password for a
-    non-iMD subscription, validating the username and password rules and
-    re-asking until they're satisfied."""
+    """Collects either the New Account fields (first/last name, email,
+    username, password — with uniqueness checks on email/username) or the
+    Renewal fields (existing login + password, no uniqueness checks) for
+    a non-iMD subscription, depending on which the customer chose."""
     field = context.user_data.get("awaiting_generic_field")
     if not field:
         return
 
+    account_type = context.user_data.get("generic_account_type", "new")
+    fields = GENERIC_FIELDS if account_type == "new" else RENEWAL_FIELDS
+    item_id = context.user_data.get("generic_item_id")
+
     value = update.message.text.strip()
 
-    if field == "username":
-        error = validate_generic_username(value)
-        if error:
-            await update.message.reply_text(error)
-            return
-    elif field == "password":
-        error = validate_generic_password(value)
-        if error:
-            await update.message.reply_text(error)
-            return
+    if account_type == "new":
+        if field == "username":
+            error = validate_generic_username(value)
+            if error:
+                await update.message.reply_text(error)
+                return
+        elif field == "password":
+            error = validate_generic_password(value)
+            if error:
+                await update.message.reply_text(error)
+                return
+
+        # Uniqueness — only meaningful for a brand-new registration, and
+        # only checkable against what this customer has submitted to us
+        # before for this exact subscription.
+        if field in ("email", "username") and item_id:
+            if db_credential_already_used(update.effective_user.id, item_id, field, value):
+                await update.message.reply_text(
+                    f"You've already used this {field} to register for this subscription before. "
+                    "Please provide a different one:"
+                )
+                return
 
     data = context.user_data.setdefault("generic_data", {})
     data[field] = value
 
-    field_names = [f[0] for f in GENERIC_FIELDS]
+    field_names = [f[0] for f in fields]
     idx = field_names.index(field)
 
-    if idx + 1 < len(GENERIC_FIELDS):
-        next_field, next_prompt = GENERIC_FIELDS[idx + 1]
+    if idx + 1 < len(fields):
+        next_field, next_prompt = fields[idx + 1]
         context.user_data["awaiting_generic_field"] = next_field
         await update.message.reply_text(next_prompt)
         return
@@ -4346,6 +4835,7 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
     fulfilment_id = context.user_data.pop("generic_fulfilment_id", None)
     context.user_data.pop("awaiting_generic_field", None)
     context.user_data.pop("generic_data", None)
+    context.user_data.pop("generic_account_type", None)
 
     await update.message.reply_text(DELIVERY_48H_MESSAGE)
 
@@ -4353,18 +4843,38 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         db_set_fulfilment_info(fulfilment_id, data)
         db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
 
+    # Record the credentials so future New Account attempts for this same
+    # subscription can be checked against them — only applies to genuinely
+    # new registrations, not renewals (which reuse an existing account).
+    if account_type == "new" and item_id:
+        db_record_used_credentials(
+            update.effective_user.id, item_id, data.get("email"), data.get("username")
+        )
+
     if ADMIN_CHAT_ID and order_id:
         item_name = MENU.get(item_id, (item_id, 0))[0]
-        await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=(
-                f"📝 Manual fulfilment needed — Order #{order_id}\n"
-                f"Product: {item_name}\n\n"
+        if account_type == "new":
+            detail = (
                 f"First name: {data.get('first_name')}\n"
                 f"Last name: {data.get('last_name')}\n"
                 f"Email: {data.get('email')}\n"
                 f"Username: {data.get('username')}\n"
                 f"Password: {data.get('password')}\n\n"
+            )
+            tag = "🆕 NEW ACCOUNT"
+        else:
+            detail = (
+                f"Username/Email: {data.get('login_username')}\n"
+                f"Password: {data.get('login_password')}\n\n"
+            )
+            tag = "🔄 RENEWAL"
+
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=(
+                f"📝 Manual fulfilment needed — Order #{order_id} ({tag})\n"
+                f"Product: {item_name}\n\n"
+                f"{detail}"
                 "Deliver within 48 hours using the 📤 Send Credentials button on this order."
             ),
             reply_markup=InlineKeyboardMarkup(
@@ -5069,7 +5579,7 @@ async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     parts = [f"Customer {query_arg} (ID: {user_id})"]
-    parts.append(f"💳 Credits: {credits} ({CURRENCY}{credits * 5})")
+    parts.append(f"💳 Credits: {credits} ({CURRENCY}{credits * 4})")
 
     parts.append("\n✅ DELIVERED")
     if delivered:
@@ -5191,6 +5701,12 @@ def main():
         if item_id not in SINGLE_MAIN_ITEMS:
             SINGLE_MAIN_ITEMS.append(item_id)
 
+    # Restore any priced/ordered book requests — MENU-only, deliberately
+    # never added to SINGLE_MAIN_ITEMS, since these are one-off items
+    # private to whichever customer requested them, not general catalog.
+    for item_id, name, price in db_load_book_menu_items():
+        MENU[item_id] = (name, price)
+
     if BOT_TOKEN == "PUT_YOUR_BOT_TOKEN_HERE":
         raise SystemExit("Set BOT_TOKEN (env var) before running.")
 
@@ -5242,6 +5758,13 @@ def main():
     app.add_handler(CallbackQueryHandler(pay_card_start, pattern=r"^pay_card:"))
     app.add_handler(CallbackQueryHandler(pay_crypto, pattern=r"^pay_crypto:"))
     app.add_handler(CallbackQueryHandler(pay_credits_start, pattern=r"^pay_credits:"))
+    app.add_handler(CallbackQueryHandler(generic_type_selected, pattern=r"^gentype:"))
+    app.add_handler(CallbackQueryHandler(book_price_start, pattern=r"^bookprice:"))
+    app.add_handler(CallbackQueryHandler(book_proceed, pattern=r"^bookproceed:"))
+    app.add_handler(CallbackQueryHandler(book_cancel, pattern=r"^bookcancel:"))
+    app.add_handler(CallbackQueryHandler(book_requests_list, pattern=r"^bookreqs:"))
+    app.add_handler(CallbackQueryHandler(book_requests_back, pattern=r"^bookreqs_back$"))
+    app.add_handler(CallbackQueryHandler(book_request_view, pattern=r"^bookreqview:"))
     app.add_handler(CallbackQueryHandler(goto_getfree, pattern=r"^goto_getfree$"))
     app.add_handler(CallbackQueryHandler(back_to_checkout, pattern=r"^back_to_checkout:"))
     app.add_handler(CallbackQueryHandler(my_subscription_detail, pattern=r"^mysub:"))
@@ -5266,7 +5789,7 @@ def main():
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, photo_router))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_post_detector))
-    app.add_handler(MessageHandler(filters.Text([BUY_LABEL, MY_SUBS_LABEL, BASKET_LABEL, ANNOUNCEMENTS_LABEL, JOIN_CHANNEL_LABEL, TICKET_LABEL, GET_FREE_LABEL, MY_CREDITS_LABEL, SUPPORT_LABEL]), main_menu_text))
+    app.add_handler(MessageHandler(filters.Text([BUY_LABEL, MY_SUBS_LABEL, BASKET_LABEL, ANNOUNCEMENTS_LABEL, JOIN_CHANNEL_LABEL, TICKET_LABEL, GET_FREE_LABEL, MY_CREDITS_LABEL, BOOK_REQUEST_LABEL, SUPPORT_LABEL]), main_menu_text))
     app.add_handler(MessageHandler(filters.Text(ADMIN_LABELS), admin_menu_text))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_state_router))
     app.add_handler(CallbackQueryHandler(menu_button))  # catch-all for menu/cart callbacks
