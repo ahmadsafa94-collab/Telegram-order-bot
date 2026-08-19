@@ -632,6 +632,16 @@ def db_init():
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS custom_items (
+            item_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            price REAL NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS tickets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -1127,6 +1137,36 @@ def db_resolve_ticket(ticket_id: int, resolution_message: str):
     conn.close()
 
 
+def db_add_custom_item(item_id: str, name: str, price: float):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO custom_items (item_id, name, price, created_at) VALUES (?, ?, ?, ?)",
+        (item_id, name, price, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_load_custom_items():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT item_id, name, price FROM custom_items").fetchall()
+    conn.close()
+    return rows
+
+
+def generate_item_id(name: str) -> str:
+    """Slugifies a subscription name into an item_id, guaranteed unique
+    against whatever's currently in MENU (adds a numeric suffix on
+    collision)."""
+    base = re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_') or "item"
+    item_id = base
+    counter = 2
+    while item_id in MENU:
+        item_id = f"{base}_{counter}"
+        counter += 1
+    return item_id
+
+
 def db_is_out_of_stock(item_id: str) -> bool:
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute("SELECT status FROM stock_status WHERE item_id = ?", (item_id,)).fetchone()
@@ -1526,12 +1566,14 @@ A_FIND_CUSTOMER = "👤 Find Customer"
 A_STOCK = "📦 Manage Stock"
 A_TICKETS = "🎫 Tickets"
 A_CREDITS = "💳 Customer Credits"
+A_ADD_SUBSCRIPTION = "➕ Add New Subscription"
 A_CUSTOMER_VIEW = "🛍 Customer Menu"
 
 ADMIN_LABELS = [
     A_VIEW_SERIALS, A_ADD_SERIALS, A_REMOVE_SERIAL,
     A_RECENT_ORDERS, A_PENDING, A_INPUT, A_INBOX, A_BROADCAST,
-    A_FIND_ORDER, A_FIND_CUSTOMER, A_STOCK, A_TICKETS, A_CREDITS, A_CUSTOMER_VIEW,
+    A_FIND_ORDER, A_FIND_CUSTOMER, A_STOCK, A_TICKETS, A_CREDITS,
+    A_ADD_SUBSCRIPTION, A_CUSTOMER_VIEW,
 ]
 
 
@@ -1560,6 +1602,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [A_INBOX, A_BROADCAST],
             [A_FIND_ORDER, A_FIND_CUSTOMER],
             [A_STOCK, A_TICKETS],
+            [A_CREDITS, A_ADD_SUBSCRIPTION],
             [A_CUSTOMER_VIEW],
         ],
         resize_keyboard=True,
@@ -3206,6 +3249,11 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == A_CREDITS:
         await credits_menu(update, context)
 
+    elif text == A_ADD_SUBSCRIPTION:
+        context.user_data["awaiting_new_sub_field"] = "name"
+        context.user_data["new_sub_data"] = {}
+        await update.message.reply_text("Enter the name of the new subscription:")
+
     elif text == A_CUSTOMER_VIEW:
         await update.message.reply_text(
             "Switched to the customer menu. Send /start to return to the admin panel.",
@@ -3393,6 +3441,63 @@ async def stock_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer("Marked out of stock" if not currently_out else "Marked available")
     await query.edit_message_reply_markup(reply_markup=stock_keyboard())
+
+
+async def new_subscription_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Collects name -> price -> duration for a new subscription, then adds
+    it to MENU (in memory, immediately purchasable) and saves it to the
+    database so it survives the next redeploy."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    field = context.user_data.get("awaiting_new_sub_field")
+    if not field:
+        return
+
+    value = update.message.text.strip()
+    data = context.user_data.setdefault("new_sub_data", {})
+
+    if field == "name":
+        if not value:
+            await update.message.reply_text("Please send a non-empty name:")
+            return
+        data["name"] = value
+        context.user_data["awaiting_new_sub_field"] = "price"
+        await update.message.reply_text("Enter the price in USD (numbers only, e.g. 25):")
+        return
+
+    if field == "price":
+        try:
+            price = float(value)
+            if price <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Please send a valid positive number for the price:")
+            return
+        data["price"] = price
+        context.user_data["awaiting_new_sub_field"] = "duration"
+        await update.message.reply_text("Enter the duration (e.g. \"1 Year\", \"6 Months\"):")
+        return
+
+    if field == "duration":
+        if not value:
+            await update.message.reply_text("Please send a non-empty duration:")
+            return
+        data["duration"] = value
+        context.user_data.pop("awaiting_new_sub_field", None)
+        context.user_data.pop("new_sub_data", None)
+
+        full_name = f"{data['name']} - {data['duration']}"
+        item_id = generate_item_id(full_name)
+
+        db_add_custom_item(item_id, full_name, data["price"])
+        MENU[item_id] = (full_name, data["price"])
+        SINGLE_MAIN_ITEMS.append(item_id)
+
+        await update.message.reply_text(
+            f"✅ Added to the menu:\n\n{full_name} — {CURRENCY}{data['price']:.2f}\n\n"
+            "It's now available for customers to purchase, and listed under 📦 Manage Stock."
+        )
 
 
 async def credits_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4099,6 +4204,10 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.effective_user.id == ADMIN_CHAT_ID and context.user_data.get("awaiting_admin_message_for_order"):
         await admin_message_reply(update, context)
+        return
+
+    if update.effective_user.id == ADMIN_CHAT_ID and context.user_data.get("awaiting_new_sub_field"):
+        await new_subscription_field_reply(update, context)
         return
 
     if context.user_data.get("awaiting_ticket_field") == "message":
@@ -5073,6 +5182,14 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     db_init()
+
+    # Restore any subscriptions the admin added via ➕ Add New Subscription
+    # in a previous run — MENU/SINGLE_MAIN_ITEMS are otherwise reset to
+    # just the built-in catalog on every restart.
+    for item_id, name, price in db_load_custom_items():
+        MENU[item_id] = (name, price)
+        if item_id not in SINGLE_MAIN_ITEMS:
+            SINGLE_MAIN_ITEMS.append(item_id)
 
     if BOT_TOKEN == "PUT_YOUR_BOT_TOKEN_HERE":
         raise SystemExit("Set BOT_TOKEN (env var) before running.")
