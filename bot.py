@@ -2634,6 +2634,8 @@ async def ticket_screenshot_reply(update: Update, context: ContextTypes.DEFAULT_
                 [[InlineKeyboardButton("✅ Mark Resolved", callback_data=f"ticketresolve:{ticket_id}")]]
             ),
         )
+        # Push updated keyboard so the Tickets badge appears immediately.
+        await refresh_admin_keyboard(context)
 
     await restore_collection_state(context, context.user_data, update.effective_chat.id)
     return True
@@ -3366,6 +3368,10 @@ async def notify_admin_receipt(
             )
         except Exception:
             logger.exception("Failed to notify admin for order #%s", order_id)
+        else:
+            # A new receipt = a new pending order. Push the updated keyboard
+            # so the Pending Orders badge appears immediately.
+            await refresh_admin_keyboard(context)
     else:
         logger.warning("ADMIN_CHAT_ID not set — no admin notified for order #%s", order_id)
 
@@ -4028,14 +4034,15 @@ async def credits_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def refresh_admin_keyboard(context: ContextTypes.DEFAULT_TYPE):
-    """Sends an updated admin keyboard to the admin so badge counts reflect
-    the current state immediately after an action that changes them."""
+    """Pushes an updated admin keyboard so badge counts are current.
+    Uses a zero-width space as text so the message is as unobtrusive as
+    possible — it's just a carrier for the updated ReplyKeyboardMarkup."""
     if not ADMIN_CHAT_ID:
         return
     try:
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
-            text=".",
+            text="​",  # zero-width space — invisible but satisfies Telegram's non-empty requirement
             reply_markup=admin_menu_keyboard(),
         )
     except Exception:
@@ -4410,6 +4417,9 @@ async def customer_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         # there instead of appearing directly in chat.
         logger.exception("Failed to deliver customer reply for order #%s to admin", order_id)
 
+    # Push updated keyboard so the Inbox badge appears immediately.
+    await refresh_admin_keyboard(context)
+
 
 async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Shows the details a customer submitted, with a deliver button."""
@@ -4697,7 +4707,14 @@ async def admin_input_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sent, failed = 0, 0
         for user_id in recipients:
             try:
-                await context.bot.send_message(chat_id=user_id, text=f"📢 Announcement:\n\n{body}")
+                # Send the announcement text AND a refreshed keyboard in
+                # the same message so the 📢 badge appears immediately for
+                # each recipient without a separate follow-up message.
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"📢 Announcement:\n\n{body}",
+                    reply_markup=main_menu_keyboard(user_id),
+                )
                 sent += 1
             except Exception:
                 failed += 1
@@ -5916,26 +5933,24 @@ async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, photo_router))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_post_detector))
-    CUSTOMER_LABELS = {BUY_LABEL, MY_SUBS_LABEL, BASKET_LABEL, ANNOUNCEMENTS_LABEL,
-                       JOIN_CHANNEL_LABEL, TICKET_LABEL, GET_FREE_LABEL, MY_CREDITS_LABEL,
-                       BOOK_REQUEST_LABEL, SUPPORT_LABEL}
+    # Build regex patterns that match button labels with OR without a badge
+    # suffix (e.g. "⏳ Pending Orders 🔴3") — filters.create had the wrong
+    # function signature for PTB 21 and broke all keyboard button routing.
+    import re as _re
+    _customer_labels = [BUY_LABEL, MY_SUBS_LABEL, BASKET_LABEL, ANNOUNCEMENTS_LABEL,
+                        JOIN_CHANNEL_LABEL, TICKET_LABEL, GET_FREE_LABEL, MY_CREDITS_LABEL,
+                        BOOK_REQUEST_LABEL, SUPPORT_LABEL]
+    _customer_pat = "^(" + "|".join(_re.escape(l) for l in _customer_labels) + r")( 🔴\d+)?$"
+    _admin_pat    = "^(" + "|".join(_re.escape(l) for l in ADMIN_LABELS)    + r")( 🔴\d+)?$"
 
-    def _is_customer_button(msg):
-        """Matches any customer menu button tap, with or without a live badge
-        suffix (e.g. '📢 Announcements 🔴1' → matches '📢 Announcements')."""
-        if not (msg.text and msg.from_user and msg.from_user.id != ADMIN_CHAT_ID):
-            return False
-        return msg.text.split(" 🔴")[0].strip() in CUSTOMER_LABELS
-
-    app.add_handler(MessageHandler(filters.UpdateType.MESSAGES & filters.create(_is_customer_button), main_menu_text))
-    def _is_admin_button(msg):
-        """Matches any admin panel button tap, with or without a live badge
-        suffix (e.g. '⏳ Pending Orders 🔴3' → matches '⏳ Pending Orders')."""
-        if not (msg.text and msg.from_user and msg.from_user.id == ADMIN_CHAT_ID):
-            return False
-        return msg.text.split(" 🔴")[0].strip() in ADMIN_LABELS
-
-    app.add_handler(MessageHandler(filters.User(ADMIN_CHAT_ID) & filters.UpdateType.MESSAGES & filters.create(_is_admin_button), admin_menu_text))
+    app.add_handler(MessageHandler(
+        ~filters.User(ADMIN_CHAT_ID) & filters.Regex(_customer_pat),
+        main_menu_text,
+    ))
+    app.add_handler(MessageHandler(
+        filters.User(ADMIN_CHAT_ID) & filters.Regex(_admin_pat),
+        admin_menu_text,
+    ))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_state_router))
     app.add_handler(CallbackQueryHandler(menu_button))  # catch-all for menu/cart callbacks
 
