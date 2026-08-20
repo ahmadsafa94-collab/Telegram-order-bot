@@ -40,9 +40,11 @@ from datetime import datetime, timedelta
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     LabeledPrice,
     ReplyKeyboardMarkup,
     Update,
+    WebAppInfo,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -1804,18 +1806,25 @@ def _badge(label: str, count: int) -> str:
 
 
 def main_menu_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
-    """A persistent keyboard pinned to the bottom of the chat — stays visible
-    across every message. Badges the Announcements button with the number
-    of unseen announcements when user_id is supplied (defaults to no badge
-    when we don't know the user, e.g. the admin switching to customer view)."""
+    """A persistent keyboard pinned to the bottom of the chat. Badges the
+    Announcements button with unseen count, and includes a WebApp keyboard
+    button for the Mini App when MINI_APP_URL is configured — this is the
+    only button type that makes tg.sendData() work correctly (the menu
+    button set via BotFather does NOT support sendData)."""
     ann_count = db_unseen_announcement_count(user_id) if user_id else 0
+
+    shop_row = (
+        [KeyboardButton("🏪 Shop", web_app=WebAppInfo(url=MINI_APP_URL)), BOOK_REQUEST_LABEL]
+        if MINI_APP_URL else [BOOK_REQUEST_LABEL]
+    )
+
     return ReplyKeyboardMarkup(
         [
             [BUY_LABEL, MY_SUBS_LABEL], [BASKET_LABEL],
             [_badge(ANNOUNCEMENTS_LABEL, ann_count), JOIN_CHANNEL_LABEL],
             [GET_FREE_LABEL, MY_CREDITS_LABEL],
-            [BOOK_REQUEST_LABEL, TICKET_LABEL],
-            [SUPPORT_LABEL],
+            shop_row,
+            [TICKET_LABEL, SUPPORT_LABEL],
         ],
         resize_keyboard=True,
     )
@@ -6016,20 +6025,16 @@ def main():
         MENU[item_id] = (name, price)
 
     async def post_init(application):
-        """Called once after the bot connects — sets the menu button to open
-        the Mini App if MINI_APP_URL is configured."""
-        if MINI_APP_URL:
-            try:
-                from telegram import MenuButtonWebApp, WebAppInfo
-                await application.bot.set_chat_menu_button(
-                    menu_button=MenuButtonWebApp(
-                        text="🏪 Shop",
-                        web_app=WebAppInfo(url=MINI_APP_URL),
-                    )
-                )
-                logger.info("Mini App menu button set to %s", MINI_APP_URL)
-            except Exception:
-                logger.exception("Failed to set Mini App menu button")
+        """Called once after the bot connects — removes the bottom-left
+        menu button so customers use the 🏪 Shop keyboard button instead
+        (that one supports sendData; the menu button does not)."""
+        try:
+            from telegram import MenuButtonDefault
+            await application.bot.set_chat_menu_button(
+                menu_button=MenuButtonDefault()
+            )
+        except Exception:
+            logger.exception("Failed to reset menu button")
 
     if BOT_TOKEN == "PUT_YOUR_BOT_TOKEN_HERE":
         raise SystemExit("Set BOT_TOKEN (env var) before running.")
