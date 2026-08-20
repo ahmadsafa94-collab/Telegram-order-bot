@@ -414,8 +414,8 @@ COUNTRY_FLAGS = {
 # "USD" as the code means no conversion is shown (paid in USD directly).
 CURRENCY_RATES = {
     "Lebanon": ("USD", 1),
-    "Jordan": ("JOD", 0.716),
-    "India": ("INR", 94.5),
+    "Jordan": ("JOD", 0.7066),
+    "India": ("INR", 94.6666),
     "Ghana": ("GHS", 11.8),
     "Pakistan": ("PKR", 280),
     "Europe": ("USD", 1),
@@ -1831,28 +1831,50 @@ def _badge(label: str, count: int) -> str:
 
 
 def _shop_url(user_id: int = 0) -> str:
-    """Builds the Mini App URL. When user_id is known, subscription data is
-    encoded as a base64 JSON fragment (#...) so the Mini App can display
-    it without any HTTP API call — no server required, no CORS, and the
-    data is never sent to GitHub Pages since URL fragments stay local."""
+    """Builds the Mini App URL. When user_id is known, subscription data and
+    custom admin-added items are encoded as a base64 query param (?subs=...)
+    so the Mini App can display them without any HTTP API call.
+
+    Three fixes vs. the previous version:
+    1. Uses ?subs= (query param) instead of #fragment — some Telegram clients
+       strip URL fragments before passing the URL to the WebApp.
+    2. Encodes data as arrays [[name,date]] not objects {"n":...} so the Mini
+       App's array-destructuring works correctly.
+    3. Includes custom admin-added subscriptions so the Mini App catalog stays
+       in sync with whatever the admin has added via ➕ Add New Subscription."""
     if not MINI_APP_URL:
         return ""
     if not user_id:
+        # Still try to include custom items even for unknown user
+        try:
+            import base64
+            custom = [[name, price] for _, name, price in db_load_custom_items()]
+            if custom:
+                encoded = base64.urlsafe_b64encode(
+                    json.dumps({"d": [], "p": [], "c": custom}, separators=(",", ":")).encode()
+                ).decode().rstrip("=")
+                return f"{MINI_APP_URL}?subs={encoded}"
+        except Exception:
+            pass
         return MINI_APP_URL
     try:
         import base64
         delivered = db_user_delivered_units(user_id)
         pending   = db_user_pending_items(user_id)
+        custom    = [[name, price] for _, name, price in db_load_custom_items()]
         data = {
-            "d": [{"n": MENU.get(iid, (iid,))[0], "dt": (dat[:10] if dat else "")}
+            # Arrays (not objects) so the HTML can use [name, date] destructuring
+            "d": [[MENU.get(iid, (iid,))[0], dat[:10] if dat else ""]
                   for _, iid, dat in delivered],
-            "p": [{"n": MENU.get(iid, (iid,))[0], "s": state}
+            "p": [[MENU.get(iid, (iid,))[0], state]
                   for fid, oid, iid, unit_no, state in pending],
+            # Custom admin-added subscriptions for the catalog
+            "c": custom,
         }
         encoded = base64.urlsafe_b64encode(
             json.dumps(data, separators=(",", ":")).encode()
         ).decode().rstrip("=")
-        return f"{MINI_APP_URL}#{encoded}"
+        return f"{MINI_APP_URL}?subs={encoded}"
     except Exception:
         logger.exception("Failed to encode subscription data in Mini App URL")
         return MINI_APP_URL

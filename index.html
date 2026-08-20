@@ -267,15 +267,16 @@ const tg = window.Telegram.WebApp;
 tg.ready(); tg.expand();
 tg.setHeaderColor('secondary_bg_color');
 
-// ── Load subscription data from URL fragment ──────────────────────────
-// The bot encodes the user's subscriptions as base64 JSON in the URL fragment
-// (#...) when it builds the keyboard — no HTTP API call needed, no CORS issues.
+// ── Load subscription data from URL query param ──────────────────────
+// The bot encodes the user's subscriptions + custom catalog items as
+// base64 JSON in the ?subs= query parameter. Using a query param (not
+// a fragment #) ensures Telegram always passes it to the WebApp intact.
 let SUBS_DATA = null;
 try {
-  const hash = window.location.hash.slice(1);
-  if (hash) {
-    const pad = '=='.slice(0, (4 - hash.length % 4) % 4);
-    const b64  = (hash + pad).replace(/-/g, '+').replace(/_/g, '/');
+  const _subs = new URLSearchParams(window.location.search).get('subs');
+  if (_subs) {
+    const pad = '=='.slice(0, (4 - _subs.length % 4) % 4);
+    const b64 = (_subs + pad).replace(/-/g, '+').replace(/_/g, '/');
     SUBS_DATA  = JSON.parse(atob(b64));
   }
 } catch(e) { /* ignore parse errors */ }
@@ -349,8 +350,8 @@ const FLAGS={Lebanon:'🇱🇧',Jordan:'🇯🇴',India:'🇮🇳',Ghana:'🇬�
 function payInstr(c,t){
   const m={
     Lebanon:`WhishMoney: <span class="mono">81666579</span><br>Amount: <strong>$${t.toFixed(2)}</strong>`,
-    Jordan:`<strong>${(t*.716).toFixed(3)} JOD</strong><br>CLIQ: <span class="mono">WKS777</span> Orange·Waleed Shaqfeh<br>CLIQ: <span class="mono">WKS999</span> Etihad·Waleed Shaqfeh<br>CLIQ: <span class="mono">WKS555</span> Zain·Shamalti`,
-    India:`UPI: <span class="mono">s4005194160889795@slc</span><br>Shilpaben karetiya<br><strong>₹${Math.round(t*94.5).toLocaleString()}</strong><br>⚠️ Leave remarks empty. Split if needed.`,
+    Jordan:`<strong>${(t*0.7066).toFixed(1)} JOD</strong><br>CLIQ: <span class="mono">WKS777</span> Orange·Waleed Shaqfeh<br>CLIQ: <span class="mono">WKS999</span> Etihad·Waleed Shaqfeh<br>CLIQ: <span class="mono">WKS555</span> Zain·Shamalti`,
+    India:`UPI: <span class="mono">s4005194160889795@slc</span><br>Shilpaben karetiya<br><strong>₹${Math.round(t*94.6666).toLocaleString()}</strong><br>⚠️ Leave remarks empty. Split if needed.`,
     Ghana:`<strong>${(t*11.8).toFixed(2)} GHS</strong><br><span class="mono">0257505632</span> MTN·Saibu Mahamadu<br><span class="mono">0204860754</span> Telecel·Saibu Mahamadu`,
     Pakistan:`<strong>${Math.round(t*280).toLocaleString()} PKR</strong><br>HBL·Muhammad Bilal<br>Acc: <span class="mono">03577900871203</span><br>IBAN: <span class="mono">PK08HABB0003577900871203</span><br>Branch: TOTALAI`,
     Europe:`Revolut card: <span class="mono">5413525250267271</span><br>Alijon Karimov·Tajikistan<br><strong>$${t.toFixed(2)}</strong>`,
@@ -682,6 +683,23 @@ tg.MainButton.onClick(submitOrder);
 
 // ── Init ──────────────────────────────────────────────────────────────
 buildCatalog();
+
+// Inject any custom admin-added subscriptions into the "More" section
+if (SUBS_DATA && SUBS_DATA.c && SUBS_DATA.c.length) {
+  const moreSec = document.getElementById('cat-other');
+  if (moreSec) {
+    const lbl = document.createElement('div');
+    lbl.className = 'sl'; lbl.textContent = 'Additional Subscriptions';
+    moreSec.appendChild(lbl);
+    SUBS_DATA.c.forEach(([name, price]) => {
+      const fakeId = 'custom_' + name.replace(/\W+/g,'_').toLowerCase();
+      // Register in IMAP so addItem can find it
+      IMAP[fakeId] = {id: fakeId, name, price, sub: ''};
+      const row = makeRow({id: fakeId, name, price, sub: '', e: '📦'}, true);
+      moreSec.appendChild(row);
+    });
+  }
+}
 </script>
 </body>
 </html>
