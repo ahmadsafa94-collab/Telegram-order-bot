@@ -645,6 +645,15 @@ def db_init():
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS seen_announcements (
+            user_id INTEGER NOT NULL,
+            announcement_id INTEGER NOT NULL,
+            PRIMARY KEY (user_id, announcement_id)
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS stock_status (
             item_id TEXT PRIMARY KEY,
             status TEXT NOT NULL DEFAULT 'available'
@@ -1360,6 +1369,42 @@ def db_out_of_stock_items() -> set:
     return {r[0] for r in rows}
 
 
+def db_mark_announcement_seen(user_id: int, announcement_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT OR IGNORE INTO seen_announcements (user_id, announcement_id) VALUES (?, ?)",
+        (user_id, announcement_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_unseen_announcement_count(user_id: int) -> int:
+    """How many announcements this customer has never opened."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT COUNT(*) FROM announcements a "
+        "WHERE NOT EXISTS (SELECT 1 FROM seen_announcements s "
+        "WHERE s.user_id = ? AND s.announcement_id = a.id)",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+def db_pending_order_count() -> int:
+    """Units that still need admin action — used for the admin badge."""
+    return len(db_all_pending_items())
+
+
+def db_unread_inbox_count() -> int:
+    return len(db_inbox_messages(read=False))
+
+
+def db_unresolved_ticket_count() -> int:
+    return len(db_list_tickets("unresolved"))
+
+
 def db_add_announcement(body: str) -> int:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute(
@@ -1746,13 +1791,23 @@ ADMIN_LABELS = [
 ]
 
 
-def main_menu_keyboard() -> ReplyKeyboardMarkup:
+def _badge(label: str, count: int) -> str:
+    """Appends a 🔴 and the count to a button label when there's something
+    new to see — the simplest possible notification that works inside a
+    ReplyKeyboardMarkup, which doesn't support inline markup or colours."""
+    return f"{label} 🔴{count}" if count > 0 else label
+
+
+def main_menu_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
     """A persistent keyboard pinned to the bottom of the chat — stays visible
-    across every message, not just the one it was attached to."""
+    across every message. Badges the Announcements button with the number
+    of unseen announcements when user_id is supplied (defaults to no badge
+    when we don't know the user, e.g. the admin switching to customer view)."""
+    ann_count = db_unseen_announcement_count(user_id) if user_id else 0
     return ReplyKeyboardMarkup(
         [
             [BUY_LABEL, MY_SUBS_LABEL], [BASKET_LABEL],
-            [ANNOUNCEMENTS_LABEL, JOIN_CHANNEL_LABEL],
+            [_badge(ANNOUNCEMENTS_LABEL, ann_count), JOIN_CHANNEL_LABEL],
             [GET_FREE_LABEL, MY_CREDITS_LABEL],
             [BOOK_REQUEST_LABEL, TICKET_LABEL],
             [SUPPORT_LABEL],
@@ -1762,16 +1817,20 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
 
 
 def admin_menu_keyboard() -> ReplyKeyboardMarkup:
-    """The admin's persistent panel — every admin function as a button, so
-    none of the slash commands need to be typed from memory."""
+    """The admin's persistent panel. Badges Pending Orders, Inbox, and
+    Tickets with live counts whenever there's something waiting — the
+    keyboard is rebuilt on demand so the count is always current."""
+    pending = db_pending_order_count()
+    inbox   = db_unread_inbox_count()
+    tickets = db_unresolved_ticket_count()
     return ReplyKeyboardMarkup(
         [
             [A_VIEW_SERIALS, A_ADD_SERIALS],
             [A_REMOVE_SERIAL, A_RECENT_ORDERS],
-            [A_PENDING, A_INPUT],
-            [A_INBOX, A_BROADCAST],
+            [_badge(A_PENDING, pending), A_INPUT],
+            [_badge(A_INBOX, inbox), A_BROADCAST],
             [A_FIND_ORDER, A_FIND_CUSTOMER],
-            [A_STOCK, A_TICKETS],
+            [A_STOCK, _badge(A_TICKETS, tickets)],
             [A_CREDITS, A_ADD_SUBSCRIPTION],
             [A_BOOK_REQUESTS],
             [A_CUSTOMER_VIEW],
@@ -1853,14 +1912,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "Welcome! Use the buttons below any time.",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(update.effective_user.id),
     )
 
 
 async def main_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles taps on the persistent bottom keyboard: Buy, My Subscriptions,
-    Support."""
-    text = update.message.text
+    Support. Strips the live badge suffix before routing so a badged
+    Announcements button still routes correctly."""
+    text = (update.message.text or "").split(" 🔴")[0].strip()
 
     if text == BUY_LABEL:
         context.user_data.setdefault("cart", {})
@@ -1977,18 +2037,41 @@ def announcements_keyboard():
 
 
 async def show_announcements(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Customer-facing list of past broadcasts."""
+    """Customer-facing list of past broadcasts. Sends an updated keyboard
+    alongside so the badge clears immediately as they open the list."""
+    user_id = update.effective_user.id
     keyboard = announcements_keyboard()
     if not keyboard:
-        await update.message.reply_text("No announcements yet.")
+        await update.message.reply_text(
+            "No announcements yet.",
+            reply_markup=main_menu_keyboard(user_id),
+        )
         return
-    await update.message.reply_text("📢 Announcements — tap one to read it:", reply_markup=keyboard)
+    await update.message.reply_text(
+        "📢 Announcements — tap one to read it:",
+        reply_markup=keyboard,
+    )
+    # Push a refreshed keyboard so the badge disappears at the moment the
+    # customer opens the list — even before they read individual items.
+    # We mark all existing announcements seen at the moment they tap the
+    # tab, since by opening the list they've at least been informed.
+    conn = __import__('sqlite3').connect(DB_PATH)
+    rows = conn.execute("SELECT id FROM announcements").fetchall()
+    conn.close()
+    for (ann_id,) in rows:
+        db_mark_announcement_seen(user_id, ann_id)
+    # Send the refreshed keyboard (badge now 0) as a silent update.
+    await update.message.reply_text(
+        "👆 Tap any announcement above to read it in full.",
+        reply_markup=main_menu_keyboard(user_id),
+    )
 
 
 async def announcement_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     announcement_id = int(query.data.split(":", 1)[1])
+    db_mark_announcement_seen(query.from_user.id, announcement_id)
 
     row = db_get_announcement(announcement_id)
     back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="ann_back")]])
@@ -3514,7 +3597,11 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
-    text = update.message.text
+    # Strip the live badge suffix (e.g. " 🔴3") before routing, so the
+    # comparison against the static A_* labels always works regardless of
+    # what count is currently shown on the button.
+    raw = update.message.text or ""
+    text = raw.split(" 🔴")[0].strip()
 
     if text == A_VIEW_SERIALS:
         await show_serials(update, context)
@@ -3581,7 +3668,7 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == A_CUSTOMER_VIEW:
         await update.message.reply_text(
             "Switched to the customer menu. Send /start to return to the admin panel.",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(0),  # no user context, so no badge
         )
 
 
@@ -3940,6 +4027,21 @@ async def credits_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text[i:i + 3500])
 
 
+async def refresh_admin_keyboard(context: ContextTypes.DEFAULT_TYPE):
+    """Sends an updated admin keyboard to the admin so badge counts reflect
+    the current state immediately after an action that changes them."""
+    if not ADMIN_CHAT_ID:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=".",
+            reply_markup=admin_menu_keyboard(),
+        )
+    except Exception:
+        logger.exception("Failed to refresh admin keyboard")
+
+
 async def tickets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only: top of the Tickets tab — unresolved vs resolved."""
     if update.effective_user.id != ADMIN_CHAT_ID:
@@ -4086,6 +4188,7 @@ async def ticket_resolution_reply(update: Update, context: ContextTypes.DEFAULT_
         text=f"✅ Your ticket #{ticket_id} has been resolved:\n\n{resolution_text}",
     )
     await update.message.reply_text(f"✅ Ticket #{ticket_id} marked resolved and the customer notified.")
+    await refresh_admin_keyboard(context)
 
 
 async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4126,11 +4229,12 @@ def _inbox_summary_keyboard() -> InlineKeyboardMarkup:
 
 async def inbox_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only: top of the Inbox — unread vs read customer messages.
-    A permanent fallback that doesn't depend on the live chat push having
-    worked — every incoming customer message lands here regardless."""
+    Sends an updated keyboard so the badge clears immediately as the admin
+    opens the Inbox, even before reading individual messages."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
     await update.message.reply_text("Inbox:", reply_markup=_inbox_summary_keyboard())
+    await refresh_admin_keyboard(context)
 
 
 async def inbox_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5690,7 +5794,29 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # ------------------------------------------------------------------
 
-def main():
+async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: sends the raw SQLite database file as a Telegram document.
+    Use this BEFORE a redeploy when no Railway Volume is mounted, to ensure
+    no data is lost. The file can be re-uploaded to /data/orders.db later
+    via the Railway shell."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    if not os.path.exists(DB_PATH):
+        await update.message.reply_text("No database file found at the configured path.")
+        return
+    await update.message.reply_text(
+        f"📦 Sending database backup from `{DB_PATH}` — save this file before redeploying.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    with open(DB_PATH, "rb") as f:
+        await update.message.reply_document(
+            document=f,
+            filename="orders_backup.db",
+            caption=f"Database backup — {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}",
+        )
+
+
+
     db_init()
 
     # Restore any subscriptions the admin added via ➕ Add New Subscription
@@ -5722,6 +5848,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myorders", my_orders))
+    app.add_handler(CommandHandler("backupdb", backup_db))
     app.add_handler(CommandHandler("customers", customer_history))
     app.add_handler(CommandHandler("customer", customer_lookup))
     app.add_handler(CommandHandler("order", order_lookup))
@@ -5789,8 +5916,26 @@ def main():
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, photo_router))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_post_detector))
-    app.add_handler(MessageHandler(filters.Text([BUY_LABEL, MY_SUBS_LABEL, BASKET_LABEL, ANNOUNCEMENTS_LABEL, JOIN_CHANNEL_LABEL, TICKET_LABEL, GET_FREE_LABEL, MY_CREDITS_LABEL, BOOK_REQUEST_LABEL, SUPPORT_LABEL]), main_menu_text))
-    app.add_handler(MessageHandler(filters.Text(ADMIN_LABELS), admin_menu_text))
+    CUSTOMER_LABELS = {BUY_LABEL, MY_SUBS_LABEL, BASKET_LABEL, ANNOUNCEMENTS_LABEL,
+                       JOIN_CHANNEL_LABEL, TICKET_LABEL, GET_FREE_LABEL, MY_CREDITS_LABEL,
+                       BOOK_REQUEST_LABEL, SUPPORT_LABEL}
+
+    def _is_customer_button(msg):
+        """Matches any customer menu button tap, with or without a live badge
+        suffix (e.g. '📢 Announcements 🔴1' → matches '📢 Announcements')."""
+        if not (msg.text and msg.from_user and msg.from_user.id != ADMIN_CHAT_ID):
+            return False
+        return msg.text.split(" 🔴")[0].strip() in CUSTOMER_LABELS
+
+    app.add_handler(MessageHandler(filters.UpdateType.MESSAGES & filters.create(_is_customer_button), main_menu_text))
+    def _is_admin_button(msg):
+        """Matches any admin panel button tap, with or without a live badge
+        suffix (e.g. '⏳ Pending Orders 🔴3' → matches '⏳ Pending Orders')."""
+        if not (msg.text and msg.from_user and msg.from_user.id == ADMIN_CHAT_ID):
+            return False
+        return msg.text.split(" 🔴")[0].strip() in ADMIN_LABELS
+
+    app.add_handler(MessageHandler(filters.User(ADMIN_CHAT_ID) & filters.UpdateType.MESSAGES & filters.create(_is_admin_button), admin_menu_text))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_state_router))
     app.add_handler(CallbackQueryHandler(menu_button))  # catch-all for menu/cart callbacks
 
