@@ -301,9 +301,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 <div class="toast" id="toast"></div>
 
 <script>
+// ── Config ─────────────────────────────────────────────────────
 const tg = window.Telegram.WebApp;
 tg.ready(); tg.expand();
 tg.setHeaderColor('secondary_bg_color');
+
+// API URL is passed as ?api= query parameter so the Mini App always knows
+// where to call without hardcoding it.
+const _params  = new URLSearchParams(window.location.search);
+const API_URL  = _params.get('api') || '';
 
 // ── Catalog data ────────────────────────────────────────────
 const IMD = new Set(['imd_new_6m','imd_new_1y','imd_renew_6m','imd_renew_1y']);
@@ -546,17 +552,12 @@ function buildCatalog(){
   subSec.style.display='none';
   subSec.innerHTML=`
     <div class="sl">My Subscriptions</div>
-    <div class="sub-card">
-      <div class="icon">✅</div>
-      <h3>Delivered Subscriptions</h3>
-      <p>See all your active subscriptions and account details in the bot chat.</p>
-      <button onclick="viewSubs('view_subscriptions')">View Delivered →</button>
-    </div>
-    <div class="sub-card alt">
-      <div class="icon">⏳</div>
-      <h3>Pending Orders</h3>
-      <p>Track orders that are still being processed or awaiting payment confirmation.</p>
-      <button onclick="viewSubs('view_pending')">View Pending →</button>
+    <div id="subsContent">
+      <div style="text-align:center;padding:40px 16px;color:var(--hint)">
+        <div style="font-size:36px;margin-bottom:12px">📋</div>
+        <p style="font-size:13px">Tap below to load your subscriptions</p>
+        <button class="btn" style="max-width:240px;margin:16px auto 0;display:block" onclick="loadSubs()">Load My Subscriptions</button>
+      </div>
     </div>`;
   secEl.appendChild(subSec);
 }
@@ -595,11 +596,80 @@ function switchCat(id){
   const target=document.getElementById('cat-'+id);
   if(target) target.style.display='block';
 
+  // auto-load subscriptions on first visit
+  if(id==='mysubs') loadSubs();
+
   window.scrollTo(0,0);
 }
 
 function viewSubs(action){
   tg.sendData(JSON.stringify({action}));
+}
+
+async function loadSubs(){
+  const el=document.getElementById('subsContent');
+  if(!API_URL){
+    el.innerHTML=`<div style="text-align:center;padding:32px 16px;color:var(--hint);font-size:13px">
+      <div style="font-size:36px;margin-bottom:12px">⚙️</div>
+      API not configured. Please contact support.</div>`;
+    return;
+  }
+  el.innerHTML=`<div style="text-align:center;padding:40px 16px;color:var(--hint);font-size:13px">
+    <div style="font-size:32px;margin-bottom:12px">⏳</div>Loading your subscriptions...</div>`;
+  try{
+    const res=await fetch(`${API_URL}/api/subs`,{
+      headers:{'X-Telegram-Init-Data': tg.initData}
+    });
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const data=await res.json();
+    renderSubs(data);
+  }catch(err){
+    el.innerHTML=`<div style="text-align:center;padding:32px 16px;color:var(--hint);font-size:13px">
+      <div style="font-size:36px;margin-bottom:12px">⚠️</div>
+      Could not load subscriptions. Please try again.<br><br>
+      <button class="btn" style="max-width:200px;margin:0 auto;display:block" onclick="loadSubs()">Retry</button></div>`;
+  }
+}
+
+function renderSubs(data){
+  const el=document.getElementById('subsContent');
+  let html='';
+
+  if(data.delivered&&data.delivered.length){
+    html+=`<div class="sl" style="margin-top:0">✅ Delivered (${data.delivered.length})</div>
+      <div class="card">`;
+    data.delivered.forEach(s=>{
+      html+=`<div class="row" style="border-bottom:1px solid rgba(255,255,255,.05)">
+        <div class="ri"><div class="rn">${s.name}</div>${s.date?`<div class="rs">${s.date}</div>`:''}</div>
+        <div style="font-size:18px">✅</div>
+      </div>`;
+    });
+    html+=`</div>`;
+  }
+
+  if(data.pending&&data.pending.length){
+    html+=`<div class="sl">⏳ Pending (${data.pending.length})</div>
+      <div class="card">`;
+    const stateLabel={needs_info:'⌛ Awaiting your details',awaiting_delivery:'🔄 Being prepared'};
+    data.pending.forEach(s=>{
+      html+=`<div class="row">
+        <div class="ri"><div class="rn">${s.name}</div>
+        <div class="rs">${stateLabel[s.state]||'⏳ In progress'}</div></div>
+      </div>`;
+    });
+    html+=`</div>`;
+  }
+
+  if(!html){
+    html=`<div style="text-align:center;padding:36px 16px;color:var(--hint)">
+      <div style="font-size:40px;margin-bottom:12px">📭</div>
+      <div style="font-size:14px;font-weight:600;margin-bottom:6px">No subscriptions yet</div>
+      <div style="font-size:12px">Your orders will appear here after purchase.</div></div>`;
+  }
+
+  html+=`<div style="padding:4px 0 4px">
+    <button class="btn sec" style="margin-top:8px" onclick="loadSubs()">🔄 Refresh</button></div>`;
+  el.innerHTML=html;
 }
 
 // ── Detail forms ───────────────────────────────────────────────
