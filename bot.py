@@ -71,6 +71,11 @@ ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", "0"))  # your Telegram user 
 PAYMENTS_CHANNEL_ID_RAW = os.environ.get("PAYMENTS_CHANNEL_ID", "-1004374833714")
 PAYMENTS_CHANNEL_ID = int(PAYMENTS_CHANNEL_ID_RAW) if PAYMENTS_CHANNEL_ID_RAW.strip() else None
 
+# Mini App URL — set this to your GitHub Pages URL once deployed.
+# Format: https://<github-username>.github.io/<repo-name>/
+# Example: https://ahmadsafa94-collab.github.io/Telegram-order-bot/
+MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
+
 # Private "Subscriptions" channel — every subscription actually delivered
 # to a customer is posted here (product, login, date, customer).
 SUBSCRIPTIONS_CHANNEL_ID_RAW = os.environ.get("SUBSCRIPTIONS_CHANNEL_ID", "-1004471406420")
@@ -5811,6 +5816,166 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # ------------------------------------------------------------------
 
+async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receives the full order from the Mini App: items with account details
+    and the chosen payment method. Creates the order, stores all the
+    registration details in fulfilment rows, and routes to the right next
+    step — Stars/Credits go straight to fulfilment, manual payment methods
+    ask for one receipt photo."""
+    if not update.message or not update.message.web_app_data:
+        return
+    try:
+        data = json.loads(update.message.web_app_data.data)
+    except (json.JSONDecodeError, TypeError):
+        await update.message.reply_text("Something went wrong reading your order — please try again.")
+        return
+
+    action = data.get("action")
+    if action not in ("cart_checkout", "full_order"):
+        return
+
+    items_raw    = data.get("items", [])
+    pay_method   = data.get("payment_method", "")
+    total_sent   = float(data.get("total", 0))
+    user_id      = update.effective_user.id
+    username     = update.effective_user.username
+
+    if not items_raw:
+        await update.message.reply_text("Your cart was empty.")
+        return
+
+    # Build the items dict for the order, checking stock
+    order_items = {}
+    skipped     = []
+    for entry in items_raw:
+        item_id = entry.get("id")
+        if not item_id or item_id not in MENU:
+            skipped.append(entry.get("name") or item_id or "unknown")
+            continue
+        if db_is_out_of_stock(item_id):
+            skipped.append(MENU[item_id][0] + " (out of stock)")
+            continue
+        order_items[item_id] = order_items.get(item_id, 0) + 1
+
+    if not order_items:
+        await update.message.reply_text("None of your items are available right now.\n" + "\n".join(skipped))
+        return
+
+    total = sum(MENU[i][1] * q for i, q in order_items.items())
+    order_id = db_create_order(user_id, username, order_items, total)
+    db_set_payment_method(order_id, pay_method or "Mini App")
+
+    # Create a fulfilment row for each unit and pre-populate it with the
+    # registration details the customer already filled in the Mini App.
+    db_add_fulfilment_items(order_id, user_id, order_items)
+    fulfilment_rows = db_all_pending_items()
+    # Match detail entries to fulfilment rows in order
+    detail_map = {}  # item_id → list of detail dicts
+    for entry in items_raw:
+        iid = entry.get("id")
+        if iid and iid in order_items:
+            detail_map.setdefault(iid, []).append(entry)
+
+    for row in fulfilment_rows:
+        fid, oid, uid, iid, unit_no, state, info_json = row
+        if oid != order_id:
+            continue
+        details_list = detail_map.get(iid, [])
+        detail_entry = details_list[unit_no - 1] if unit_no - 1 < len(details_list) else {}
+        if detail_entry:
+            # Strip the routing keys, keep only the credential fields
+            info = {k: v for k, v in detail_entry.items() if k not in ("id", "account_type")}
+            info["account_type"] = detail_entry.get("account_type", "new")
+            db_set_fulfilment_info(fid, info)
+            db_set_fulfilment_state(fid, "awaiting_delivery")
+
+    # Summary line for the customer confirmation message
+    lines = [f"{q}× {MENU[i][0]}" for i, q in order_items.items()]
+    summary = "\n".join(lines)
+    if skipped:
+        summary += "\n\n⚠️ Skipped (out of stock):\n" + "\n".join(skipped)
+
+    # ── Route based on payment method ───────────────────
+    pay_lower = pay_method.lower()
+
+    if pay_lower == "credits":
+        required = math.ceil(total / 4)
+        if not db_deduct_credits(user_id, required):
+            await update.message.reply_text(
+                f"❌ Not enough credits. You need {required} credits (${total:.2f}) — "
+                "earn more via the 🎁 Get Free Accounts tab."
+            )
+            db_update_status(order_id, "cancelled")
+            return
+        db_update_status(order_id, "paid")
+        db_set_payment_method(order_id, "Credits — Mini App")
+        await update.message.reply_text(
+            f"✅ Paid with credits!\n\n{summary}\n\nTotal: {CURRENCY}{total:.2f}\n\n"
+            "We're preparing your subscription(s) now."
+        )
+        await start_order_fulfilment(context, order_id, user_id, order_items)
+        await award_referral_credit(context, user_id)
+        await post_receipt_to_payments_channel(context, order_id)
+        return
+
+    if pay_lower == "stars":
+        # Create a Stars invoice — the customer pays in Telegram, the
+        # successful_payment_callback handles fulfilment.
+        db_update_status(order_id, "awaiting_payment")
+        amount_stars = max(1, round(total))
+        try:
+            await update.message.reply_invoice(
+                title      = "Medic SalesBot Order",
+                description= summary[:255],
+                payload    = f"order_{order_id}",
+                currency   = "XTR",
+                prices     = [{"label": "Total", "amount": amount_stars}],
+            )
+        except Exception:
+            logger.exception("Failed to send Stars invoice for order #%s", order_id)
+            await update.message.reply_text(
+                f"Order #{order_id} created. Total: {CURRENCY}{total:.2f}\n\n"
+                "Stars invoice failed — please use another payment method or contact support."
+            )
+        return
+
+    # Manual payment methods (local, card, crypto) — confirm the order and
+    # ask for a receipt photo. Everything else is already stored.
+    db_update_status(order_id, "awaiting_receipt")
+    context.user_data["awaiting_receipt_for_order"] = order_id
+
+    await update.message.reply_text(
+        f"✅ Order #{order_id} confirmed!\n\n{summary}\n\nTotal: {CURRENCY}{total:.2f}\n"
+        f"Payment: {pay_method}\n\n"
+        "Please upload a screenshot of your payment receipt:"
+    )
+
+    # Notify admin
+    if ADMIN_CHAT_ID:
+        item_names = ", ".join(MENU[i][0] for i in order_items)
+        who = f"@{username}" if username else str(user_id)
+        detail_lines = []
+        for entry in items_raw:
+            iid = entry.get("id", "")
+            atype = entry.get("account_type", "new")
+            creds = {k: v for k, v in entry.items() if k not in ("id","account_type")}
+            cred_str = " | ".join(f"{k}: {v}" for k, v in creds.items())
+            detail_lines.append(f"  [{atype.upper()}] {MENU.get(iid,(iid,))[0]}: {cred_str}")
+        details_block = "\n".join(detail_lines)
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    f"📱 Mini App Order #{order_id} — {who}\n"
+                    f"Payment: {pay_method}\nTotal: {CURRENCY}{total:.2f}\n\n"
+                    f"{details_block}\n\n"
+                    "Awaiting receipt from customer."
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to notify admin of Mini App order #%s", order_id)
+
+
 async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only: sends the raw SQLite database file as a Telegram document.
     Use this BEFORE a redeploy when no Railway Volume is mounted, to ensure
@@ -5850,6 +6015,22 @@ def main():
     for item_id, name, price in db_load_book_menu_items():
         MENU[item_id] = (name, price)
 
+    async def post_init(application):
+        """Called once after the bot connects — sets the menu button to open
+        the Mini App if MINI_APP_URL is configured."""
+        if MINI_APP_URL:
+            try:
+                from telegram import MenuButtonWebApp, WebAppInfo
+                await application.bot.set_chat_menu_button(
+                    menu_button=MenuButtonWebApp(
+                        text="🏪 Shop",
+                        web_app=WebAppInfo(url=MINI_APP_URL),
+                    )
+                )
+                logger.info("Mini App menu button set to %s", MINI_APP_URL)
+            except Exception:
+                logger.exception("Failed to set Mini App menu button")
+
     if BOT_TOKEN == "PUT_YOUR_BOT_TOKEN_HERE":
         raise SystemExit("Set BOT_TOKEN (env var) before running.")
 
@@ -5861,11 +6042,12 @@ def main():
         store_data=PersistenceInput(bot_data=True, chat_data=True, user_data=True, callback_data=False),
     )
 
-    app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
+    app = Application.builder().token(BOT_TOKEN).persistence(persistence).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myorders", my_orders))
     app.add_handler(CommandHandler("backupdb", backup_db))
+    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler))
     app.add_handler(CommandHandler("customers", customer_history))
     app.add_handler(CommandHandler("customer", customer_lookup))
     app.add_handler(CommandHandler("order", order_lookup))

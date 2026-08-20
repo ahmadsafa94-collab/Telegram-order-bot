@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Medic SalesBot</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+/* ── Design tokens ─────────────────────────────────────── */
+:root {
+  --bg:     var(--tg-theme-bg-color, #0f1117);
+  --bg2:    var(--tg-theme-secondary-bg-color, #1a1d27);
+  --text:   var(--tg-theme-text-color, #e8eaf0);
+  --hint:   var(--tg-theme-hint-color, #6b7280);
+  --accent: var(--tg-theme-button-color, #3b82f6);
+  --atxt:   var(--tg-theme-button-text-color, #fff);
+  --teal:   #0d9488;
+  --teal2:  #14b8a6;
+  --red:    #ef4444;
+  --green:  #22c55e;
+  --r:      14px;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding-bottom:90px}
+
+/* ── Step header ───────────────────────────────────────── */
+.wizard-header{background:var(--bg2);border-bottom:1px solid rgba(255,255,255,.07);position:sticky;top:0;z-index:100}
+.wizard-top{display:flex;align-items:center;gap:10px;padding:14px 16px 10px}
+.logo{width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,var(--teal),#0284c7);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
+.wizard-top h1{font-size:16px;font-weight:700}
+.wizard-top p{font-size:11px;color:var(--hint)}
+.cart-pill{margin-left:auto;background:var(--accent);color:var(--atxt);border:none;border-radius:99px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;display:none;flex-shrink:0}
+.cart-pill.vis{display:block}
+
+.steps{display:flex;gap:0;padding:10px 16px 10px}
+.step{flex:1;text-align:center;position:relative}
+.step::after{content:'';position:absolute;top:12px;left:50%;right:-50%;height:2px;background:rgba(255,255,255,.1);z-index:0}
+.step:last-child::after{display:none}
+.step-dot{width:24px;height:24px;border-radius:50%;border:2px solid rgba(255,255,255,.15);background:var(--bg);display:flex;align-items:center;justify-content:center;margin:0 auto 4px;font-size:11px;font-weight:700;color:var(--hint);position:relative;z-index:1;transition:all .2s}
+.step.done .step-dot{background:var(--teal);border-color:var(--teal);color:#fff}
+.step.active .step-dot{background:var(--accent);border-color:var(--accent);color:#fff}
+.step-label{font-size:10px;color:var(--hint);transition:color .2s}
+.step.active .step-label{color:var(--text)}
+
+/* ── Shared layout ─────────────────────────────────────── */
+.page{display:none;padding:16px}
+.page.active{display:block}
+
+.sect-label{font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--hint);margin:16px 0 8px}
+.sect-label:first-child{margin-top:0}
+
+.card{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);margin-bottom:10px;overflow:hidden}
+
+/* ── Catalog tabs ──────────────────────────────────────── */
+.tabs{display:flex;gap:8px;padding:12px 0 4px;overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{flex-shrink:0;padding:7px 13px;border-radius:99px;border:1.5px solid rgba(255,255,255,.12);font-size:12px;font-weight:500;color:var(--hint);cursor:pointer;background:transparent;transition:all .15s}
+.tab.active{border-color:var(--teal);background:rgba(13,148,136,.15);color:var(--teal2)}
+
+/* ── Item rows ─────────────────────────────────────────── */
+.item-row{display:flex;align-items:center;gap:10px;padding:11px 13px;border-bottom:1px solid rgba(255,255,255,.05)}
+.item-row:last-child{border-bottom:none}
+.item-info{flex:1;min-width:0}
+.item-name{font-size:13px;font-weight:500;line-height:1.3}
+.item-sub{font-size:11px;color:var(--hint);margin-top:1px}
+.item-price{font-size:14px;font-weight:700;color:var(--teal2);flex-shrink:0}
+.add-btn{width:28px;height:28px;border-radius:50%;border:none;background:var(--accent);color:var(--atxt);font-size:17px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;margin-left:8px;transition:transform .12s}
+.add-btn:active{transform:scale(.88)}
+.add-btn.in{background:var(--teal)}
+
+/* standalone card */
+.item-solo{display:flex;align-items:center;gap:10px;padding:11px 13px;background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);margin-bottom:7px}
+
+/* ── Detail forms ──────────────────────────────────────── */
+.detail-block{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);margin-bottom:12px;overflow:hidden}
+.detail-block-header{padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:8px}
+.detail-block-header .item-name{font-size:14px;font-weight:600}
+.detail-block-header .price-tag{margin-left:auto;color:var(--teal2);font-size:13px;font-weight:700}
+
+.type-toggle{display:flex;gap:0;margin:12px 14px 4px;border-radius:var(--r);overflow:hidden;border:1.5px solid rgba(255,255,255,.12)}
+.type-btn{flex:1;border:none;background:transparent;color:var(--hint);padding:9px;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s}
+.type-btn.active{background:var(--accent);color:var(--atxt)}
+
+.fields{padding:0 14px 14px}
+.field{margin-top:12px}
+.field label{font-size:11px;font-weight:600;color:var(--hint);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:5px}
+.field input{width:100%;background:rgba(255,255,255,.06);border:1.5px solid rgba(255,255,255,.1);border-radius:10px;padding:10px 12px;color:var(--text);font-size:14px;outline:none;transition:border-color .15s}
+.field input:focus{border-color:var(--accent)}
+.field input.err{border-color:var(--red)}
+.field-hint{font-size:11px;color:var(--hint);margin-top:4px}
+.field-err{font-size:11px;color:var(--red);margin-top:4px;display:none}
+.field input.err + .field-hint{display:none}
+.field input.err ~ .field-err{display:block}
+
+/* ── Payment ───────────────────────────────────────────── */
+.pay-methods{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.pay-card{background:var(--bg2);border:2px solid rgba(255,255,255,.08);border-radius:var(--r);padding:14px 10px;text-align:center;cursor:pointer;transition:all .15s}
+.pay-card.selected{border-color:var(--accent);background:rgba(var(--accent-rgb,59,130,246),.08)}
+.pay-card .icon{font-size:24px;margin-bottom:6px}
+.pay-card .label{font-size:12px;font-weight:600}
+.pay-card .sub{font-size:10px;color:var(--hint);margin-top:2px}
+
+.pay-detail{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);padding:14px;margin-bottom:12px;line-height:1.7;font-size:13px;display:none}
+.pay-detail.visible{display:block}
+.pay-detail strong{color:var(--teal2)}
+.mono{font-family:'SF Mono',Consolas,monospace;background:rgba(255,255,255,.08);padding:3px 7px;border-radius:6px;user-select:all;cursor:pointer;transition:background .15s}
+.mono:active{background:rgba(13,148,136,.3)}
+.country-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.country-btn{background:var(--bg2);border:2px solid rgba(255,255,255,.08);border-radius:12px;padding:10px;text-align:center;cursor:pointer;font-size:13px;transition:all .15s}
+.country-btn.selected{border-color:var(--accent)}
+
+/* ── Order summary ─────────────────────────────────────── */
+.summary-row{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,.05);font-size:13px}
+.summary-row:last-child{border-bottom:none;font-weight:700;font-size:14px}
+.summary-row .right{color:var(--teal2)}
+
+/* ── Buttons ───────────────────────────────────────────── */
+.btn-primary{width:100%;background:var(--accent);color:var(--atxt);border:none;border-radius:var(--r);padding:15px;font-size:15px;font-weight:700;cursor:pointer;transition:opacity .15s;margin-top:8px}
+.btn-primary:active{opacity:.85}
+.btn-secondary{width:100%;background:transparent;color:var(--hint);border:1.5px solid rgba(255,255,255,.12);border-radius:var(--r);padding:12px;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px}
+
+/* ── Toast ─────────────────────────────────────────────── */
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(70px);background:rgba(13,148,136,.92);color:#fff;padding:9px 16px;border-radius:99px;font-size:12px;font-weight:600;white-space:nowrap;transition:transform .25s cubic-bezier(.34,1.56,.64,1);z-index:999;pointer-events:none}
+.toast.show{transform:translateX(-50%) translateY(0)}
+
+/* ── Done screen ───────────────────────────────────────── */
+.done-screen{text-align:center;padding:40px 24px}
+.done-icon{font-size:56px;margin-bottom:16px}
+.done-screen h2{font-size:20px;font-weight:700;margin-bottom:8px}
+.done-screen p{font-size:14px;color:var(--hint);line-height:1.6}
+</style>
+</head>
+<body>
+
+<!-- Wizard header -->
+<div class="wizard-header">
+  <div class="wizard-top">
+    <div class="logo">🏥</div>
+    <div><p style="font-size:10px;color:var(--hint)">MEDIC SALESBOT</p><h1 id="pageTitle">Browse Subscriptions</h1></div>
+    <button class="cart-pill" id="cartPill" onclick="goToDetails()">🧺 <span id="cartCount">0</span> · Next →</button>
+  </div>
+  <div class="steps">
+    <div class="step active" id="s1"><div class="step-dot">1</div><div class="step-label">Catalog</div></div>
+    <div class="step" id="s2"><div class="step-dot">2</div><div class="step-label">Details</div></div>
+    <div class="step" id="s3"><div class="step-dot">3</div><div class="step-label">Payment</div></div>
+  </div>
+</div>
+
+<!-- Page 1: Catalog -->
+<div class="page active" id="p1">
+  <div class="tabs" id="tabs"></div>
+  <div id="catSections"></div>
+</div>
+
+<!-- Page 2: Item details -->
+<div class="page" id="p2">
+  <div class="sect-label">Order Details</div>
+  <div id="detailForms"></div>
+  <button class="btn-primary" onclick="goToPayment()">Continue to Payment →</button>
+  <button class="btn-secondary" onclick="goToCatalog()">← Back to Catalog</button>
+</div>
+
+<!-- Page 3: Payment -->
+<div class="page" id="p3">
+  <div class="sect-label">Choose Payment Method</div>
+  <div class="pay-methods" id="payMethods"></div>
+  <div id="payDetail"></div>
+  <div class="card" id="orderSummary" style="margin-bottom:12px"></div>
+  <button class="btn-primary" id="submitBtn" onclick="submitOrder()" style="display:none">
+    Place Order
+  </button>
+  <button class="btn-secondary" onclick="goToDetails()">← Back</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const tg = window.Telegram.WebApp;
+tg.ready(); tg.expand();
+tg.setHeaderColor('secondary_bg_color');
+
+// ── Catalog data ────────────────────────────────────────
+const IMD_IDS = new Set(['imd_new_6m','imd_new_1y','imd_renew_6m','imd_renew_1y']);
+
+const CATALOG = [
+  { id:'uptodate', name:'Uptodate', emoji:'📖', groups:[
+    { label:'Online Access', items:[
+      {id:'up_online_app', name:'Mobile App', sub:'Online · 1 Year', price:20},
+      {id:'up_online_web', name:'Mobile App + Browser', sub:'Online · 1 Year', price:35},
+    ]},
+    { label:'Online + Offline', items:[
+      {id:'up_offline_app', name:'Mobile App', sub:'Offline Access · 1 Year', price:30},
+      {id:'up_offline_web', name:'Mobile App + Browser', sub:'Offline Access · 1 Year', price:45},
+    ]},
+    { label:'Online + Pathways', items:[
+      {id:'up_pathways_app', name:'Mobile App', sub:'Pathways · 1 Year', price:30},
+      {id:'up_pathways_web', name:'Mobile App + Browser', sub:'Pathways · 1 Year', price:45},
+    ]},
+  ]},
+  { id:'amboss', name:'Amboss', emoji:'🧠', groups:[
+    { label:'Premium + Library', items:[
+      {id:'amboss_premium_1y', name:'1 Year', sub:'Unlimited Qbanks + Library', price:85},
+      {id:'amboss_premium_promo', name:'Until 18/9/2026', sub:'Premium + Library · Limited offer', price:35},
+    ]},
+    { label:'Library Only', items:[
+      {id:'amboss_library', name:'1 Year', sub:'Limited Qbanks · Library access', price:65},
+    ]},
+  ]},
+  { id:'imd', name:'iMD VIP', emoji:'🎓', groups:[
+    { label:'New Account', items:[
+      {id:'imd_new_6m', name:'6 Months', sub:'New registration', price:50},
+      {id:'imd_new_1y', name:'1 Year', sub:'New registration', price:75},
+    ]},
+    { label:'Renewal', items:[
+      {id:'imd_renew_6m', name:'6 Months', sub:'Existing account', price:50},
+      {id:'imd_renew_1y', name:'1 Year', sub:'Existing account', price:75},
+    ]},
+  ]},
+  { id:'other', name:'More', emoji:'📚', single:[
+    {id:'dynamed',          emoji:'💊', name:'Dynamed',           price:20},
+    {id:'dynamedex',        emoji:'💊', name:'DynamedEx',         price:30},
+    {id:'bmj_best_practice',emoji:'📋', name:'BMJ Best Practice', price:20},
+    {id:'bmj_learning',     emoji:'🎓', name:'BMJ Learning',      price:30},
+    {id:'visualdx',         emoji:'🔬', name:'VisualDx',          price:20},
+    {id:'lexicomp',         emoji:'💉', name:'Lexicomp Mobile',   price:20},
+    {id:'accessmedicine',   emoji:'🏥', name:'AccessMedicine',    price:20},
+    {id:'boardvitals',      emoji:'📝', name:'Boardvitals VIP',   price:55},
+    {id:'clinicalkey',      emoji:'🔑', name:'ClinicalKey',       price:35},
+    {id:'sciencedirect',    emoji:'🔭', name:'ScienceDirect',     price:35},
+    {id:'statdx',           emoji:'📊', name:'StatDx',            price:35},
+    {id:'nejm',             emoji:'📰', name:'NEJM',              price:20},
+    {id:'jama_evidence',    emoji:'📰', name:'JAMA Evidence',     price:20},
+    {id:'scopus',           emoji:'🌐', name:'Scopus',            price:35},
+    {id:'springerlink',     emoji:'📗', name:'SpringerLink',      price:35},
+  ]},
+];
+
+// ── Currency rates ──────────────────────────────────────
+const RATES = {
+  Lebanon: ['USD',1], Jordan:['JOD',0.716], India:['INR',94.5],
+  Ghana:['GHS',11.8], Pakistan:['PKR',280], Europe:['USD',1],
+  USA:['USD',1], KSA:['SAR',3.8], Russia:['RUB',85.5],
+};
+const FLAGS = {
+  Lebanon:'🇱🇧', Jordan:'🇯🇴', India:'🇮🇳', Ghana:'🇬🇭',
+  Pakistan:'🇵🇰', Europe:'🇪🇺', USA:'🇺🇸', KSA:'🇸🇦', Russia:'🇷🇺',
+};
+
+// ── Payment instructions ────────────────────────────────
+const PAY_INSTRUCTIONS = {
+  Lebanon: t=>`WhishMoney: <span class="mono">81666579</span><br>Send <strong>$${t.toFixed(2)} USD</strong>`,
+  Jordan: t=>{
+    const a = (t*0.716).toFixed(3);
+    return `Send <strong>${a} JOD</strong><br>CLIQ ALIAS: <span class="mono">WKS777</span> (Orange Money) — Waleed Shaqfeh<br>CLIQ ALIAS: <span class="mono">WKS999</span> (Etihad Bank) — Waleed Shaqfeh<br>CLIQ ALIAS: <span class="mono">WKS555</span> (Zain Cash) — Mohammad Shamalti`;
+  },
+  India: t=>{
+    const a = (t*94.5).toLocaleString('en-IN',{maximumFractionDigits:0});
+    return `UPI ID: <span class="mono">s4005194160889795@slc</span><br>Name: Shilpaben karetiya<br>Amount: <strong>₹${a}</strong><br><br>⚠️ Leave comments/remarks <strong>empty</strong>. If one payment fails, split into parts.`;
+  },
+  Ghana: t=>{
+    const a = (t*11.8).toFixed(2);
+    return `Amount: <strong>${a} GHS</strong><br>📲 <span class="mono">0257505632</span> — MTN Mobile Money — Saibu Mahamadu<br>📲 <span class="mono">0204860754</span> — Telecel/Vodafone — Saibu Mahamadu<br>Do not call the number.`;
+  },
+  Pakistan: t=>{
+    const a = Math.round(t*280).toLocaleString();
+    return `Amount: <strong>${a} PKR</strong><br>Bank: HBL · Name: Muhammad Bilal<br>Account: <span class="mono">03577900871203</span><br>IBAN: <span class="mono">PK08HABB0003577900871203</span><br>Branch: TOTALAI`;
+  },
+  Europe: t=>`Card (Revolut): <span class="mono">5413525250267271</span><br>Name: Alijon Karimov · Country: Tajikistan<br>Amount: <strong>$${t.toFixed(2)} USD</strong>`,
+  KSA: t=>{
+    const a = (t*3.8).toFixed(2);
+    return `Amount: <strong>${a} SAR</strong><br>IBAN: <span class="mono">SA8710000006857309000101</span><br>IBAN: <span class="mono">SA0510000062300187719603</span><br>Bank: Ahli Bank · Name: Jamil Hajji<br><strong>Purpose: Friends & family / Personal</strong>`;
+  },
+  Russia: t=>{
+    const a = Math.round(t*85.5).toLocaleString();
+    return `Amount: <strong>${a} RUB</strong><br>Sberbank → International → Phone: <span class="mono">+992002373232</span><br>Country: Tajikistan · Name: Alijon Karimov · Bank: Alif Bank`;
+  },
+};
+
+const USA_APPS = {
+  'TapTap Send': `Open TapTap Send → Country: Lebanon → Whish Money Wallet<br>Phone: <span class="mono">0096181666579</span><br>Name: Ahmad Safa · Year: 1994`,
+  'Ria': `App/website → Lebanon → Choose "Purpl"<br>Mobile: <span class="mono">0096181666579</span><br>Ahmad Safa · Educational/Personal · DOB 17/09/1994`,
+  'Paysend': `App/website → Lebanon → Choose "Purpl"<br>Mobile: <span class="mono">0096181666579</span><br>Ahmad Safa · Educational/Personal · DOB 17/09/1994`,
+  'Remitly': `App/website → Lebanon → Choose "Purpl"<br>Mobile: <span class="mono">0096181666579</span><br>Ahmad Safa · Educational/Personal · DOB 17/09/1994`,
+  'Revolut': `Card transfer → Card: <span class="mono">5413525250267271</span><br>Name: Alijon Karimov · Country: Tajikistan`,
+};
+
+// ── Cart ────────────────────────────────────────────────
+let cart = {};    // id → {name, price, qty}
+let selPayMethod = null;
+let selCountry   = null;
+let selUsaApp    = null;
+
+function allItems(){
+  const all=[];
+  CATALOG.forEach(c=>{
+    if(c.groups) c.groups.forEach(g=>g.items.forEach(i=>all.push(i)));
+    if(c.single) c.single.forEach(i=>all.push({...i,sub:'1 Year'}));
+  });
+  return all;
+}
+const ITEM_MAP = {};
+allItems().forEach(i=>ITEM_MAP[i.id]=i);
+
+function cartTotal(){ return Object.values(cart).reduce((s,i)=>s+i.price*i.qty,0); }
+function cartSize(){  return Object.values(cart).reduce((s,i)=>s+i.qty,0); }
+
+function addItem(id){
+  const itm = ITEM_MAP[id];
+  if(!itm) return;
+  cart[id] = cart[id] ? {...cart[id], qty: cart[id].qty+1} : {name:itm.name||itm.id, price:itm.price, qty:1};
+  const btn = document.getElementById('ab-'+id);
+  if(btn){ btn.textContent='✓'; btn.classList.add('in'); }
+  updateCartUI();
+  showToast('Added · $'+itm.price);
+}
+
+function updateCartUI(){
+  const n=cartSize();
+  const pill=document.getElementById('cartPill');
+  document.getElementById('cartCount').textContent=n;
+  pill.classList.toggle('vis',n>0);
+}
+
+// ── Page navigation ─────────────────────────────────────
+function goToCatalog(){
+  showPage('p1'); setStep(1);
+  document.getElementById('pageTitle').textContent='Browse Subscriptions';
+  tg.MainButton.hide();
+}
+
+function goToDetails(){
+  if(cartSize()===0){ showToast('Add at least one item'); return; }
+  buildDetailForms();
+  showPage('p2'); setStep(2);
+  document.getElementById('pageTitle').textContent='Account Details';
+  tg.MainButton.hide();
+  window.scrollTo(0,0);
+}
+
+function goToPayment(){
+  if(!validateDetails()) return;
+  buildPaymentPage();
+  showPage('p3'); setStep(3);
+  document.getElementById('pageTitle').textContent='Payment';
+  window.scrollTo(0,0);
+}
+
+function showPage(id){
+  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===id));
+}
+function setStep(n){
+  [1,2,3].forEach(i=>{
+    const el=document.getElementById('s'+i);
+    el.classList.toggle('done',i<n);
+    el.classList.toggle('active',i===n);
+    el.querySelector('.step-dot').textContent = i<n ? '✓' : i;
+  });
+}
+
+// ── Catalog render ──────────────────────────────────────
+function buildCatalog(){
+  const tabsEl=document.getElementById('tabs');
+  const secEl=document.getElementById('catSections');
+
+  CATALOG.forEach((cat,ci)=>{
+    const tab=document.createElement('button');
+    tab.className='tab'+(ci===0?' active':'');
+    tab.textContent=cat.emoji+' '+cat.name;
+    tab.onclick=()=>switchCat(cat.id);
+    tabsEl.appendChild(tab);
+
+    const sec=document.createElement('div');
+    sec.id='cat-'+cat.id;
+    sec.style.display=ci===0?'block':'none';
+
+    if(cat.groups){
+      cat.groups.forEach(g=>{
+        const lbl=document.createElement('div');
+        lbl.className='sect-label';
+        lbl.textContent=g.label;
+        sec.appendChild(lbl);
+        const card=document.createElement('div');
+        card.className='card';
+        g.items.forEach(itm=>{
+          card.appendChild(makeItemRow(itm,false));
+        });
+        sec.appendChild(card);
+      });
+    }
+    if(cat.single){
+      const lbl=document.createElement('div');
+      lbl.className='sect-label';
+      lbl.textContent='Single Subscriptions · 1 Year';
+      sec.appendChild(lbl);
+      cat.single.forEach(itm=>{
+        const row=makeItemRow({...itm,sub:'1 Year'},true);
+        sec.appendChild(row);
+      });
+    }
+    secEl.appendChild(sec);
+  });
+}
+
+function makeItemRow(itm,solo){
+  const d=document.createElement('div');
+  d.className=solo?'item-solo':'item-row';
+  d.innerHTML=`
+    ${solo?`<div style="font-size:22px">${itm.emoji||'📦'}</div>`:''}
+    <div class="item-info">
+      <div class="item-name">${itm.name}</div>
+      <div class="item-sub">${itm.sub||''}</div>
+    </div>
+    <div class="item-price">$${itm.price}</div>
+    <button class="add-btn" id="ab-${itm.id}" onclick="addItem('${itm.id}')">+</button>
+  `;
+  return d;
+}
+
+function switchCat(id){
+  document.querySelectorAll('.tabs .tab').forEach((t,i)=>t.classList.toggle('active',CATALOG[i].id===id));
+  CATALOG.forEach(c=>{ const el=document.getElementById('cat-'+c.id); if(el) el.style.display=c.id===id?'block':'none'; });
+  window.scrollTo(0,0);
+}
+
+// ── Detail forms ────────────────────────────────────────
+function buildDetailForms(){
+  const el=document.getElementById('detailForms');
+  el.innerHTML='';
+  Object.entries(cart).forEach(([id,{name,price,qty}])=>{
+    for(let q=0;q<qty;q++){
+      el.appendChild(makeDetailBlock(id,name,price,q));
+    }
+  });
+}
+
+function makeDetailBlock(id,name,price,idx){
+  const wrap=document.createElement('div');
+  wrap.className='detail-block';
+  wrap.dataset.id=id; wrap.dataset.idx=idx;
+
+  const isImdNew    = id.startsWith('imd_new');
+  const isImdRenew  = id.startsWith('imd_renew');
+  const isImd       = isImdNew || isImdRenew;
+  const qtyLabel    = idx>0 ? ` #${idx+1}`:'';
+
+  let header=`<div class="detail-block-header"><div class="item-info"><div class="item-name">${name}${qtyLabel}</div></div><div class="price-tag">$${price}</div></div>`;
+  let body='';
+
+  if(isImdNew){
+    body=`<div class="fields">
+      ${field(id,idx,'email','Email Address','email','Email — never used for iMD before')}
+      ${field(id,idx,'username','Username','text','At least 6 characters, never used before')}
+      ${field(id,idx,'password','Password','password','8+ chars, 1 number, 1 capital, one of: - _ . # @')}
+    </div>`;
+  } else if(isImdRenew){
+    body=`<div class="fields">
+      ${field(id,idx,'prev_username','Your existing iMD username','text','')}
+    </div>`;
+  } else {
+    // Generic — show New/Renewal toggle first
+    body=`
+      <div class="type-toggle">
+        <button class="type-btn active" onclick="setType(this,'new','${id}',${idx})">🆕 New Account</button>
+        <button class="type-btn" onclick="setType(this,'renew','${id}',${idx})">🔄 Renewal</button>
+      </div>
+      <div class="fields" id="fields-${id}-${idx}">
+        ${field(id,idx,'first_name','First Name','text','')}
+        ${field(id,idx,'last_name','Last Name','text','')}
+        ${field(id,idx,'email','Email Address','email','Never used for this subscription before')}
+        ${field(id,idx,'username','Desired Username','text','At least 6 characters, never used before')}
+        ${field(id,idx,'password','Desired Password','password','8+ chars, 1 number, 1 capital, one of: - _ . # @')}
+      </div>`;
+  }
+
+  wrap.innerHTML=header+body;
+  return wrap;
+}
+
+function field(id,idx,name,label,type,hint){
+  const fid=`f-${id}-${idx}-${name}`;
+  return `<div class="field">
+    <label for="${fid}">${label}</label>
+    <input id="${fid}" name="${name}" type="${type}" autocomplete="off" spellcheck="false">
+    ${hint?`<div class="field-hint">${hint}</div>`:''}
+    <div class="field-err" id="err-${fid}"></div>
+  </div>`;
+}
+
+function setType(btn,type,id,idx){
+  btn.parentElement.querySelectorAll('.type-btn').forEach(b=>b.classList.toggle('active',b===btn));
+  const fieldsEl=document.getElementById(`fields-${id}-${idx}`);
+  const block=btn.closest('.detail-block');
+  block.dataset.type=type;
+  if(type==='new'){
+    fieldsEl.innerHTML=
+      field(id,idx,'first_name','First Name','text','')+
+      field(id,idx,'last_name','Last Name','text','')+
+      field(id,idx,'email','Email Address','email','Never used for this subscription before')+
+      field(id,idx,'username','Desired Username','text','At least 6 characters, never used before')+
+      field(id,idx,'password','Desired Password','password','8+ chars, 1 number, 1 capital, one of: - _ . # @');
+  } else {
+    fieldsEl.innerHTML=
+      field(id,idx,'login_username','Username or Email (existing login)','text','')+
+      field(id,idx,'login_password','Password (existing login)','password','');
+  }
+}
+
+// ── Validation ──────────────────────────────────────────
+function validateDetails(){
+  let ok=true;
+  document.querySelectorAll('.detail-block').forEach(block=>{
+    const id=block.dataset.id;
+    const idx=parseInt(block.dataset.idx||0);
+    const isImd = IMD_IDS.has(id);
+    const type  = block.dataset.type || (id.startsWith('imd_new')?'new':id.startsWith('imd_renew')?'renew':'new');
+
+    block.querySelectorAll('input').forEach(inp=>{
+      const n=inp.name, v=inp.value.trim();
+      const errEl=document.getElementById('err-'+inp.id);
+      inp.classList.remove('err');
+      if(errEl) errEl.textContent='';
+
+      if(!v){
+        setErr(inp,'Required'); ok=false; return;
+      }
+      if(n==='email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)){
+        setErr(inp,'Enter a valid email'); ok=false; return;
+      }
+      if(n==='username' && v.length<6){
+        setErr(inp,'At least 6 characters'); ok=false; return;
+      }
+      if((n==='password'||n==='login_password') && type==='new'){
+        if(v.length<8){ setErr(inp,'At least 8 characters'); ok=false; return; }
+        if(!/[A-Z]/.test(v)){ setErr(inp,'Need at least one capital letter'); ok=false; return; }
+        if(!/[0-9]/.test(v)){ setErr(inp,'Need at least one number'); ok=false; return; }
+        if(!/[-_.#@]/.test(v)){ setErr(inp,'Need at least one symbol: - _ . # @'); ok=false; return; }
+      }
+    });
+  });
+  if(!ok) showToast('Please fix the highlighted fields');
+  return ok;
+}
+
+function setErr(inp,msg){
+  inp.classList.add('err');
+  const el=document.getElementById('err-'+inp.id);
+  if(el){ el.textContent=msg; }
+}
+
+// ── Payment page ────────────────────────────────────────
+function buildPaymentPage(){
+  const total=cartTotal();
+  const methods=[
+    {id:'stars',  icon:'⭐', label:'Telegram Stars', sub:'Pay with Stars'},
+    {id:'credits',icon:'🎁', label:'My Credits',     sub:'Use earned credits'},
+    {id:'card',   icon:'💳', label:'Visa / Mastercard', sub:'Pay online'},
+    {id:'local',  icon:'🌍', label:'Local Transfer', sub:'9 countries'},
+    {id:'crypto', icon:'₿',  label:'Cryptocurrency', sub:'USDT, BTC, more'},
+  ];
+  const el=document.getElementById('payMethods');
+  el.innerHTML='';
+  methods.forEach(m=>{
+    const c=document.createElement('div');
+    c.className='pay-card'; c.dataset.id=m.id;
+    c.innerHTML=`<div class="icon">${m.icon}</div><div class="label">${m.label}</div><div class="sub">${m.sub}</div>`;
+    c.onclick=()=>selectPayMethod(m.id, total);
+    el.appendChild(c);
+  });
+
+  // Order summary
+  const sumEl=document.getElementById('orderSummary');
+  let rows=Object.entries(cart).map(([id,{name,price,qty}])=>
+    `<div class="summary-row"><div>${name}${qty>1?' ×'+qty:''}</div><div class="right">$${(price*qty).toFixed(2)}</div></div>`
+  ).join('');
+  rows+=`<div class="summary-row"><div>Total</div><div class="right">$${total.toFixed(2)}</div></div>`;
+  sumEl.innerHTML=rows;
+
+  selPayMethod=null; selCountry=null; selUsaApp=null;
+  document.getElementById('payDetail').innerHTML='';
+  document.getElementById('submitBtn').style.display='none';
+}
+
+function selectPayMethod(id, total){
+  selPayMethod=id; selCountry=null; selUsaApp=null;
+  document.querySelectorAll('.pay-card').forEach(c=>c.classList.toggle('selected',c.dataset.id===id));
+  const detEl=document.getElementById('payDetail');
+  const submitBtn=document.getElementById('submitBtn');
+
+  if(id==='stars'){
+    detEl.innerHTML=`<div class="pay-detail visible">⭐ You'll be charged via Telegram Stars after placing the order. The payment will be processed directly and your subscription set up immediately.</div>`;
+    submitBtn.textContent='Place Order & Pay with Stars ⭐';
+    submitBtn.style.display='block';
+  } else if(id==='credits'){
+    detEl.innerHTML=`<div class="pay-detail visible">🎁 Your earned referral credits will be used to pay. If you don't have enough, we'll let you know.<br><br>Credits needed: ${Math.ceil(total/4)} credit${Math.ceil(total/4)!==1?'s':''} ($4 each)</div>`;
+    submitBtn.textContent='Pay with Credits 🎁';
+    submitBtn.style.display='block';
+  } else if(id==='card'){
+    detEl.innerHTML=`<div class="pay-detail visible"><strong>How to pay:</strong><br>
+      1. Tap "Open Payment Link" below<br>
+      2. Choose "Pay online with your card"<br>
+      3. From whom: your name · Amount: <strong>$${total.toFixed(2)}</strong> · Message: leave empty<br>
+      4. Enter your card details and complete<br><br>
+      <a href="https://payments.suyool.com/pay/g401_MD" target="_blank" style="color:var(--teal2)">→ Open Payment Link</a>
+    </div>`;
+    submitBtn.textContent="I've Paid ✅";
+    submitBtn.style.display='block';
+  } else if(id==='local'){
+    const countries=Object.keys(RATES);
+    detEl.innerHTML=`<div class="sect-label" style="margin-top:0">Select your country</div>
+      <div class="country-grid">${countries.map(c=>`<div class="country-btn" data-c="${c}" onclick="selectCountry('${c}',${total})">${FLAGS[c]||''} ${c}</div>`).join('')}</div>
+      <div id="localDetail"></div>`;
+    submitBtn.style.display='none';
+  } else if(id==='crypto'){
+    detEl.innerHTML=`<div class="pay-detail visible"><strong>Crypto wallets:</strong><br><br>
+      USDT BEP20: <span class="mono">0x4ccff0e89e4ee00e96ae6e15e3b5e12fa0c66b20</span><br><br>
+      USDT TRC20: <span class="mono">TBdXHpNMWsGDUTeTCBQkbJzamxvgW2hHyj</span><br><br>
+      BTC: <span class="mono">bc1q2ccf4yzptwtdmnfdwuphvefmksy4ry2lylfhrj</span><br><br>
+      Bybit / OKX / BingX UID: <span class="mono">306834837</span><br><br>
+      <strong>Amount: $${total.toFixed(2)}</strong><br>
+      Click *I've Paid* after completing the transfer.
+    </div>`;
+    submitBtn.textContent="I've Paid ✅";
+    submitBtn.style.display='block';
+  }
+}
+
+function selectCountry(country, total){
+  selCountry=country; selUsaApp=null;
+  document.querySelectorAll('.country-btn').forEach(b=>b.classList.toggle('selected',b.dataset.c===country));
+  const detEl=document.getElementById('localDetail');
+
+  if(country==='USA'){
+    const apps=Object.keys(USA_APPS);
+    detEl.innerHTML=`<div class="sect-label">Choose app</div>
+      <div class="country-grid">${apps.map(a=>`<div class="country-btn" data-a="${a}" onclick="selectUsaApp('${a}')">${a}</div>`).join('')}</div>
+      <div id="usaAppDetail"></div>`;
+    document.getElementById('submitBtn').style.display='none';
+  } else {
+    const instr = PAY_INSTRUCTIONS[country] ? PAY_INSTRUCTIONS[country](total) : `Pay $${total.toFixed(2)} to our local account in ${country}.`;
+    detEl.innerHTML=`<div class="pay-detail visible">${instr}</div>`;
+    document.getElementById('submitBtn').textContent="I've Paid ✅";
+    document.getElementById('submitBtn').style.display='block';
+  }
+}
+
+function selectUsaApp(app){
+  selUsaApp=app;
+  document.querySelectorAll('[data-a]').forEach(b=>b.classList.toggle('selected',b.dataset.a===app));
+  const total=cartTotal();
+  document.getElementById('usaAppDetail').innerHTML=`<div class="pay-detail visible">${USA_APPS[app]||''}<br><br><strong>Amount: $${total.toFixed(2)}</strong></div>`;
+  document.getElementById('submitBtn').textContent="I've Paid ✅";
+  document.getElementById('submitBtn').style.display='block';
+}
+
+// ── Collect item details ────────────────────────────────
+function collectItemDetails(){
+  const itemDetails=[];
+  document.querySelectorAll('.detail-block').forEach(block=>{
+    const id=block.dataset.id;
+    const idx=parseInt(block.dataset.idx||0);
+    const isImdNew   = id.startsWith('imd_new');
+    const isImdRenew = id.startsWith('imd_renew');
+    const type = block.dataset.type || (isImdNew?'new':isImdRenew?'renew':'new');
+
+    const detail={id, account_type: type};
+    block.querySelectorAll('input').forEach(inp=>{
+      if(inp.value.trim()) detail[inp.name]=inp.value.trim();
+    });
+    itemDetails.push(detail);
+  });
+  return itemDetails;
+}
+
+// ── Submit order ────────────────────────────────────────
+function submitOrder(){
+  if(!selPayMethod){ showToast('Choose a payment method'); return; }
+  if(selPayMethod==='local' && !selCountry){ showToast('Choose your country'); return; }
+  if(selPayMethod==='local' && selCountry==='USA' && !selUsaApp){ showToast('Choose a transfer app'); return; }
+
+  const items = collectItemDetails();
+  const total = cartTotal();
+
+  let payMethod = selPayMethod;
+  if(selPayMethod==='local') payMethod = selCountry + (selUsaApp ? ' — '+selUsaApp : '');
+
+  const payload = JSON.stringify({
+    action: 'full_order',
+    items,
+    payment_method: payMethod,
+    total,
+  });
+
+  tg.sendData(payload);
+}
+
+// ── Toast ───────────────────────────────────────────────
+let _tt;
+function showToast(msg){
+  const el=document.getElementById('toast');
+  el.textContent=msg; el.classList.add('show');
+  clearTimeout(_tt); _tt=setTimeout(()=>el.classList.remove('show'),1800);
+}
+
+// ── Init ────────────────────────────────────────────────
+buildCatalog();
+</script>
+</body>
+</html>
