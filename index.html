@@ -6,170 +6,296 @@
 <title>Medic SalesBot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-/* ── Design tokens ─────────────────────────────────────── */
-:root {
-  --bg:     var(--tg-theme-bg-color, #0f1117);
-  --bg2:    var(--tg-theme-secondary-bg-color, #1a1d27);
-  --text:   var(--tg-theme-text-color, #e8eaf0);
-  --hint:   var(--tg-theme-hint-color, #6b7280);
-  --accent: var(--tg-theme-button-color, #3b82f6);
-  --atxt:   var(--tg-theme-button-text-color, #fff);
-  --teal:   #0d9488;
-  --teal2:  #14b8a6;
-  --red:    #ef4444;
-  --green:  #22c55e;
-  --r:      14px;
+:root{
+  --bg:   var(--tg-theme-bg-color,#0f1117);
+  --bg2:  var(--tg-theme-secondary-bg-color,#1a1d27);
+  --text: var(--tg-theme-text-color,#e8eaf0);
+  --hint: var(--tg-theme-hint-color,#6b7280);
+  --acc:  var(--tg-theme-button-color,#3b82f6);
+  --atxt: var(--tg-theme-button-text-color,#fff);
+  --teal: #0d9488; --teal2:#14b8a6;
+  --red:  #ef4444; --green:#22c55e;
+  --r:14px;
 }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding-bottom:90px}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  background:var(--bg);color:var(--text);min-height:100vh;padding-bottom:100px}
 
-/* ── Step header ───────────────────────────────────────── */
-.wizard-header{background:var(--bg2);border-bottom:1px solid rgba(255,255,255,.07);position:sticky;top:0;z-index:100}
-.wizard-top{display:flex;align-items:center;gap:10px;padding:14px 16px 10px}
-.logo{width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,var(--teal),#0284c7);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
-.wizard-top h1{font-size:16px;font-weight:700}
-.wizard-top p{font-size:11px;color:var(--hint)}
-.cart-pill{margin-left:auto;background:var(--accent);color:var(--atxt);border:none;border-radius:99px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;display:none;flex-shrink:0}
-.cart-pill.vis{display:block}
+/* ── Header ───────────────────────────── */
+.hdr{
+  background:var(--bg2);border-bottom:1px solid rgba(255,255,255,.07);
+  position:sticky;top:0;z-index:200;
+}
+.hdr-top{
+  display:flex;align-items:center;gap:10px;padding:13px 14px 8px;
+}
+.logo{
+  width:36px;height:36px;border-radius:10px;flex-shrink:0;
+  background:linear-gradient(135deg,var(--teal),#0284c7);
+  display:flex;align-items:center;justify-content:center;font-size:19px;
+}
+.hdr-title{flex:1;min-width:0}
+.hdr-title h1{font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hdr-title p{font-size:10px;color:var(--hint);margin-top:1px}
 
-.steps{display:flex;gap:0;padding:10px 16px 10px}
+/* Basket button — always in header top-right */
+.basket-btn{
+  position:relative;background:var(--acc);color:var(--atxt);border:none;
+  border-radius:12px;padding:7px 12px;font-size:13px;font-weight:700;
+  cursor:pointer;display:flex;align-items:center;gap:5px;flex-shrink:0;
+  transition:opacity .15s;min-width:52px;justify-content:center;
+}
+.basket-btn:active{opacity:.82}
+.basket-count{
+  position:absolute;top:-6px;right:-6px;
+  background:var(--red);color:#fff;border-radius:99px;
+  min-width:18px;height:18px;font-size:10px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;padding:0 4px;
+  opacity:0;transition:opacity .2s;
+}
+.basket-count.vis{opacity:1}
+
+/* ── Wizard step bar ─────────────────── */
+.steps{display:flex;padding:8px 14px 10px}
 .step{flex:1;text-align:center;position:relative}
-.step::after{content:'';position:absolute;top:12px;left:50%;right:-50%;height:2px;background:rgba(255,255,255,.1);z-index:0}
+.step::after{content:'';position:absolute;top:11px;left:50%;right:-50%;
+  height:2px;background:rgba(255,255,255,.09);z-index:0}
 .step:last-child::after{display:none}
-.step-dot{width:24px;height:24px;border-radius:50%;border:2px solid rgba(255,255,255,.15);background:var(--bg);display:flex;align-items:center;justify-content:center;margin:0 auto 4px;font-size:11px;font-weight:700;color:var(--hint);position:relative;z-index:1;transition:all .2s}
+.step-dot{
+  width:22px;height:22px;border-radius:50%;border:2px solid rgba(255,255,255,.15);
+  background:var(--bg);display:flex;align-items:center;justify-content:center;
+  margin:0 auto 3px;font-size:10px;font-weight:700;color:var(--hint);
+  position:relative;z-index:1;transition:all .2s;
+}
 .step.done .step-dot{background:var(--teal);border-color:var(--teal);color:#fff}
-.step.active .step-dot{background:var(--accent);border-color:var(--accent);color:#fff}
-.step-label{font-size:10px;color:var(--hint);transition:color .2s}
-.step.active .step-label{color:var(--text)}
+.step.active .step-dot{background:var(--acc);border-color:var(--acc);color:#fff}
+.step-lbl{font-size:10px;color:var(--hint);transition:color .2s}
+.step.active .step-lbl{color:var(--text)}
 
-/* ── Shared layout ─────────────────────────────────────── */
-.page{display:none;padding:16px}
-.page.active{display:block}
+/* ── Pages ────────────────────────────── */
+.page{display:none;padding:14px}
+.page.on{display:block}
 
-.sect-label{font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--hint);margin:16px 0 8px}
-.sect-label:first-child{margin-top:0}
+/* ── Section label ───────────────────── */
+.sl{font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;
+  color:var(--hint);margin:14px 0 8px}
+.sl:first-child{margin-top:0}
 
-.card{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);margin-bottom:10px;overflow:hidden}
-
-/* ── Catalog tabs ──────────────────────────────────────── */
-.tabs{display:flex;gap:8px;padding:12px 0 4px;overflow-x:auto;scrollbar-width:none}
+/* ── Tabs ─────────────────────────────── */
+.tabs{display:flex;gap:7px;padding:10px 0 4px;overflow-x:auto;scrollbar-width:none}
 .tabs::-webkit-scrollbar{display:none}
-.tab{flex-shrink:0;padding:7px 13px;border-radius:99px;border:1.5px solid rgba(255,255,255,.12);font-size:12px;font-weight:500;color:var(--hint);cursor:pointer;background:transparent;transition:all .15s}
+.tab{
+  flex-shrink:0;padding:6px 12px;border-radius:99px;
+  border:1.5px solid rgba(255,255,255,.12);font-size:12px;font-weight:500;
+  color:var(--hint);cursor:pointer;background:transparent;transition:all .15s;
+}
 .tab.active{border-color:var(--teal);background:rgba(13,148,136,.15);color:var(--teal2)}
 
-/* ── Item rows ─────────────────────────────────────────── */
-.item-row{display:flex;align-items:center;gap:10px;padding:11px 13px;border-bottom:1px solid rgba(255,255,255,.05)}
-.item-row:last-child{border-bottom:none}
-.item-info{flex:1;min-width:0}
-.item-name{font-size:13px;font-weight:500;line-height:1.3}
-.item-sub{font-size:11px;color:var(--hint);margin-top:1px}
-.item-price{font-size:14px;font-weight:700;color:var(--teal2);flex-shrink:0}
-.add-btn{width:28px;height:28px;border-radius:50%;border:none;background:var(--accent);color:var(--atxt);font-size:17px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;margin-left:8px;transition:transform .12s}
+/* ── Item card (inside tier group) ────── */
+.card{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);margin-bottom:10px;overflow:hidden}
+.row{display:flex;align-items:center;gap:10px;padding:11px 13px;border-bottom:1px solid rgba(255,255,255,.05)}
+.row:last-child{border-bottom:none}
+.ri{flex:1;min-width:0}
+.rn{font-size:13px;font-weight:500;line-height:1.3}
+.rs{font-size:11px;color:var(--hint);margin-top:1px}
+.rp{font-size:14px;font-weight:700;color:var(--teal2);flex-shrink:0}
+.add-btn{
+  width:28px;height:28px;border-radius:50%;border:none;background:var(--acc);
+  color:var(--atxt);font-size:17px;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;flex-shrink:0;margin-left:8px;transition:all .15s;
+}
 .add-btn:active{transform:scale(.88)}
 .add-btn.in{background:var(--teal)}
 
-/* standalone card */
-.item-solo{display:flex;align-items:center;gap:10px;padding:11px 13px;background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);margin-bottom:7px}
+/* Standalone card */
+.solo{
+  display:flex;align-items:center;gap:10px;padding:11px 13px;
+  background:var(--bg2);border:1px solid rgba(255,255,255,.07);
+  border-radius:var(--r);margin-bottom:7px;
+}
 
-/* ── Detail forms ──────────────────────────────────────── */
-.detail-block{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);margin-bottom:12px;overflow:hidden}
-.detail-block-header{padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:8px}
-.detail-block-header .item-name{font-size:14px;font-weight:600}
-.detail-block-header .price-tag{margin-left:auto;color:var(--teal2);font-size:13px;font-weight:700}
+/* ── Subscriptions tab ───────────────── */
+.sub-card{
+  background:var(--bg2);border:1px solid rgba(255,255,255,.07);
+  border-radius:var(--r);padding:18px 16px;margin-bottom:12px;text-align:center;
+}
+.sub-card .icon{font-size:36px;margin-bottom:10px}
+.sub-card h3{font-size:15px;font-weight:700;margin-bottom:6px}
+.sub-card p{font-size:12px;color:var(--hint);line-height:1.6;margin-bottom:14px}
+.sub-card button{
+  background:var(--acc);color:var(--atxt);border:none;border-radius:12px;
+  padding:11px 20px;font-size:13px;font-weight:700;cursor:pointer;width:100%;
+  transition:opacity .15s;
+}
+.sub-card button:active{opacity:.82}
+.sub-card.alt button{background:var(--teal)}
 
-.type-toggle{display:flex;gap:0;margin:12px 14px 4px;border-radius:var(--r);overflow:hidden;border:1.5px solid rgba(255,255,255,.12)}
-.type-btn{flex:1;border:none;background:transparent;color:var(--hint);padding:9px;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s}
-.type-btn.active{background:var(--accent);color:var(--atxt)}
-
-.fields{padding:0 14px 14px}
-.field{margin-top:12px}
-.field label{font-size:11px;font-weight:600;color:var(--hint);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:5px}
-.field input{width:100%;background:rgba(255,255,255,.06);border:1.5px solid rgba(255,255,255,.1);border-radius:10px;padding:10px 12px;color:var(--text);font-size:14px;outline:none;transition:border-color .15s}
-.field input:focus{border-color:var(--accent)}
+/* ── Detail forms ────────────────────── */
+.dblock{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);margin-bottom:12px;overflow:hidden}
+.dheader{padding:11px 13px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:8px}
+.dheader .rn{font-size:14px;font-weight:600}
+.ptag{margin-left:auto;color:var(--teal2);font-size:13px;font-weight:700;flex-shrink:0}
+.toggle{display:flex;border-radius:12px;overflow:hidden;border:1.5px solid rgba(255,255,255,.12);margin:11px 13px 4px}
+.tbtn{flex:1;border:none;background:transparent;color:var(--hint);padding:8px;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s}
+.tbtn.active{background:var(--acc);color:var(--atxt)}
+.fields{padding:0 13px 13px}
+.field{margin-top:11px}
+.field label{font-size:10px;font-weight:700;color:var(--hint);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px}
+.field input{
+  width:100%;background:rgba(255,255,255,.06);border:1.5px solid rgba(255,255,255,.1);
+  border-radius:10px;padding:10px 11px;color:var(--text);font-size:13px;
+  outline:none;transition:border-color .15s;
+}
+.field input:focus{border-color:var(--acc)}
 .field input.err{border-color:var(--red)}
-.field-hint{font-size:11px;color:var(--hint);margin-top:4px}
-.field-err{font-size:11px;color:var(--red);margin-top:4px;display:none}
-.field input.err + .field-hint{display:none}
-.field input.err ~ .field-err{display:block}
+.fhint{font-size:11px;color:var(--hint);margin-top:3px}
+.ferr{font-size:11px;color:var(--red);margin-top:3px;display:none}
 
-/* ── Payment ───────────────────────────────────────────── */
-.pay-methods{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
-.pay-card{background:var(--bg2);border:2px solid rgba(255,255,255,.08);border-radius:var(--r);padding:14px 10px;text-align:center;cursor:pointer;transition:all .15s}
-.pay-card.selected{border-color:var(--accent);background:rgba(var(--accent-rgb,59,130,246),.08)}
-.pay-card .icon{font-size:24px;margin-bottom:6px}
-.pay-card .label{font-size:12px;font-weight:600}
-.pay-card .sub{font-size:10px;color:var(--hint);margin-top:2px}
-
-.pay-detail{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);padding:14px;margin-bottom:12px;line-height:1.7;font-size:13px;display:none}
-.pay-detail.visible{display:block}
-.pay-detail strong{color:var(--teal2)}
-.mono{font-family:'SF Mono',Consolas,monospace;background:rgba(255,255,255,.08);padding:3px 7px;border-radius:6px;user-select:all;cursor:pointer;transition:background .15s}
+/* ── Payment cards ───────────────────── */
+.pm-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.pm{
+  background:var(--bg2);border:2px solid rgba(255,255,255,.08);
+  border-radius:var(--r);padding:13px 9px;text-align:center;cursor:pointer;transition:all .15s;
+}
+.pm.sel{border-color:var(--acc);background:rgba(59,130,246,.08)}
+.pm .ico{font-size:22px;margin-bottom:5px}
+.pm .lbl{font-size:11px;font-weight:600}
+.pm .sub{font-size:10px;color:var(--hint);margin-top:1px}
+.pdtl{
+  background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);
+  padding:13px;margin-bottom:10px;line-height:1.8;font-size:12px;display:none;
+}
+.pdtl.on{display:block}
+.pdtl strong{color:var(--teal2)}
+.mono{
+  font-family:'SF Mono',Consolas,monospace;background:rgba(255,255,255,.08);
+  padding:2px 6px;border-radius:5px;cursor:pointer;transition:background .15s;
+  user-select:all;
+}
 .mono:active{background:rgba(13,148,136,.3)}
-.country-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
-.country-btn{background:var(--bg2);border:2px solid rgba(255,255,255,.08);border-radius:12px;padding:10px;text-align:center;cursor:pointer;font-size:13px;transition:all .15s}
-.country-btn.selected{border-color:var(--accent)}
+.cg{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:10px}
+.cb{
+  background:var(--bg2);border:2px solid rgba(255,255,255,.08);
+  border-radius:11px;padding:9px;text-align:center;cursor:pointer;
+  font-size:12px;transition:all .15s;
+}
+.cb.sel{border-color:var(--acc)}
 
-/* ── Order summary ─────────────────────────────────────── */
-.summary-row{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,.05);font-size:13px}
-.summary-row:last-child{border-bottom:none;font-weight:700;font-size:14px}
-.summary-row .right{color:var(--teal2)}
+/* ── Summary ─────────────────────────── */
+.sumrow{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:9px 13px;border-bottom:1px solid rgba(255,255,255,.05);font-size:13px;
+}
+.sumrow:last-child{border-bottom:none;font-weight:700;font-size:14px}
+.sumrow .r{color:var(--teal2)}
 
-/* ── Buttons ───────────────────────────────────────────── */
-.btn-primary{width:100%;background:var(--accent);color:var(--atxt);border:none;border-radius:var(--r);padding:15px;font-size:15px;font-weight:700;cursor:pointer;transition:opacity .15s;margin-top:8px}
-.btn-primary:active{opacity:.85}
-.btn-secondary{width:100%;background:transparent;color:var(--hint);border:1.5px solid rgba(255,255,255,.12);border-radius:var(--r);padding:12px;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px}
+/* ── Buttons ─────────────────────────── */
+.btn{
+  width:100%;background:var(--acc);color:var(--atxt);border:none;
+  border-radius:var(--r);padding:14px;font-size:14px;font-weight:700;
+  cursor:pointer;transition:opacity .15s;margin-top:8px;
+}
+.btn:active{opacity:.82}
+.btn.sec{background:transparent;color:var(--hint);border:1.5px solid rgba(255,255,255,.12)}
 
-/* ── Toast ─────────────────────────────────────────────── */
-.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(70px);background:rgba(13,148,136,.92);color:#fff;padding:9px 16px;border-radius:99px;font-size:12px;font-weight:600;white-space:nowrap;transition:transform .25s cubic-bezier(.34,1.56,.64,1);z-index:999;pointer-events:none}
-.toast.show{transform:translateX(-50%) translateY(0)}
+/* ── Basket slide-up sheet ───────────── */
+.overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:300;
+  display:none;align-items:flex-end;
+}
+.overlay.on{display:flex}
+.sheet{
+  background:var(--bg2);border-radius:20px 20px 0 0;width:100%;
+  max-height:82vh;overflow-y:auto;padding:0 0 28px;
+}
+.sheet-handle{
+  width:38px;height:4px;background:rgba(255,255,255,.18);
+  border-radius:99px;margin:10px auto 14px;
+}
+.sheet-title{
+  font-size:16px;font-weight:700;padding:0 15px 11px;
+  border-bottom:1px solid rgba(255,255,255,.07);display:flex;align-items:center;gap:8px;
+}
+.ci{display:flex;align-items:center;padding:10px 15px;gap:10px;border-bottom:1px solid rgba(255,255,255,.05)}
+.ci-name{flex:1;font-size:13px;line-height:1.4}
+.ci-price{font-size:13px;font-weight:700;color:var(--teal2);flex-shrink:0}
+.rm{
+  width:26px;height:26px;border-radius:50%;border:none;
+  background:rgba(239,68,68,.18);color:var(--red);font-size:16px;
+  display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;
+}
+.cart-total{
+  padding:12px 15px 4px;display:flex;justify-content:space-between;
+  font-size:14px;font-weight:700;
+}
+.cart-total span:last-child{color:var(--teal2)}
+.empty-cart{text-align:center;padding:30px 16px;color:var(--hint);font-size:13px}
+.empty-cart .eico{font-size:36px;margin-bottom:10px}
 
-/* ── Done screen ───────────────────────────────────────── */
-.done-screen{text-align:center;padding:40px 24px}
-.done-icon{font-size:56px;margin-bottom:16px}
-.done-screen h2{font-size:20px;font-weight:700;margin-bottom:8px}
-.done-screen p{font-size:14px;color:var(--hint);line-height:1.6}
+/* ── Toast ───────────────────────────── */
+.toast{
+  position:fixed;bottom:22px;left:50%;
+  transform:translateX(-50%) translateY(68px);
+  background:rgba(13,148,136,.9);color:#fff;padding:8px 15px;
+  border-radius:99px;font-size:12px;font-weight:600;white-space:nowrap;
+  transition:transform .25s cubic-bezier(.34,1.56,.64,1);z-index:999;pointer-events:none;
+}
+.toast.on{transform:translateX(-50%) translateY(0)}
 </style>
 </head>
 <body>
 
-<!-- Wizard header -->
-<div class="wizard-header">
-  <div class="wizard-top">
+<!-- ── Header ──────────────────────────── -->
+<div class="hdr">
+  <div class="hdr-top">
     <div class="logo">🏥</div>
-    <div><p style="font-size:10px;color:var(--hint)">MEDIC SALESBOT</p><h1 id="pageTitle">Browse Subscriptions</h1></div>
-    <button class="cart-pill" id="cartPill" onclick="goToDetails()">🧺 <span id="cartCount">0</span> · Next →</button>
+    <div class="hdr-title">
+      <h1 id="hdrTitle">Medic SalesBot</h1>
+      <p>Medical Subscription Store</p>
+    </div>
+    <button class="basket-btn" onclick="openBasket()">
+      🧺
+      <div class="basket-count" id="bc">0</div>
+    </button>
   </div>
-  <div class="steps">
-    <div class="step active" id="s1"><div class="step-dot">1</div><div class="step-label">Catalog</div></div>
-    <div class="step" id="s2"><div class="step-dot">2</div><div class="step-label">Details</div></div>
-    <div class="step" id="s3"><div class="step-dot">3</div><div class="step-label">Payment</div></div>
+  <div class="steps" id="stepsBar">
+    <div class="step active" id="s1"><div class="step-dot">1</div><div class="step-lbl">Catalog</div></div>
+    <div class="step" id="s2"><div class="step-dot">2</div><div class="step-lbl">Details</div></div>
+    <div class="step" id="s3"><div class="step-dot">3</div><div class="step-lbl">Payment</div></div>
   </div>
 </div>
 
-<!-- Page 1: Catalog -->
-<div class="page active" id="p1">
+<!-- ── Page 1: Catalog ──────────────────── -->
+<div class="page on" id="p1">
   <div class="tabs" id="tabs"></div>
-  <div id="catSections"></div>
+  <div id="catSec"></div>
 </div>
 
-<!-- Page 2: Item details -->
+<!-- ── Page 2: Details ─────────────────── -->
 <div class="page" id="p2">
-  <div class="sect-label">Order Details</div>
-  <div id="detailForms"></div>
-  <button class="btn-primary" onclick="goToPayment()">Continue to Payment →</button>
-  <button class="btn-secondary" onclick="goToCatalog()">← Back to Catalog</button>
+  <div class="sl">Account Details</div>
+  <div id="detForms"></div>
+  <button class="btn" onclick="goPayment()">Continue to Payment →</button>
+  <button class="btn sec" onclick="goCatalog()">← Back to Catalog</button>
 </div>
 
-<!-- Page 3: Payment -->
+<!-- ── Page 3: Payment ─────────────────── -->
 <div class="page" id="p3">
-  <div class="sect-label">Choose Payment Method</div>
-  <div class="pay-methods" id="payMethods"></div>
-  <div id="payDetail"></div>
-  <div class="card" id="orderSummary" style="margin-bottom:12px"></div>
-  <button class="btn-primary" id="submitBtn" onclick="submitOrder()" style="display:none">
-    Place Order
-  </button>
-  <button class="btn-secondary" onclick="goToDetails()">← Back</button>
+  <div class="sl">Choose Payment Method</div>
+  <div class="pm-grid" id="pmGrid"></div>
+  <div id="pmDetail"></div>
+  <div class="card" id="sumCard" style="margin-bottom:12px"></div>
+  <button class="btn" id="submitBtn" style="display:none" onclick="submitOrder()">Place Order</button>
+  <button class="btn sec" onclick="goDetails()">← Back</button>
+</div>
+
+<!-- ── Basket overlay ──────────────────── -->
+<div class="overlay" id="basketOverlay" onclick="if(event.target===this)closeBasket()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">🧺 Your Basket</div>
+    <div id="basketItems"></div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -179,194 +305,208 @@ const tg = window.Telegram.WebApp;
 tg.ready(); tg.expand();
 tg.setHeaderColor('secondary_bg_color');
 
-// ── Catalog data ────────────────────────────────────────
-const IMD_IDS = new Set(['imd_new_6m','imd_new_1y','imd_renew_6m','imd_renew_1y']);
+// ── Catalog data ────────────────────────────────────────────
+const IMD = new Set(['imd_new_6m','imd_new_1y','imd_renew_6m','imd_renew_1y']);
 
 const CATALOG = [
-  { id:'uptodate', name:'Uptodate', emoji:'📖', groups:[
-    { label:'Online Access', items:[
-      {id:'up_online_app', name:'Mobile App', sub:'Online · 1 Year', price:20},
-      {id:'up_online_web', name:'Mobile App + Browser', sub:'Online · 1 Year', price:35},
+  {id:'uptodate',name:'Uptodate',emoji:'📖',groups:[
+    {label:'Online Access',items:[
+      {id:'up_online_app',name:'Mobile App',sub:'Online · 1 Year',price:20},
+      {id:'up_online_web',name:'Mobile App + Browser',sub:'Online · 1 Year',price:35},
     ]},
-    { label:'Online + Offline', items:[
-      {id:'up_offline_app', name:'Mobile App', sub:'Offline Access · 1 Year', price:30},
-      {id:'up_offline_web', name:'Mobile App + Browser', sub:'Offline Access · 1 Year', price:45},
+    {label:'Online + Offline',items:[
+      {id:'up_offline_app',name:'Mobile App',sub:'Offline · 1 Year',price:30},
+      {id:'up_offline_web',name:'Mobile App + Browser',sub:'Offline · 1 Year',price:45},
     ]},
-    { label:'Online + Pathways', items:[
-      {id:'up_pathways_app', name:'Mobile App', sub:'Pathways · 1 Year', price:30},
-      {id:'up_pathways_web', name:'Mobile App + Browser', sub:'Pathways · 1 Year', price:45},
-    ]},
-  ]},
-  { id:'amboss', name:'Amboss', emoji:'🧠', groups:[
-    { label:'Premium + Library', items:[
-      {id:'amboss_premium_1y', name:'1 Year', sub:'Unlimited Qbanks + Library', price:85},
-      {id:'amboss_premium_promo', name:'Until 18/9/2026', sub:'Premium + Library · Limited offer', price:35},
-    ]},
-    { label:'Library Only', items:[
-      {id:'amboss_library', name:'1 Year', sub:'Limited Qbanks · Library access', price:65},
+    {label:'Online + Pathways',items:[
+      {id:'up_pathways_app',name:'Mobile App',sub:'Pathways · 1 Year',price:30},
+      {id:'up_pathways_web',name:'Mobile App + Browser',sub:'Pathways · 1 Year',price:45},
     ]},
   ]},
-  { id:'imd', name:'iMD VIP', emoji:'🎓', groups:[
-    { label:'New Account', items:[
-      {id:'imd_new_6m', name:'6 Months', sub:'New registration', price:50},
-      {id:'imd_new_1y', name:'1 Year', sub:'New registration', price:75},
+  {id:'amboss',name:'Amboss',emoji:'🧠',groups:[
+    {label:'Premium + Library',items:[
+      {id:'amboss_premium_1y',name:'1 Year',sub:'Unlimited Qbanks + Library',price:85},
+      {id:'amboss_premium_promo',name:'Until 18/9/2026',sub:'Limited offer',price:35},
     ]},
-    { label:'Renewal', items:[
-      {id:'imd_renew_6m', name:'6 Months', sub:'Existing account', price:50},
-      {id:'imd_renew_1y', name:'1 Year', sub:'Existing account', price:75},
+    {label:'Library Only',items:[
+      {id:'amboss_library',name:'1 Year',sub:'Limited Qbanks',price:65},
     ]},
   ]},
-  { id:'other', name:'More', emoji:'📚', single:[
-    {id:'dynamed',          emoji:'💊', name:'Dynamed',           price:20},
-    {id:'dynamedex',        emoji:'💊', name:'DynamedEx',         price:30},
-    {id:'bmj_best_practice',emoji:'📋', name:'BMJ Best Practice', price:20},
-    {id:'bmj_learning',     emoji:'🎓', name:'BMJ Learning',      price:30},
-    {id:'visualdx',         emoji:'🔬', name:'VisualDx',          price:20},
-    {id:'lexicomp',         emoji:'💉', name:'Lexicomp Mobile',   price:20},
-    {id:'accessmedicine',   emoji:'🏥', name:'AccessMedicine',    price:20},
-    {id:'boardvitals',      emoji:'📝', name:'Boardvitals VIP',   price:55},
-    {id:'clinicalkey',      emoji:'🔑', name:'ClinicalKey',       price:35},
-    {id:'sciencedirect',    emoji:'🔭', name:'ScienceDirect',     price:35},
-    {id:'statdx',           emoji:'📊', name:'StatDx',            price:35},
-    {id:'nejm',             emoji:'📰', name:'NEJM',              price:20},
-    {id:'jama_evidence',    emoji:'📰', name:'JAMA Evidence',     price:20},
-    {id:'scopus',           emoji:'🌐', name:'Scopus',            price:35},
-    {id:'springerlink',     emoji:'📗', name:'SpringerLink',      price:35},
+  {id:'imd',name:'iMD VIP',emoji:'🎓',groups:[
+    {label:'New Account',items:[
+      {id:'imd_new_6m',name:'6 Months',sub:'New registration',price:50},
+      {id:'imd_new_1y',name:'1 Year',sub:'New registration',price:75},
+    ]},
+    {label:'Renewal',items:[
+      {id:'imd_renew_6m',name:'6 Months',sub:'Existing account',price:50},
+      {id:'imd_renew_1y',name:'1 Year',sub:'Existing account',price:75},
+    ]},
+  ]},
+  {id:'other',name:'More',emoji:'📚',single:[
+    {id:'dynamed',e:'💊',name:'Dynamed',price:20},
+    {id:'dynamedex',e:'💊',name:'DynamedEx',price:30},
+    {id:'bmj_best_practice',e:'📋',name:'BMJ Best Practice',price:20},
+    {id:'bmj_learning',e:'🎓',name:'BMJ Learning',price:30},
+    {id:'visualdx',e:'🔬',name:'VisualDx',price:20},
+    {id:'lexicomp',e:'💉',name:'Lexicomp Mobile',price:20},
+    {id:'accessmedicine',e:'🏥',name:'AccessMedicine',price:20},
+    {id:'boardvitals',e:'📝',name:'Boardvitals VIP',price:55},
+    {id:'clinicalkey',e:'🔑',name:'ClinicalKey',price:35},
+    {id:'sciencedirect',e:'🔭',name:'ScienceDirect',price:35},
+    {id:'statdx',e:'📊',name:'StatDx',price:35},
+    {id:'nejm',e:'📰',name:'NEJM',price:20},
+    {id:'jama_evidence',e:'📰',name:'JAMA Evidence',price:20},
+    {id:'scopus',e:'🌐',name:'Scopus',price:35},
+    {id:'springerlink',e:'📗',name:'SpringerLink',price:35},
   ]},
 ];
 
-// ── Currency rates ──────────────────────────────────────
-const RATES = {
-  Lebanon: ['USD',1], Jordan:['JOD',0.716], India:['INR',94.5],
-  Ghana:['GHS',11.8], Pakistan:['PKR',280], Europe:['USD',1],
-  USA:['USD',1], KSA:['SAR',3.8], Russia:['RUB',85.5],
-};
-const FLAGS = {
-  Lebanon:'🇱🇧', Jordan:'🇯🇴', India:'🇮🇳', Ghana:'🇬🇭',
-  Pakistan:'🇵🇰', Europe:'🇪🇺', USA:'🇺🇸', KSA:'🇸🇦', Russia:'🇷🇺',
-};
+// Build a flat id→item lookup
+const IMAP = {};
+CATALOG.forEach(c=>{
+  if(c.groups) c.groups.forEach(g=>g.items.forEach(i=>IMAP[i.id]=i));
+  if(c.single) c.single.forEach(i=>IMAP[i.id]={...i,sub:'1 Year'});
+});
 
-// ── Payment instructions ────────────────────────────────
-const PAY_INSTRUCTIONS = {
-  Lebanon: t=>`WhishMoney: <span class="mono">81666579</span><br>Send <strong>$${t.toFixed(2)} USD</strong>`,
-  Jordan: t=>{
-    const a = (t*0.716).toFixed(3);
-    return `Send <strong>${a} JOD</strong><br>CLIQ ALIAS: <span class="mono">WKS777</span> (Orange Money) — Waleed Shaqfeh<br>CLIQ ALIAS: <span class="mono">WKS999</span> (Etihad Bank) — Waleed Shaqfeh<br>CLIQ ALIAS: <span class="mono">WKS555</span> (Zain Cash) — Mohammad Shamalti`;
-  },
-  India: t=>{
-    const a = (t*94.5).toLocaleString('en-IN',{maximumFractionDigits:0});
-    return `UPI ID: <span class="mono">s4005194160889795@slc</span><br>Name: Shilpaben karetiya<br>Amount: <strong>₹${a}</strong><br><br>⚠️ Leave comments/remarks <strong>empty</strong>. If one payment fails, split into parts.`;
-  },
-  Ghana: t=>{
-    const a = (t*11.8).toFixed(2);
-    return `Amount: <strong>${a} GHS</strong><br>📲 <span class="mono">0257505632</span> — MTN Mobile Money — Saibu Mahamadu<br>📲 <span class="mono">0204860754</span> — Telecel/Vodafone — Saibu Mahamadu<br>Do not call the number.`;
-  },
-  Pakistan: t=>{
-    const a = Math.round(t*280).toLocaleString();
-    return `Amount: <strong>${a} PKR</strong><br>Bank: HBL · Name: Muhammad Bilal<br>Account: <span class="mono">03577900871203</span><br>IBAN: <span class="mono">PK08HABB0003577900871203</span><br>Branch: TOTALAI`;
-  },
-  Europe: t=>`Card (Revolut): <span class="mono">5413525250267271</span><br>Name: Alijon Karimov · Country: Tajikistan<br>Amount: <strong>$${t.toFixed(2)} USD</strong>`,
-  KSA: t=>{
-    const a = (t*3.8).toFixed(2);
-    return `Amount: <strong>${a} SAR</strong><br>IBAN: <span class="mono">SA8710000006857309000101</span><br>IBAN: <span class="mono">SA0510000062300187719603</span><br>Bank: Ahli Bank · Name: Jamil Hajji<br><strong>Purpose: Friends & family / Personal</strong>`;
-  },
-  Russia: t=>{
-    const a = Math.round(t*85.5).toLocaleString();
-    return `Amount: <strong>${a} RUB</strong><br>Sberbank → International → Phone: <span class="mono">+992002373232</span><br>Country: Tajikistan · Name: Alijon Karimov · Bank: Alif Bank`;
-  },
-};
+// ── Payment data ─────────────────────────────────────────────
+const RATES = {Lebanon:['USD',1],Jordan:['JOD',0.716],India:['INR',94.5],
+  Ghana:['GHS',11.8],Pakistan:['PKR',280],Europe:['USD',1],
+  USA:['USD',1],KSA:['SAR',3.8],Russia:['RUB',85.5]};
+const FLAGS = {Lebanon:'🇱🇧',Jordan:'🇯🇴',India:'🇮🇳',Ghana:'🇬🇭',
+  Pakistan:'🇵🇰',Europe:'🇪🇺',USA:'🇺🇸',KSA:'🇸🇦',Russia:'🇷🇺'};
 
-const USA_APPS = {
-  'TapTap Send': `Open TapTap Send → Country: Lebanon → Whish Money Wallet<br>Phone: <span class="mono">0096181666579</span><br>Name: Ahmad Safa · Year: 1994`,
-  'Ria': `App/website → Lebanon → Choose "Purpl"<br>Mobile: <span class="mono">0096181666579</span><br>Ahmad Safa · Educational/Personal · DOB 17/09/1994`,
-  'Paysend': `App/website → Lebanon → Choose "Purpl"<br>Mobile: <span class="mono">0096181666579</span><br>Ahmad Safa · Educational/Personal · DOB 17/09/1994`,
-  'Remitly': `App/website → Lebanon → Choose "Purpl"<br>Mobile: <span class="mono">0096181666579</span><br>Ahmad Safa · Educational/Personal · DOB 17/09/1994`,
-  'Revolut': `Card transfer → Card: <span class="mono">5413525250267271</span><br>Name: Alijon Karimov · Country: Tajikistan`,
-};
-
-// ── Cart ────────────────────────────────────────────────
-let cart = {};    // id → {name, price, qty}
-let selPayMethod = null;
-let selCountry   = null;
-let selUsaApp    = null;
-
-function allItems(){
-  const all=[];
-  CATALOG.forEach(c=>{
-    if(c.groups) c.groups.forEach(g=>g.items.forEach(i=>all.push(i)));
-    if(c.single) c.single.forEach(i=>all.push({...i,sub:'1 Year'}));
-  });
-  return all;
+function payInstructions(country,t){
+  const map = {
+    Lebanon:  `WhishMoney: <span class="mono">81666579</span><br>Amount: <strong>$${t.toFixed(2)}</strong>`,
+    Jordan:   `<strong>${(t*0.716).toFixed(3)} JOD</strong><br>CLIQ: <span class="mono">WKS777</span> (Orange · Waleed Shaqfeh)<br>CLIQ: <span class="mono">WKS999</span> (Etihad · Waleed Shaqfeh)<br>CLIQ: <span class="mono">WKS555</span> (Zain Cash · Shamalti)`,
+    India:    `UPI: <span class="mono">s4005194160889795@slc</span><br>Name: Shilpaben karetiya<br>Amount: <strong>₹${Math.round(t*94.5).toLocaleString()}</strong><br>⚠️ Leave remarks empty. Split if needed.`,
+    Ghana:    `<strong>${(t*11.8).toFixed(2)} GHS</strong><br>📲 <span class="mono">0257505632</span> MTN · Saibu Mahamadu<br>📲 <span class="mono">0204860754</span> Telecel · Saibu Mahamadu`,
+    Pakistan: `<strong>${Math.round(t*280).toLocaleString()} PKR</strong><br>Bank: HBL · Muhammad Bilal<br>Acc: <span class="mono">03577900871203</span><br>IBAN: <span class="mono">PK08HABB0003577900871203</span><br>Branch: TOTALAI`,
+    Europe:   `Revolut card: <span class="mono">5413525250267271</span><br>Name: Alijon Karimov · Tajikistan<br>Amount: <strong>$${t.toFixed(2)}</strong>`,
+    KSA:      `<strong>${(t*3.8).toFixed(2)} SAR</strong><br>IBAN: <span class="mono">SA8710000006857309000101</span><br>IBAN: <span class="mono">SA0510000062300187719603</span><br>Bank: Ahli · Jamil Hajji<br><strong>Purpose: Friends & family</strong>`,
+    Russia:   `<strong>${Math.round(t*85.5).toLocaleString()} RUB</strong><br>Sberbank → Int'l → Phone: <span class="mono">+992002373232</span><br>Tajikistan · Alijon Karimov · Alif Bank`,
+  };
+  return map[country] || `Amount: <strong>$${t.toFixed(2)}</strong>`;
 }
-const ITEM_MAP = {};
-allItems().forEach(i=>ITEM_MAP[i.id]=i);
+const USA_APPS = {
+  'TapTap Send':`TapTap → Lebanon → Whish Money Wallet<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa · 1994`,
+  'Ria':        `App → Lebanon → Purpl<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa · Educational · 17/09/1994`,
+  'Paysend':    `App → Lebanon → Purpl<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa · Educational · 17/09/1994`,
+  'Remitly':    `App → Lebanon → Purpl<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa · Educational · 17/09/1994`,
+  'Revolut':    `Card transfer: <span class="mono">5413525250267271</span><br>Alijon Karimov · Tajikistan`,
+};
 
-function cartTotal(){ return Object.values(cart).reduce((s,i)=>s+i.price*i.qty,0); }
-function cartSize(){  return Object.values(cart).reduce((s,i)=>s+i.qty,0); }
+// ── Cart state ────────────────────────────────────────────────
+let cart = {}; // id → {name,price,qty}
+let selPay = null, selCountry = null, selApp = null;
+
+const cartTotal = () => Object.values(cart).reduce((s,i)=>s+i.price*i.qty, 0);
+const cartSize  = () => Object.values(cart).reduce((s,i)=>s+i.qty, 0);
 
 function addItem(id){
-  const itm = ITEM_MAP[id];
-  if(!itm) return;
-  cart[id] = cart[id] ? {...cart[id], qty: cart[id].qty+1} : {name:itm.name||itm.id, price:itm.price, qty:1};
+  const itm = IMAP[id]; if(!itm) return;
+  cart[id] = cart[id] ? {...cart[id],qty:cart[id].qty+1} : {name:itm.name,price:itm.price,qty:1};
   const btn = document.getElementById('ab-'+id);
-  if(btn){ btn.textContent='✓'; btn.classList.add('in'); }
-  updateCartUI();
+  if(btn){btn.textContent='✓';btn.classList.add('in');}
+  syncBasketUI();
   showToast('Added · $'+itm.price);
 }
 
-function updateCartUI(){
+function removeItem(id){
+  delete cart[id];
+  syncBasketUI();
+  renderBasketItems();
+}
+
+function syncBasketUI(){
   const n=cartSize();
-  const pill=document.getElementById('cartPill');
-  document.getElementById('cartCount').textContent=n;
-  pill.classList.toggle('vis',n>0);
+  const bc=document.getElementById('bc');
+  bc.textContent=n;
+  bc.classList.toggle('vis',n>0);
 }
 
-// ── Page navigation ─────────────────────────────────────
-function goToCatalog(){
-  showPage('p1'); setStep(1);
-  document.getElementById('pageTitle').textContent='Browse Subscriptions';
-  tg.MainButton.hide();
+// ── Basket overlay ────────────────────────────────────────────
+function openBasket(){
+  renderBasketItems();
+  document.getElementById('basketOverlay').classList.add('on');
+}
+function closeBasket(){
+  document.getElementById('basketOverlay').classList.remove('on');
+}
+function renderBasketItems(){
+  const el=document.getElementById('basketItems');
+  const items=Object.entries(cart);
+  if(!items.length){
+    el.innerHTML=`<div class="empty-cart"><div class="eico">🧺</div>Your basket is empty</div>`;
+    return;
+  }
+  const rows=items.map(([id,{name,price,qty}])=>
+    `<div class="ci">
+      <div class="ci-name">${name}${qty>1?` ×${qty}`:''}</div>
+      <div class="ci-price">$${(price*qty).toFixed(2)}</div>
+      <button class="rm" onclick="removeItem('${id}')">×</button>
+    </div>`
+  ).join('');
+  el.innerHTML = rows +
+    `<div class="cart-total"><span>Total</span><span>$${cartTotal().toFixed(2)}</span></div>
+     <div style="padding:0 15px">
+       <button class="btn" onclick="closeBasket();goDetails()">Proceed to Order →</button>
+     </div>`;
 }
 
-function goToDetails(){
-  if(cartSize()===0){ showToast('Add at least one item'); return; }
-  buildDetailForms();
-  showPage('p2'); setStep(2);
-  document.getElementById('pageTitle').textContent='Account Details';
-  tg.MainButton.hide();
-  window.scrollTo(0,0);
-}
-
-function goToPayment(){
-  if(!validateDetails()) return;
-  buildPaymentPage();
-  showPage('p3'); setStep(3);
-  document.getElementById('pageTitle').textContent='Payment';
-  window.scrollTo(0,0);
-}
-
+// ── Navigation ────────────────────────────────────────────────
 function showPage(id){
-  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===id));
+  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.id===id));
 }
 function setStep(n){
   [1,2,3].forEach(i=>{
     const el=document.getElementById('s'+i);
     el.classList.toggle('done',i<n);
     el.classList.toggle('active',i===n);
-    el.querySelector('.step-dot').textContent = i<n ? '✓' : i;
+    el.querySelector('.step-dot').textContent=i<n?'✓':i;
   });
 }
 
-// ── Catalog render ──────────────────────────────────────
+function goCatalog(){
+  showPage('p1'); setStep(1);
+  document.getElementById('hdrTitle').textContent='Medic SalesBot';
+  tg.MainButton.hide();
+  window.scrollTo(0,0);
+}
+
+function goDetails(){
+  if(!cartSize()){showToast('Add at least one item first'); return;}
+  closeBasket();
+  buildDetailForms();
+  showPage('p2'); setStep(2);
+  document.getElementById('hdrTitle').textContent='Account Details';
+  tg.MainButton.hide();
+  window.scrollTo(0,0);
+}
+
+function goPayment(){
+  if(!validateDetails()) return;
+  buildPaymentPage();
+  showPage('p3'); setStep(3);
+  document.getElementById('hdrTitle').textContent='Payment';
+  window.scrollTo(0,0);
+}
+
+// ── Catalog render ─────────────────────────────────────────────
+// KEY FIX: tabs are stored in a separate Map so tab[i] is not conflated
+// with CATALOG[i] when extra tabs (My Subscriptions) are added.
+const CAT_TAB_IDS = CATALOG.map(c=>c.id); // only catalog ids for switching
+
 function buildCatalog(){
-  const tabsEl=document.getElementById('tabs');
-  const secEl=document.getElementById('catSections');
+  const tabsEl = document.getElementById('tabs');
+  const secEl  = document.getElementById('catSec');
 
   CATALOG.forEach((cat,ci)=>{
-    const tab=document.createElement('button');
+    const tab = document.createElement('button');
     tab.className='tab'+(ci===0?' active':'');
-    tab.textContent=cat.emoji+' '+cat.name;
-    tab.onclick=()=>switchCat(cat.id);
+    tab.dataset.catid = cat.id;  // store the id on the element, not relying on index
+    tab.textContent = cat.emoji+' '+cat.name;
+    tab.onclick = ()=>switchCat(cat.id);
     tabsEl.appendChild(tab);
 
     const sec=document.createElement('div');
@@ -376,377 +516,322 @@ function buildCatalog(){
     if(cat.groups){
       cat.groups.forEach(g=>{
         const lbl=document.createElement('div');
-        lbl.className='sect-label';
-        lbl.textContent=g.label;
+        lbl.className='sl'; lbl.textContent=g.label;
         sec.appendChild(lbl);
         const card=document.createElement('div');
         card.className='card';
-        g.items.forEach(itm=>{
-          card.appendChild(makeItemRow(itm,false));
-        });
+        g.items.forEach(itm=>card.appendChild(makeRow(itm,false)));
         sec.appendChild(card);
       });
     }
     if(cat.single){
       const lbl=document.createElement('div');
-      lbl.className='sect-label';
-      lbl.textContent='Single Subscriptions · 1 Year';
+      lbl.className='sl'; lbl.textContent='1 Year Subscriptions';
       sec.appendChild(lbl);
-      cat.single.forEach(itm=>{
-        const row=makeItemRow({...itm,sub:'1 Year'},true);
-        sec.appendChild(row);
-      });
+      cat.single.forEach(itm=>sec.appendChild(makeRow({...itm,sub:'1 Year'},true)));
     }
     secEl.appendChild(sec);
   });
+
+  // ── My Subscriptions tab ─────────────────────────────────────
+  const subTab=document.createElement('button');
+  subTab.className='tab';
+  subTab.dataset.catid='mysubs';
+  subTab.textContent='📋 My Subscriptions';
+  subTab.onclick=()=>switchCat('mysubs');
+  tabsEl.appendChild(subTab);
+
+  const subSec=document.createElement('div');
+  subSec.id='cat-mysubs';
+  subSec.style.display='none';
+  subSec.innerHTML=`
+    <div class="sl">My Subscriptions</div>
+    <div class="sub-card">
+      <div class="icon">✅</div>
+      <h3>Delivered Subscriptions</h3>
+      <p>See all your active subscriptions and account details in the bot chat.</p>
+      <button onclick="viewSubs('view_subscriptions')">View Delivered →</button>
+    </div>
+    <div class="sub-card alt">
+      <div class="icon">⏳</div>
+      <h3>Pending Orders</h3>
+      <p>Track orders that are still being processed or awaiting payment confirmation.</p>
+      <button onclick="viewSubs('view_pending')">View Pending →</button>
+    </div>`;
+  secEl.appendChild(subSec);
 }
 
-function makeItemRow(itm,solo){
+function makeRow(itm, solo){
   const d=document.createElement('div');
-  d.className=solo?'item-solo':'item-row';
+  d.className=solo?'solo':'row';
   d.innerHTML=`
-    ${solo?`<div style="font-size:22px">${itm.emoji||'📦'}</div>`:''}
-    <div class="item-info">
-      <div class="item-name">${itm.name}</div>
-      <div class="item-sub">${itm.sub||''}</div>
+    ${solo?`<div style="font-size:21px">${itm.e||'📦'}</div>`:''}
+    <div class="ri">
+      <div class="rn">${itm.name}</div>
+      <div class="rs">${itm.sub||''}</div>
     </div>
-    <div class="item-price">$${itm.price}</div>
+    <div class="rp">$${itm.price}</div>
     <button class="add-btn" id="ab-${itm.id}" onclick="addItem('${itm.id}')">+</button>
   `;
   return d;
 }
 
+// KEY FIX: use data-catid attribute instead of array index
 function switchCat(id){
-  document.querySelectorAll('.tabs .tab').forEach((t,i)=>t.classList.toggle('active',CATALOG[i].id===id));
-  CATALOG.forEach(c=>{ const el=document.getElementById('cat-'+c.id); if(el) el.style.display=c.id===id?'block':'none'; });
+  // hide all catalog sections + mysubs
+  CATALOG.forEach(c=>{
+    const el=document.getElementById('cat-'+c.id);
+    if(el) el.style.display='none';
+  });
+  const mysubsEl=document.getElementById('cat-mysubs');
+  if(mysubsEl) mysubsEl.style.display='none';
+
+  // deactivate all tabs, activate matching one
+  document.querySelectorAll('.tabs .tab').forEach(t=>{
+    t.classList.toggle('active', t.dataset.catid===id);
+  });
+
+  // show target section
+  const target=document.getElementById('cat-'+id);
+  if(target) target.style.display='block';
+
   window.scrollTo(0,0);
 }
 
-// ── Detail forms ────────────────────────────────────────
+function viewSubs(action){
+  tg.sendData(JSON.stringify({action}));
+}
+
+// ── Detail forms ───────────────────────────────────────────────
 function buildDetailForms(){
-  const el=document.getElementById('detailForms');
+  const el=document.getElementById('detForms');
   el.innerHTML='';
   Object.entries(cart).forEach(([id,{name,price,qty}])=>{
-    for(let q=0;q<qty;q++){
-      el.appendChild(makeDetailBlock(id,name,price,q));
-    }
+    for(let q=0;q<qty;q++) el.appendChild(makeDetailBlock(id,name,price,q));
   });
 }
 
 function makeDetailBlock(id,name,price,idx){
-  const wrap=document.createElement('div');
-  wrap.className='detail-block';
-  wrap.dataset.id=id; wrap.dataset.idx=idx;
-
-  const isImdNew    = id.startsWith('imd_new');
-  const isImdRenew  = id.startsWith('imd_renew');
-  const isImd       = isImdNew || isImdRenew;
-  const qtyLabel    = idx>0 ? ` #${idx+1}`:'';
-
-  let header=`<div class="detail-block-header"><div class="item-info"><div class="item-name">${name}${qtyLabel}</div></div><div class="price-tag">$${price}</div></div>`;
+  const w=document.createElement('div');
+  w.className='dblock';
+  w.dataset.id=id; w.dataset.idx=idx;
+  const isImdNew   = id.startsWith('imd_new');
+  const isImdRenew = id.startsWith('imd_renew');
+  const lbl = idx>0?` #${idx+1}`:'';
   let body='';
-
   if(isImdNew){
-    body=`<div class="fields">
-      ${field(id,idx,'email','Email Address','email','Email — never used for iMD before')}
-      ${field(id,idx,'username','Username','text','At least 6 characters, never used before')}
-      ${field(id,idx,'password','Password','password','8+ chars, 1 number, 1 capital, one of: - _ . # @')}
-    </div>`;
+    body=fields(id,idx,[
+      ['email','Email Address','email','Never used for iMD before'],
+      ['username','Username','text','At least 6 characters'],
+      ['password','Password','password','8+ chars, 1 capital, 1 number, one of: - _ . # @'],
+    ]);
   } else if(isImdRenew){
-    body=`<div class="fields">
-      ${field(id,idx,'prev_username','Your existing iMD username','text','')}
-    </div>`;
+    body=fields(id,idx,[['prev_username','Existing iMD Username','text','']]);
   } else {
-    // Generic — show New/Renewal toggle first
-    body=`
-      <div class="type-toggle">
-        <button class="type-btn active" onclick="setType(this,'new','${id}',${idx})">🆕 New Account</button>
-        <button class="type-btn" onclick="setType(this,'renew','${id}',${idx})">🔄 Renewal</button>
+    body=`<div class="toggle">
+        <button class="tbtn active" onclick="setType(this,'new','${id}',${idx})">🆕 New Account</button>
+        <button class="tbtn" onclick="setType(this,'renew','${id}',${idx})">🔄 Renewal</button>
       </div>
-      <div class="fields" id="fields-${id}-${idx}">
-        ${field(id,idx,'first_name','First Name','text','')}
-        ${field(id,idx,'last_name','Last Name','text','')}
-        ${field(id,idx,'email','Email Address','email','Never used for this subscription before')}
-        ${field(id,idx,'username','Desired Username','text','At least 6 characters, never used before')}
-        ${field(id,idx,'password','Desired Password','password','8+ chars, 1 number, 1 capital, one of: - _ . # @')}
-      </div>`;
+      <div id="ff-${id}-${idx}">${newFields(id,idx)}</div>`;
   }
-
-  wrap.innerHTML=header+body;
-  return wrap;
+  w.innerHTML=`<div class="dheader">
+    <div class="ri"><div class="rn">${name}${lbl}</div></div>
+    <div class="ptag">$${price}</div>
+  </div>${body}`;
+  return w;
 }
 
-function field(id,idx,name,label,type,hint){
-  const fid=`f-${id}-${idx}-${name}`;
-  return `<div class="field">
-    <label for="${fid}">${label}</label>
-    <input id="${fid}" name="${name}" type="${type}" autocomplete="off" spellcheck="false">
-    ${hint?`<div class="field-hint">${hint}</div>`:''}
-    <div class="field-err" id="err-${fid}"></div>
-  </div>`;
+function newFields(id,idx){return fields(id,idx,[
+  ['first_name','First Name','text',''],['last_name','Last Name','text',''],
+  ['email','Email','email','Never used for this subscription before'],
+  ['username','Username','text','At least 6 characters'],
+  ['password','Password','password','8+ chars, 1 capital, 1 number, one of: - _ . # @'],
+]);}
+function renewFields(id,idx){return fields(id,idx,[
+  ['login_username','Username or Email (existing login)','text',''],
+  ['login_password','Password (existing login)','password',''],
+]);}
+function fields(id,idx,list){
+  return '<div class="fields">'+list.map(([n,l,t,h])=>{
+    const fid=`f-${id}-${idx}-${n}`;
+    return `<div class="field">
+      <label for="${fid}">${l}</label>
+      <input id="${fid}" name="${n}" type="${t}" autocomplete="off" spellcheck="false">
+      ${h?`<div class="fhint">${h}</div>`:''}
+      <div class="ferr" id="e-${fid}"></div>
+    </div>`;
+  }).join('')+'</div>';
 }
 
 function setType(btn,type,id,idx){
-  btn.parentElement.querySelectorAll('.type-btn').forEach(b=>b.classList.toggle('active',b===btn));
-  const fieldsEl=document.getElementById(`fields-${id}-${idx}`);
-  const block=btn.closest('.detail-block');
-  block.dataset.type=type;
-  if(type==='new'){
-    fieldsEl.innerHTML=
-      field(id,idx,'first_name','First Name','text','')+
-      field(id,idx,'last_name','Last Name','text','')+
-      field(id,idx,'email','Email Address','email','Never used for this subscription before')+
-      field(id,idx,'username','Desired Username','text','At least 6 characters, never used before')+
-      field(id,idx,'password','Desired Password','password','8+ chars, 1 number, 1 capital, one of: - _ . # @');
-  } else {
-    fieldsEl.innerHTML=
-      field(id,idx,'login_username','Username or Email (existing login)','text','')+
-      field(id,idx,'login_password','Password (existing login)','password','');
-  }
+  btn.parentElement.querySelectorAll('.tbtn').forEach(b=>b.classList.toggle('active',b===btn));
+  const w=btn.closest('.dblock'); w.dataset.type=type;
+  document.getElementById(`ff-${id}-${idx}`).innerHTML=type==='new'?newFields(id,idx):renewFields(id,idx);
 }
 
-// ── Validation ──────────────────────────────────────────
+// ── Validation ─────────────────────────────────────────────────
 function validateDetails(){
   let ok=true;
-  document.querySelectorAll('.detail-block').forEach(block=>{
-    const id=block.dataset.id;
-    const idx=parseInt(block.dataset.idx||0);
-    const isImd = IMD_IDS.has(id);
-    const type  = block.dataset.type || (id.startsWith('imd_new')?'new':id.startsWith('imd_renew')?'renew':'new');
-
+  document.querySelectorAll('.dblock').forEach(block=>{
+    const id=block.dataset.id, idx=parseInt(block.dataset.idx||0);
+    const isImdNew=id.startsWith('imd_new'), isImdRenew=id.startsWith('imd_renew');
+    const type=block.dataset.type||(isImdNew?'new':isImdRenew?'renew':'new');
     block.querySelectorAll('input').forEach(inp=>{
-      const n=inp.name, v=inp.value.trim();
-      const errEl=document.getElementById('err-'+inp.id);
-      inp.classList.remove('err');
-      if(errEl) errEl.textContent='';
-
-      if(!v){
-        setErr(inp,'Required'); ok=false; return;
-      }
-      if(n==='email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)){
-        setErr(inp,'Enter a valid email'); ok=false; return;
-      }
-      if(n==='username' && v.length<6){
-        setErr(inp,'At least 6 characters'); ok=false; return;
-      }
-      if((n==='password'||n==='login_password') && type==='new'){
-        if(v.length<8){ setErr(inp,'At least 8 characters'); ok=false; return; }
-        if(!/[A-Z]/.test(v)){ setErr(inp,'Need at least one capital letter'); ok=false; return; }
-        if(!/[0-9]/.test(v)){ setErr(inp,'Need at least one number'); ok=false; return; }
-        if(!/[-_.#@]/.test(v)){ setErr(inp,'Need at least one symbol: - _ . # @'); ok=false; return; }
+      const n=inp.name,v=inp.value.trim();
+      const fe=document.getElementById('e-'+inp.id);
+      inp.classList.remove('err'); if(fe) fe.textContent='';
+      if(!v){setErr(inp,'Required');ok=false;return;}
+      if(n==='email'&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)){setErr(inp,'Enter a valid email');ok=false;return;}
+      if(n==='username'&&v.length<6){setErr(inp,'At least 6 characters');ok=false;return;}
+      if((n==='password'||n==='login_password')&&type==='new'){
+        if(v.length<8){setErr(inp,'At least 8 characters');ok=false;return;}
+        if(!/[A-Z]/.test(v)){setErr(inp,'Need a capital letter');ok=false;return;}
+        if(!/[0-9]/.test(v)){setErr(inp,'Need a number');ok=false;return;}
+        if(!/[-_.#@]/.test(v)){setErr(inp,'Need a symbol: - _ . # @');ok=false;return;}
       }
     });
   });
-  if(!ok) showToast('Please fix the highlighted fields');
+  if(!ok) showToast('Fix highlighted fields');
   return ok;
 }
-
 function setErr(inp,msg){
   inp.classList.add('err');
-  const el=document.getElementById('err-'+inp.id);
-  if(el){ el.textContent=msg; }
+  const el=document.getElementById('e-'+inp.id);
+  if(el) el.textContent=msg;
 }
 
-// ── Payment page ────────────────────────────────────────
+// ── Payment page ───────────────────────────────────────────────
 function buildPaymentPage(){
   const total=cartTotal();
   const methods=[
-    {id:'stars',  icon:'⭐', label:'Telegram Stars', sub:'Pay with Stars'},
-    {id:'credits',icon:'🎁', label:'My Credits',     sub:'Use earned credits'},
-    {id:'card',   icon:'💳', label:'Visa / Mastercard', sub:'Pay online'},
-    {id:'local',  icon:'🌍', label:'Local Transfer', sub:'9 countries'},
-    {id:'crypto', icon:'₿',  label:'Cryptocurrency', sub:'USDT, BTC, more'},
+    {id:'stars',  ico:'⭐',lbl:'Telegram Stars',   sub:'Pay with Stars'},
+    {id:'credits',ico:'🎁',lbl:'My Credits',        sub:'Use earned credits'},
+    {id:'card',   ico:'💳',lbl:'Visa/Mastercard',   sub:'Pay online'},
+    {id:'local',  ico:'🌍',lbl:'Local Transfer',    sub:'9 countries'},
+    {id:'crypto', ico:'₿', lbl:'Cryptocurrency',    sub:'USDT, BTC, more'},
   ];
-  const el=document.getElementById('payMethods');
-  el.innerHTML='';
+  const grid=document.getElementById('pmGrid');
+  grid.innerHTML='';
   methods.forEach(m=>{
-    const c=document.createElement('div');
-    c.className='pay-card'; c.dataset.id=m.id;
-    c.innerHTML=`<div class="icon">${m.icon}</div><div class="label">${m.label}</div><div class="sub">${m.sub}</div>`;
-    c.onclick=()=>selectPayMethod(m.id, total);
-    el.appendChild(c);
+    const d=document.createElement('div');
+    d.className='pm'; d.dataset.id=m.id;
+    d.innerHTML=`<div class="ico">${m.ico}</div><div class="lbl">${m.lbl}</div><div class="sub">${m.sub}</div>`;
+    d.onclick=()=>selMethod(m.id,total);
+    grid.appendChild(d);
   });
-
-  // Order summary
-  const sumEl=document.getElementById('orderSummary');
-  let rows=Object.entries(cart).map(([id,{name,price,qty}])=>
-    `<div class="summary-row"><div>${name}${qty>1?' ×'+qty:''}</div><div class="right">$${(price*qty).toFixed(2)}</div></div>`
-  ).join('');
-  rows+=`<div class="summary-row"><div>Total</div><div class="right">$${total.toFixed(2)}</div></div>`;
-  sumEl.innerHTML=rows;
-
-  selPayMethod=null; selCountry=null; selUsaApp=null;
-  document.getElementById('payDetail').innerHTML='';
+  const sc=document.getElementById('sumCard');
+  sc.innerHTML=Object.entries(cart).map(([id,{name,price,qty}])=>
+    `<div class="sumrow"><div>${name}${qty>1?` ×${qty}`:''}</div><div class="r">$${(price*qty).toFixed(2)}</div></div>`
+  ).join('')+`<div class="sumrow"><div>Total</div><div class="r">$${total.toFixed(2)}</div></div>`;
+  selPay=null;selCountry=null;selApp=null;
+  document.getElementById('pmDetail').innerHTML='';
   document.getElementById('submitBtn').style.display='none';
 }
 
-function selectPayMethod(id, total){
-  selPayMethod=id; selCountry=null; selUsaApp=null;
-  document.querySelectorAll('.pay-card').forEach(c=>c.classList.toggle('selected',c.dataset.id===id));
-  const detEl=document.getElementById('payDetail');
-  const submitBtn=document.getElementById('submitBtn');
-
+function selMethod(id,total){
+  selPay=id;selCountry=null;selApp=null;
+  document.querySelectorAll('.pm').forEach(c=>c.classList.toggle('sel',c.dataset.id===id));
+  const det=document.getElementById('pmDetail');
+  const sub=document.getElementById('submitBtn');
   if(id==='stars'){
-    detEl.innerHTML=`<div class="pay-detail visible">⭐ You'll be charged via Telegram Stars after placing the order. The payment will be processed directly and your subscription set up immediately.</div>`;
-    submitBtn.textContent='Place Order & Pay with Stars ⭐';
-    submitBtn.style.display='block';
+    det.innerHTML=`<div class="pdtl on">⭐ You'll receive a Stars invoice after placing the order and pay directly in Telegram.</div>`;
+    sub.textContent='Place Order → Pay with Stars ⭐'; sub.style.display='block';
   } else if(id==='credits'){
-    detEl.innerHTML=`<div class="pay-detail visible">🎁 Your earned referral credits will be used to pay. If you don't have enough, we'll let you know.<br><br>Credits needed: ${Math.ceil(total/4)} credit${Math.ceil(total/4)!==1?'s':''} ($4 each)</div>`;
-    submitBtn.textContent='Pay with Credits 🎁';
-    submitBtn.style.display='block';
+    const need=Math.ceil(total/4);
+    det.innerHTML=`<div class="pdtl on">🎁 ${need} credit${need!==1?'s':''} needed ($4 each). If you don't have enough, the bot will let you know.</div>`;
+    sub.textContent='Pay with Credits 🎁'; sub.style.display='block';
   } else if(id==='card'){
-    detEl.innerHTML=`<div class="pay-detail visible"><strong>How to pay:</strong><br>
-      1. Tap "Open Payment Link" below<br>
+    det.innerHTML=`<div class="pdtl on">
+      1. Tap the link: <a href="https://payments.suyool.com/pay/g401_MD" target="_blank" style="color:var(--teal2)">Open Payment Link ↗</a><br>
       2. Choose "Pay online with your card"<br>
-      3. From whom: your name · Amount: <strong>$${total.toFixed(2)}</strong> · Message: leave empty<br>
-      4. Enter your card details and complete<br><br>
-      <a href="https://payments.suyool.com/pay/g401_MD" target="_blank" style="color:var(--teal2)">→ Open Payment Link</a>
+      3. From: your name · Amount: <strong>$${total.toFixed(2)}</strong> · Message: empty<br>
+      4. Enter card details and complete
     </div>`;
-    submitBtn.textContent="I've Paid ✅";
-    submitBtn.style.display='block';
+    sub.textContent="I've Paid ✅"; sub.style.display='block';
   } else if(id==='local'){
     const countries=Object.keys(RATES);
-    detEl.innerHTML=`<div class="sect-label" style="margin-top:0">Select your country</div>
-      <div class="country-grid">${countries.map(c=>`<div class="country-btn" data-c="${c}" onclick="selectCountry('${c}',${total})">${FLAGS[c]||''} ${c}</div>`).join('')}</div>
-      <div id="localDetail"></div>`;
-    submitBtn.style.display='none';
+    det.innerHTML=`<div class="sl" style="margin-top:0">Select your country</div>
+      <div class="cg">${countries.map(c=>`<div class="cb" data-c="${c}" onclick="selCountryFn('${c}',${total})">${FLAGS[c]||''} ${c}</div>`).join('')}</div>
+      <div id="lclDtl"></div>`;
+    sub.style.display='none';
   } else if(id==='crypto'){
-    detEl.innerHTML=`<div class="pay-detail visible"><strong>Crypto wallets:</strong><br><br>
-      USDT BEP20: <span class="mono">0x4ccff0e89e4ee00e96ae6e15e3b5e12fa0c66b20</span><br><br>
-      USDT TRC20: <span class="mono">TBdXHpNMWsGDUTeTCBQkbJzamxvgW2hHyj</span><br><br>
-      BTC: <span class="mono">bc1q2ccf4yzptwtdmnfdwuphvefmksy4ry2lylfhrj</span><br><br>
-      Bybit / OKX / BingX UID: <span class="mono">306834837</span><br><br>
-      <strong>Amount: $${total.toFixed(2)}</strong><br>
-      Click *I've Paid* after completing the transfer.
+    det.innerHTML=`<div class="pdtl on">
+      <strong>USDT BEP20:</strong><br><span class="mono">0x4ccff0e89e4ee00e96ae6e15e3b5e12fa0c66b20</span><br><br>
+      <strong>USDT TRC20:</strong><br><span class="mono">TBdXHpNMWsGDUTeTCBQkbJzamxvgW2hHyj</span><br><br>
+      <strong>BTC:</strong><br><span class="mono">bc1q2ccf4yzptwtdmnfdwuphvefmksy4ry2lylfhrj</span><br><br>
+      <strong>Bybit/OKX/BingX UID:</strong> <span class="mono">306834837</span><br><br>
+      Amount: <strong>$${total.toFixed(2)}</strong>
     </div>`;
-    submitBtn.textContent="I've Paid ✅";
-    submitBtn.style.display='block';
+    sub.textContent="I've Paid ✅"; sub.style.display='block';
   }
 }
 
-function selectCountry(country, total){
-  selCountry=country; selUsaApp=null;
-  document.querySelectorAll('.country-btn').forEach(b=>b.classList.toggle('selected',b.dataset.c===country));
-  const detEl=document.getElementById('localDetail');
-
-  if(country==='USA'){
-    const apps=Object.keys(USA_APPS);
-    detEl.innerHTML=`<div class="sect-label">Choose app</div>
-      <div class="country-grid">${apps.map(a=>`<div class="country-btn" data-a="${a}" onclick="selectUsaApp('${a}')">${a}</div>`).join('')}</div>
-      <div id="usaAppDetail"></div>`;
+function selCountryFn(c,total){
+  selCountry=c; selApp=null;
+  document.querySelectorAll('.cb').forEach(b=>b.classList.toggle('sel',b.dataset.c===c));
+  const det=document.getElementById('lclDtl');
+  if(c==='USA'){
+    det.innerHTML=`<div class="sl">Choose app</div>
+      <div class="cg">${Object.keys(USA_APPS).map(a=>`<div class="cb" data-a="${a}" onclick="selAppFn('${a}')">${a}</div>`).join('')}</div>
+      <div id="appDtl"></div>`;
     document.getElementById('submitBtn').style.display='none';
   } else {
-    const instr = PAY_INSTRUCTIONS[country] ? PAY_INSTRUCTIONS[country](total) : `Pay $${total.toFixed(2)} to our local account in ${country}.`;
-    detEl.innerHTML=`<div class="pay-detail visible">${instr}</div>`;
-    document.getElementById('submitBtn').textContent="I've Paid ✅";
-    document.getElementById('submitBtn').style.display='block';
+    det.innerHTML=`<div class="pdtl on">${payInstructions(c,total)}</div>`;
+    const sub=document.getElementById('submitBtn');
+    sub.textContent="I've Paid ✅"; sub.style.display='block';
   }
 }
 
-function selectUsaApp(app){
-  selUsaApp=app;
-  document.querySelectorAll('[data-a]').forEach(b=>b.classList.toggle('selected',b.dataset.a===app));
+function selAppFn(a){
+  selApp=a;
+  document.querySelectorAll('[data-a]').forEach(b=>b.classList.toggle('sel',b.dataset.a===a));
   const total=cartTotal();
-  document.getElementById('usaAppDetail').innerHTML=`<div class="pay-detail visible">${USA_APPS[app]||''}<br><br><strong>Amount: $${total.toFixed(2)}</strong></div>`;
-  document.getElementById('submitBtn').textContent="I've Paid ✅";
-  document.getElementById('submitBtn').style.display='block';
+  document.getElementById('appDtl').innerHTML=`<div class="pdtl on">${USA_APPS[a]||''}<br><br>Amount: <strong>$${total.toFixed(2)}</strong></div>`;
+  const sub=document.getElementById('submitBtn');
+  sub.textContent="I've Paid ✅"; sub.style.display='block';
 }
 
-// ── Collect item details ────────────────────────────────
-function collectItemDetails(){
-  const itemDetails=[];
-  document.querySelectorAll('.detail-block').forEach(block=>{
-    const id=block.dataset.id;
-    const idx=parseInt(block.dataset.idx||0);
-    const isImdNew   = id.startsWith('imd_new');
-    const isImdRenew = id.startsWith('imd_renew');
-    const type = block.dataset.type || (isImdNew?'new':isImdRenew?'renew':'new');
-
-    const detail={id, account_type: type};
-    block.querySelectorAll('input').forEach(inp=>{
-      if(inp.value.trim()) detail[inp.name]=inp.value.trim();
-    });
-    itemDetails.push(detail);
+// ── Collect + submit ───────────────────────────────────────────
+function collectDetails(){
+  const out=[];
+  document.querySelectorAll('.dblock').forEach(block=>{
+    const id=block.dataset.id, idx=parseInt(block.dataset.idx||0);
+    const isImdNew=id.startsWith('imd_new'), isImdRenew=id.startsWith('imd_renew');
+    const type=block.dataset.type||(isImdNew?'new':isImdRenew?'renew':'new');
+    const entry={id,account_type:type};
+    block.querySelectorAll('input').forEach(inp=>{if(inp.value.trim()) entry[inp.name]=inp.value.trim();});
+    out.push(entry);
   });
-  return itemDetails;
+  return out;
 }
 
-// ── Submit order ────────────────────────────────────────
 function submitOrder(){
-  if(!selPayMethod){ showToast('Choose a payment method'); return; }
-  if(selPayMethod==='local' && !selCountry){ showToast('Choose your country'); return; }
-  if(selPayMethod==='local' && selCountry==='USA' && !selUsaApp){ showToast('Choose a transfer app'); return; }
-
-  const items = collectItemDetails();
-  const total = cartTotal();
-
-  let payMethod = selPayMethod;
-  if(selPayMethod==='local') payMethod = selCountry + (selUsaApp ? ' — '+selUsaApp : '');
-
-  const payload = JSON.stringify({
-    action: 'full_order',
-    items,
-    payment_method: payMethod,
-    total,
-  });
-
-  tg.sendData(payload);
+  if(!selPay){showToast('Choose a payment method');return;}
+  if(selPay==='local'&&!selCountry){showToast('Choose your country');return;}
+  if(selPay==='local'&&selCountry==='USA'&&!selApp){showToast('Choose a transfer app');return;}
+  let pay=selPay;
+  if(selPay==='local') pay=selCountry+(selApp?' — '+selApp:'');
+  tg.sendData(JSON.stringify({
+    action:'full_order',
+    items:collectDetails(),
+    payment_method:pay,
+    total:cartTotal(),
+  }));
 }
 
-// ── Toast ───────────────────────────────────────────────
+// ── Toast ──────────────────────────────────────────────────────
 let _tt;
 function showToast(msg){
   const el=document.getElementById('toast');
-  el.textContent=msg; el.classList.add('show');
-  clearTimeout(_tt); _tt=setTimeout(()=>el.classList.remove('show'),1800);
+  el.textContent=msg; el.classList.add('on');
+  clearTimeout(_tt); _tt=setTimeout(()=>el.classList.remove('on'),1900);
 }
 
-// ── Init ────────────────────────────────────────────────
+// ── Main button ────────────────────────────────────────────────
+tg.MainButton.onClick(submitOrder);
+
+// ── Init ───────────────────────────────────────────────────────
 buildCatalog();
-
-// Add My Orders tab after catalog tabs are built
-(function(){
-  const tabsEl = document.getElementById('tabs');
-  const secEl  = document.getElementById('catSections');
-
-  // Tab
-  const tab = document.createElement('button');
-  tab.className = 'tab';
-  tab.textContent = '📋 My Orders';
-  tab.onclick = () => openMyOrders();
-  tabsEl.appendChild(tab);
-
-  // Section placeholder
-  const sec = document.createElement('div');
-  sec.id = 'cat-myorders';
-  sec.style.display = 'none';
-  sec.innerHTML = `
-    <div style="text-align:center;padding:40px 20px">
-      <div style="font-size:48px;margin-bottom:16px">📋</div>
-      <h3 style="margin-bottom:8px">Your Subscriptions</h3>
-      <p style="color:var(--hint);font-size:13px;line-height:1.6;margin-bottom:20px">
-        Tap below to see your delivered subscriptions in the chat.
-      </p>
-      <button class="btn-primary" style="max-width:260px;margin:0 auto;display:block"
-        onclick="viewMyOrders()">View My Subscriptions</button>
-    </div>`;
-  secEl.appendChild(sec);
-})();
-
-function openMyOrders(){
-  document.querySelectorAll('.tabs .tab').forEach(t=>t.classList.remove('active'));
-  document.querySelectorAll('.tabs .tab').forEach((t,i)=>{
-    if(t.textContent.includes('My Orders')) t.classList.add('active');
-  });
-  CATALOG.forEach(c=>{ const el=document.getElementById('cat-'+c.id); if(el) el.style.display='none'; });
-  document.getElementById('cat-myorders').style.display='block';
-  document.getElementById('pageTitle').textContent = 'My Orders';
-  tg.MainButton.hide();
-}
-
-function viewMyOrders(){
-  tg.sendData(JSON.stringify({ action: 'view_subscriptions' }));
-}
 </script>
 </body>
 </html>

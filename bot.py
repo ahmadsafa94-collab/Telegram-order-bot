@@ -5874,12 +5874,11 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     action = data.get("action")
     if action == "view_subscriptions":
-        # Customer tapped "My Orders" in the Mini App — send their delivered
-        # subscriptions as a message in the bot chat.
         delivered = db_user_delivered_units(user_id)
         if not delivered:
             await update.message.reply_text(
-                "You don't have any delivered subscriptions yet.",
+                "You don't have any delivered subscriptions yet.\n\n"
+                "Once your orders are processed, they'll appear here.",
                 reply_markup=main_menu_keyboard(user_id),
             )
             return
@@ -5889,7 +5888,29 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             date = delivered_at[:10] if delivered_at else ""
             lines.append(f"✅ {name}" + (f" — {date}" if date else ""))
         await update.message.reply_text(
-            "📋 Your subscriptions:\n\n" + "\n".join(lines),
+            "📋 Your delivered subscriptions:\n\n" + "\n".join(lines),
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return
+
+    if action == "view_pending":
+        pending = db_user_pending_items(user_id)
+        if not pending:
+            await update.message.reply_text(
+                "You have no pending orders right now.",
+                reply_markup=main_menu_keyboard(user_id),
+            )
+            return
+        lines = []
+        for fid, oid, item_id, unit_no, state in pending:
+            name = MENU.get(item_id, (item_id,))[0]
+            state_label = {
+                "needs_info": "⌛ Waiting for your details",
+                "awaiting_delivery": "🔄 Being prepared",
+            }.get(state, "⏳ In progress")
+            lines.append(f"{state_label}: {name}")
+        await update.message.reply_text(
+            "⏳ Your pending orders:\n\n" + "\n".join(lines),
             reply_markup=main_menu_keyboard(user_id),
         )
         return
