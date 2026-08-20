@@ -29,10 +29,7 @@ DB needed to get started.
 """
 
 import asyncio
-import hashlib
-import hmac
 import json
-import urllib.parse
 import logging
 import os
 import math
@@ -84,12 +81,6 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed.
 # If running locally or on another host, set BOT_API_URL manually.
-PORT = int(os.environ.get("PORT", "8080"))
-_RAILWAY_DOMAIN = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
-BOT_API_URL = (
-    f"https://{_RAILWAY_DOMAIN}" if _RAILWAY_DOMAIN
-    else os.environ.get("BOT_API_URL", "")
-)
 
 # Private "Subscriptions" channel — every subscription actually delivered
 # to a customer is posted here (product, login, date, customer).
@@ -1354,86 +1345,6 @@ def db_load_book_menu_items():
 # MINI APP HTTP API  (aiohttp, runs alongside the bot in the same loop)
 # ------------------------------------------------------------------
 
-def validate_telegram_webapp(init_data: str) -> int | None:
-    """Validates the Telegram WebApp initData string and returns the user's
-    Telegram ID if genuine, or None if the data is forged / missing."""
-    try:
-        params = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
-        check_hash = params.pop("hash", None)
-        if not check_hash:
-            return None
-        data_check = "\n".join(f"{k}={v}" for k, v in sorted(params.items()))
-        secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-        expected   = hmac.new(secret_key, data_check.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected, check_hash):
-            return None
-        user_data = json.loads(params.get("user", "{}"))
-        return user_data.get("id")
-    except Exception:
-        return None
-
-
-def make_web_app():
-    """Builds the aiohttp Application that handles Mini App API calls."""
-    from aiohttp import web
-
-    @web.middleware
-    async def cors(request, handler):
-        response = await handler(request)
-        response.headers["Access-Control-Allow-Origin"]  = "*"
-        response.headers["Access-Control-Allow-Headers"] = (
-            "X-Telegram-Init-Data, Content-Type"
-        )
-        return response
-
-    async def handle_options(request):
-        from aiohttp import web as _web
-        return _web.Response(
-            headers={
-                "Access-Control-Allow-Origin":  "*",
-                "Access-Control-Allow-Headers": "X-Telegram-Init-Data, Content-Type",
-                "Access-Control-Allow-Methods": "GET, OPTIONS",
-            }
-        )
-
-    async def handle_subs(request):
-        from aiohttp import web as _web
-        init_data = request.headers.get("X-Telegram-Init-Data", "")
-        user_id   = validate_telegram_webapp(init_data)
-        if not user_id:
-            return _web.json_response({"error": "Unauthorized"}, status=401)
-
-        delivered = db_user_delivered_units(user_id)
-        pending   = db_user_pending_items(user_id)
-
-        return _web.json_response({
-            "delivered": [
-                {
-                    "name": MENU.get(iid, (iid,))[0],
-                    "date": dat[:10] if dat else "",
-                }
-                for _, iid, dat in delivered
-            ],
-            "pending": [
-                {
-                    "name": MENU.get(iid, (iid,))[0],
-                    "state": state,
-                }
-                for fid, oid, iid, unit_no, state in pending
-            ],
-        })
-
-    async def handle_health(request):
-        from aiohttp import web as _web
-        return _web.Response(text="ok")
-
-    webapp = web.Application(middlewares=[cors])
-    webapp.router.add_get("/api/subs",   handle_subs)
-    webapp.router.add_get("/health",     handle_health)
-    webapp.router.add_options("/api/subs", handle_options)
-    return webapp
-
-
 def generate_item_id(name: str) -> str:
     """Slugifies a subscription name into an item_id, guaranteed unique
     against whatever's currently in MENU (adds a numeric suffix on
@@ -1919,14 +1830,32 @@ def _badge(label: str, count: int) -> str:
     return f"{label} 🔴{count}" if count > 0 else label
 
 
-def _shop_url() -> str:
-    """Builds the Mini App URL, appending the API endpoint so the Mini App
-    can fetch subscription data without a separate configuration step."""
+def _shop_url(user_id: int = 0) -> str:
+    """Builds the Mini App URL. When user_id is known, subscription data is
+    encoded as a base64 JSON fragment (#...) so the Mini App can display
+    it without any HTTP API call — no server required, no CORS, and the
+    data is never sent to GitHub Pages since URL fragments stay local."""
     if not MINI_APP_URL:
         return ""
-    if BOT_API_URL:
-        return f"{MINI_APP_URL}?api={urllib.parse.quote(BOT_API_URL, safe='')}"
-    return MINI_APP_URL
+    if not user_id:
+        return MINI_APP_URL
+    try:
+        import base64
+        delivered = db_user_delivered_units(user_id)
+        pending   = db_user_pending_items(user_id)
+        data = {
+            "d": [{"n": MENU.get(iid, (iid,))[0], "dt": (dat[:10] if dat else "")}
+                  for _, iid, dat in delivered],
+            "p": [{"n": MENU.get(iid, (iid,))[0], "s": state}
+                  for fid, oid, iid, unit_no, state in pending],
+        }
+        encoded = base64.urlsafe_b64encode(
+            json.dumps(data, separators=(",", ":")).encode()
+        ).decode().rstrip("=")
+        return f"{MINI_APP_URL}#{encoded}"
+    except Exception:
+        logger.exception("Failed to encode subscription data in Mini App URL")
+        return MINI_APP_URL
 
 
 def main_menu_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
@@ -1935,7 +1864,7 @@ def main_menu_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
     (Buy, Basket) are removed since they're inside the app. My Subscriptions
     stays on its own row in both modes so it's always easy to find."""
     ann_count = db_unseen_announcement_count(user_id) if user_id else 0
-    shop_url  = _shop_url()
+    shop_url  = _shop_url(user_id)
 
     if shop_url:
         return ReplyKeyboardMarkup(
@@ -6209,20 +6138,8 @@ def main():
         MENU[item_id] = (name, price)
 
     async def post_init(application):
-        """Called once after the bot connects. Starts the HTTP API server
-        (so the Mini App can fetch subscription data) and resets the
-        bottom-left menu button so only the keyboard Shop button is used."""
-        # Start the aiohttp API server — runs in the same event loop as
-        # the bot, so no extra thread or process needed.
-        try:
-            from aiohttp import web
-            runner = web.AppRunner(make_web_app())
-            await runner.setup()
-            await web.TCPSite(runner, "0.0.0.0", PORT).start()
-            logger.info("Mini App API server started on port %s", PORT)
-        except Exception:
-            logger.exception("Failed to start API server")
-
+        """Resets the bottom-left menu button so customers use the
+        🏪 Shop keyboard button (the only one that supports sendData)."""
         try:
             from telegram import MenuButtonDefault
             await application.bot.set_chat_menu_button(menu_button=MenuButtonDefault())

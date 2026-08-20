@@ -14,84 +14,73 @@
   --acc:  var(--tg-theme-button-color,#3b82f6);
   --atxt: var(--tg-theme-button-text-color,#fff);
   --teal: #0d9488; --teal2:#14b8a6;
-  --red:  #ef4444; --green:#22c55e;
+  --red:  #ef4444;
   --r:14px;
 }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   background:var(--bg);color:var(--text);min-height:100vh;padding-bottom:100px}
 
-/* ── Header ───────────────────────────── */
-.hdr{
-  background:var(--bg2);border-bottom:1px solid rgba(255,255,255,.07);
-  position:sticky;top:0;z-index:200;
-}
-.hdr-top{
-  display:flex;align-items:center;gap:10px;padding:13px 14px 8px;
-}
-.logo{
-  width:36px;height:36px;border-radius:10px;flex-shrink:0;
+/* ── Header ─────────────────── */
+.hdr{background:var(--bg2);border-bottom:1px solid rgba(255,255,255,.07);
+  position:sticky;top:0;z-index:200}
+.hdr-top{display:flex;align-items:center;gap:8px;padding:12px 13px 8px}
+.logo{width:36px;height:36px;border-radius:10px;flex-shrink:0;
   background:linear-gradient(135deg,var(--teal),#0284c7);
-  display:flex;align-items:center;justify-content:center;font-size:19px;
-}
+  display:flex;align-items:center;justify-content:center;font-size:19px}
 .hdr-title{flex:1;min-width:0}
-.hdr-title h1{font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hdr-title h1{font-size:15px;font-weight:700}
 .hdr-title p{font-size:10px;color:var(--hint);margin-top:1px}
-
-/* Basket button — always in header top-right */
-.basket-btn{
-  position:relative;background:var(--acc);color:var(--atxt);border:none;
-  border-radius:12px;padding:7px 12px;font-size:13px;font-weight:700;
-  cursor:pointer;display:flex;align-items:center;gap:5px;flex-shrink:0;
-  transition:opacity .15s;min-width:52px;justify-content:center;
+.hdr-icons{display:flex;gap:8px;flex-shrink:0}
+.ico-btn{
+  position:relative;width:40px;height:40px;border-radius:12px;border:none;
+  background:rgba(255,255,255,.08);color:var(--text);font-size:18px;
+  display:flex;align-items:center;justify-content:center;cursor:pointer;
+  transition:background .15s;flex-shrink:0;
 }
-.basket-btn:active{opacity:.82}
-.basket-count{
-  position:absolute;top:-6px;right:-6px;
+.ico-btn:active{background:rgba(255,255,255,.15)}
+.ico-badge{
+  position:absolute;top:-5px;right:-5px;
   background:var(--red);color:#fff;border-radius:99px;
-  min-width:18px;height:18px;font-size:10px;font-weight:700;
+  min-width:17px;height:17px;font-size:10px;font-weight:700;
   display:flex;align-items:center;justify-content:center;padding:0 4px;
-  opacity:0;transition:opacity .2s;
+  opacity:0;transition:opacity .2s;pointer-events:none;
 }
-.basket-count.vis{opacity:1}
+.ico-badge.vis{opacity:1}
+.ico-btn.acc{background:var(--acc)}
 
-/* ── Wizard step bar ─────────────────── */
-.steps{display:flex;padding:8px 14px 10px}
+/* ── Step bar ───────────────── */
+.steps{display:flex;padding:8px 13px 10px}
 .step{flex:1;text-align:center;position:relative}
 .step::after{content:'';position:absolute;top:11px;left:50%;right:-50%;
   height:2px;background:rgba(255,255,255,.09);z-index:0}
 .step:last-child::after{display:none}
-.step-dot{
-  width:22px;height:22px;border-radius:50%;border:2px solid rgba(255,255,255,.15);
+.step-dot{width:22px;height:22px;border-radius:50%;border:2px solid rgba(255,255,255,.15);
   background:var(--bg);display:flex;align-items:center;justify-content:center;
   margin:0 auto 3px;font-size:10px;font-weight:700;color:var(--hint);
-  position:relative;z-index:1;transition:all .2s;
-}
+  position:relative;z-index:1;transition:all .2s}
 .step.done .step-dot{background:var(--teal);border-color:var(--teal);color:#fff}
 .step.active .step-dot{background:var(--acc);border-color:var(--acc);color:#fff}
 .step-lbl{font-size:10px;color:var(--hint);transition:color .2s}
 .step.active .step-lbl{color:var(--text)}
 
-/* ── Pages ────────────────────────────── */
-.page{display:none;padding:14px}
+/* ── Pages ──────────────────── */
+.page{display:none;padding:13px}
 .page.on{display:block}
 
-/* ── Section label ───────────────────── */
 .sl{font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;
-  color:var(--hint);margin:14px 0 8px}
+  color:var(--hint);margin:13px 0 7px}
 .sl:first-child{margin-top:0}
 
-/* ── Tabs ─────────────────────────────── */
+/* ── Catalog tabs ───────────── */
 .tabs{display:flex;gap:7px;padding:10px 0 4px;overflow-x:auto;scrollbar-width:none}
 .tabs::-webkit-scrollbar{display:none}
-.tab{
-  flex-shrink:0;padding:6px 12px;border-radius:99px;
+.tab{flex-shrink:0;padding:6px 12px;border-radius:99px;
   border:1.5px solid rgba(255,255,255,.12);font-size:12px;font-weight:500;
-  color:var(--hint);cursor:pointer;background:transparent;transition:all .15s;
-}
+  color:var(--hint);cursor:pointer;background:transparent;transition:all .15s}
 .tab.active{border-color:var(--teal);background:rgba(13,148,136,.15);color:var(--teal2)}
 
-/* ── Item card (inside tier group) ────── */
+/* ── Item rows ──────────────── */
 .card{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);margin-bottom:10px;overflow:hidden}
 .row{display:flex;align-items:center;gap:10px;padding:11px 13px;border-bottom:1px solid rgba(255,255,255,.05)}
 .row:last-child{border-bottom:none}
@@ -99,41 +88,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .rn{font-size:13px;font-weight:500;line-height:1.3}
 .rs{font-size:11px;color:var(--hint);margin-top:1px}
 .rp{font-size:14px;font-weight:700;color:var(--teal2);flex-shrink:0}
-.add-btn{
-  width:28px;height:28px;border-radius:50%;border:none;background:var(--acc);
+.add-btn{width:28px;height:28px;border-radius:50%;border:none;background:var(--acc);
   color:var(--atxt);font-size:17px;display:flex;align-items:center;justify-content:center;
-  cursor:pointer;flex-shrink:0;margin-left:8px;transition:all .15s;
-}
+  cursor:pointer;flex-shrink:0;margin-left:8px;transition:all .15s}
 .add-btn:active{transform:scale(.88)}
 .add-btn.in{background:var(--teal)}
-
-/* Standalone card */
-.solo{
-  display:flex;align-items:center;gap:10px;padding:11px 13px;
+.solo{display:flex;align-items:center;gap:10px;padding:11px 13px;
   background:var(--bg2);border:1px solid rgba(255,255,255,.07);
-  border-radius:var(--r);margin-bottom:7px;
-}
+  border-radius:var(--r);margin-bottom:7px}
 
-/* ── Subscriptions tab ───────────────── */
-.sub-card{
-  background:var(--bg2);border:1px solid rgba(255,255,255,.07);
-  border-radius:var(--r);padding:18px 16px;margin-bottom:12px;text-align:center;
-}
-.sub-card .icon{font-size:36px;margin-bottom:10px}
-.sub-card h3{font-size:15px;font-weight:700;margin-bottom:6px}
-.sub-card p{font-size:12px;color:var(--hint);line-height:1.6;margin-bottom:14px}
-.sub-card button{
-  background:var(--acc);color:var(--atxt);border:none;border-radius:12px;
-  padding:11px 20px;font-size:13px;font-weight:700;cursor:pointer;width:100%;
-  transition:opacity .15s;
-}
-.sub-card button:active{opacity:.82}
-.sub-card.alt button{background:var(--teal)}
-
-/* ── Detail forms ────────────────────── */
+/* ── Detail forms ───────────── */
 .dblock{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);margin-bottom:12px;overflow:hidden}
-.dheader{padding:11px 13px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:8px}
-.dheader .rn{font-size:14px;font-weight:600}
+.dheader{padding:11px 13px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center}
 .ptag{margin-left:auto;color:var(--teal2);font-size:13px;font-weight:700;flex-shrink:0}
 .toggle{display:flex;border-radius:12px;overflow:hidden;border:1.5px solid rgba(255,255,255,.12);margin:11px 13px 4px}
 .tbtn{flex:1;border:none;background:transparent;color:var(--hint);padding:8px;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s}
@@ -141,111 +107,94 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .fields{padding:0 13px 13px}
 .field{margin-top:11px}
 .field label{font-size:10px;font-weight:700;color:var(--hint);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px}
-.field input{
-  width:100%;background:rgba(255,255,255,.06);border:1.5px solid rgba(255,255,255,.1);
-  border-radius:10px;padding:10px 11px;color:var(--text);font-size:13px;
-  outline:none;transition:border-color .15s;
-}
+.field input{width:100%;background:rgba(255,255,255,.06);border:1.5px solid rgba(255,255,255,.1);
+  border-radius:10px;padding:10px 11px;color:var(--text);font-size:13px;outline:none;transition:border-color .15s}
 .field input:focus{border-color:var(--acc)}
 .field input.err{border-color:var(--red)}
 .fhint{font-size:11px;color:var(--hint);margin-top:3px}
 .ferr{font-size:11px;color:var(--red);margin-top:3px;display:none}
 
-/* ── Payment cards ───────────────────── */
+/* ── Payment ─────────────────── */
 .pm-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
-.pm{
-  background:var(--bg2);border:2px solid rgba(255,255,255,.08);
-  border-radius:var(--r);padding:13px 9px;text-align:center;cursor:pointer;transition:all .15s;
-}
+.pm{background:var(--bg2);border:2px solid rgba(255,255,255,.08);border-radius:var(--r);
+  padding:13px 9px;text-align:center;cursor:pointer;transition:all .15s}
 .pm.sel{border-color:var(--acc);background:rgba(59,130,246,.08)}
 .pm .ico{font-size:22px;margin-bottom:5px}
 .pm .lbl{font-size:11px;font-weight:600}
 .pm .sub{font-size:10px;color:var(--hint);margin-top:1px}
-.pdtl{
-  background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);
-  padding:13px;margin-bottom:10px;line-height:1.8;font-size:12px;display:none;
-}
+.pdtl{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);
+  padding:13px;margin-bottom:10px;line-height:1.8;font-size:12px;display:none}
 .pdtl.on{display:block}
 .pdtl strong{color:var(--teal2)}
-.mono{
-  font-family:'SF Mono',Consolas,monospace;background:rgba(255,255,255,.08);
-  padding:2px 6px;border-radius:5px;cursor:pointer;transition:background .15s;
-  user-select:all;
-}
+.mono{font-family:'SF Mono',Consolas,monospace;background:rgba(255,255,255,.08);
+  padding:2px 6px;border-radius:5px;cursor:pointer;user-select:all;transition:background .15s}
 .mono:active{background:rgba(13,148,136,.3)}
 .cg{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:10px}
-.cb{
-  background:var(--bg2);border:2px solid rgba(255,255,255,.08);
-  border-radius:11px;padding:9px;text-align:center;cursor:pointer;
-  font-size:12px;transition:all .15s;
-}
+.cb{background:var(--bg2);border:2px solid rgba(255,255,255,.08);
+  border-radius:11px;padding:9px;text-align:center;cursor:pointer;font-size:12px;transition:all .15s}
 .cb.sel{border-color:var(--acc)}
 
-/* ── Summary ─────────────────────────── */
-.sumrow{
-  display:flex;justify-content:space-between;align-items:center;
-  padding:9px 13px;border-bottom:1px solid rgba(255,255,255,.05);font-size:13px;
-}
+/* ── Summary ─────────────────── */
+.sumrow{display:flex;justify-content:space-between;align-items:center;
+  padding:9px 13px;border-bottom:1px solid rgba(255,255,255,.05);font-size:13px}
 .sumrow:last-child{border-bottom:none;font-weight:700;font-size:14px}
 .sumrow .r{color:var(--teal2)}
 
-/* ── Buttons ─────────────────────────── */
-.btn{
-  width:100%;background:var(--acc);color:var(--atxt);border:none;
-  border-radius:var(--r);padding:14px;font-size:14px;font-weight:700;
-  cursor:pointer;transition:opacity .15s;margin-top:8px;
-}
+/* ── Buttons ─────────────────── */
+.btn{width:100%;background:var(--acc);color:var(--atxt);border:none;
+  border-radius:var(--r);padding:13px;font-size:14px;font-weight:700;
+  cursor:pointer;transition:opacity .15s;margin-top:8px}
 .btn:active{opacity:.82}
 .btn.sec{background:transparent;color:var(--hint);border:1.5px solid rgba(255,255,255,.12)}
+.btn.teal{background:var(--teal)}
 
-/* ── Basket slide-up sheet ───────────── */
-.overlay{
-  position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:300;
-  display:none;align-items:flex-end;
-}
+/* ── Slide-up sheets ─────────── */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:300;
+  display:none;align-items:flex-end}
 .overlay.on{display:flex}
-.sheet{
-  background:var(--bg2);border-radius:20px 20px 0 0;width:100%;
-  max-height:82vh;overflow-y:auto;padding:0 0 28px;
-}
-.sheet-handle{
-  width:38px;height:4px;background:rgba(255,255,255,.18);
-  border-radius:99px;margin:10px auto 14px;
-}
-.sheet-title{
-  font-size:16px;font-weight:700;padding:0 15px 11px;
-  border-bottom:1px solid rgba(255,255,255,.07);display:flex;align-items:center;gap:8px;
-}
-.ci{display:flex;align-items:center;padding:10px 15px;gap:10px;border-bottom:1px solid rgba(255,255,255,.05)}
+.sheet{background:var(--bg2);border-radius:20px 20px 0 0;width:100%;
+  max-height:84vh;overflow-y:auto;padding:0 0 32px}
+.sheet-handle{width:38px;height:4px;background:rgba(255,255,255,.18);
+  border-radius:99px;margin:10px auto 14px}
+.sheet-title{font-size:16px;font-weight:700;padding:0 15px 11px;
+  border-bottom:1px solid rgba(255,255,255,.07)}
+
+/* Basket items */
+.ci{display:flex;align-items:center;padding:10px 15px;gap:10px;
+  border-bottom:1px solid rgba(255,255,255,.05)}
 .ci-name{flex:1;font-size:13px;line-height:1.4}
 .ci-price{font-size:13px;font-weight:700;color:var(--teal2);flex-shrink:0}
-.rm{
-  width:26px;height:26px;border-radius:50%;border:none;
+.rm{width:26px;height:26px;border-radius:50%;border:none;
   background:rgba(239,68,68,.18);color:var(--red);font-size:16px;
-  display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;
-}
-.cart-total{
-  padding:12px 15px 4px;display:flex;justify-content:space-between;
-  font-size:14px;font-weight:700;
-}
+  display:flex;align-items:center;justify-content:center;cursor:pointer}
+.cart-total{padding:12px 15px 4px;display:flex;justify-content:space-between;font-size:14px;font-weight:700}
 .cart-total span:last-child{color:var(--teal2)}
-.empty-cart{text-align:center;padding:30px 16px;color:var(--hint);font-size:13px}
-.empty-cart .eico{font-size:36px;margin-bottom:10px}
+.empty-sheet{text-align:center;padding:32px 16px;color:var(--hint);font-size:13px}
+.empty-sheet .eico{font-size:36px;margin-bottom:10px}
 
-/* ── Toast ───────────────────────────── */
-.toast{
-  position:fixed;bottom:22px;left:50%;
+/* Subscription rows */
+.sub-row{display:flex;align-items:center;gap:10px;padding:11px 15px;
+  border-bottom:1px solid rgba(255,255,255,.05)}
+.sub-row:last-child{border-bottom:none}
+.sub-info{flex:1;min-width:0}
+.sub-name{font-size:13px;font-weight:500}
+.sub-meta{font-size:11px;color:var(--hint);margin-top:2px}
+.sub-icon{font-size:20px;flex-shrink:0}
+.sub-section-lbl{font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;
+  color:var(--hint);padding:10px 15px 4px}
+
+/* ── Toast ───────────────────── */
+.toast{position:fixed;bottom:22px;left:50%;
   transform:translateX(-50%) translateY(68px);
-  background:rgba(13,148,136,.9);color:#fff;padding:8px 15px;
+  background:rgba(13,148,136,.92);color:#fff;padding:8px 15px;
   border-radius:99px;font-size:12px;font-weight:600;white-space:nowrap;
-  transition:transform .25s cubic-bezier(.34,1.56,.64,1);z-index:999;pointer-events:none;
-}
+  transition:transform .25s cubic-bezier(.34,1.56,.64,1);z-index:999;pointer-events:none}
 .toast.on{transform:translateX(-50%) translateY(0)}
 </style>
 </head>
 <body>
 
-<!-- ── Header ──────────────────────────── -->
+<!-- Header -->
 <div class="hdr">
   <div class="hdr-top">
     <div class="logo">🏥</div>
@@ -253,25 +202,29 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
       <h1 id="hdrTitle">Medic SalesBot</h1>
       <p>Medical Subscription Store</p>
     </div>
-    <button class="basket-btn" onclick="openBasket()">
-      🧺
-      <div class="basket-count" id="bc">0</div>
-    </button>
+    <div class="hdr-icons">
+      <button class="ico-btn" title="My Subscriptions" onclick="openOrders()">
+        📋<div class="ico-badge vis" id="subsBadge" style="display:none">!</div>
+      </button>
+      <button class="ico-btn acc" title="Basket" onclick="openBasket()">
+        🧺<div class="ico-badge" id="bc">0</div>
+      </button>
+    </div>
   </div>
-  <div class="steps" id="stepsBar">
+  <div class="steps">
     <div class="step active" id="s1"><div class="step-dot">1</div><div class="step-lbl">Catalog</div></div>
     <div class="step" id="s2"><div class="step-dot">2</div><div class="step-lbl">Details</div></div>
     <div class="step" id="s3"><div class="step-dot">3</div><div class="step-lbl">Payment</div></div>
   </div>
 </div>
 
-<!-- ── Page 1: Catalog ──────────────────── -->
+<!-- Page 1: Catalog -->
 <div class="page on" id="p1">
   <div class="tabs" id="tabs"></div>
   <div id="catSec"></div>
 </div>
 
-<!-- ── Page 2: Details ─────────────────── -->
+<!-- Page 2: Details -->
 <div class="page" id="p2">
   <div class="sl">Account Details</div>
   <div id="detForms"></div>
@@ -279,7 +232,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   <button class="btn sec" onclick="goCatalog()">← Back to Catalog</button>
 </div>
 
-<!-- ── Page 3: Payment ─────────────────── -->
+<!-- Page 3: Payment -->
 <div class="page" id="p3">
   <div class="sl">Choose Payment Method</div>
   <div class="pm-grid" id="pmGrid"></div>
@@ -289,7 +242,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   <button class="btn sec" onclick="goDetails()">← Back</button>
 </div>
 
-<!-- ── Basket overlay ──────────────────── -->
+<!-- Basket sheet -->
 <div class="overlay" id="basketOverlay" onclick="if(event.target===this)closeBasket()">
   <div class="sheet">
     <div class="sheet-handle"></div>
@@ -298,20 +251,36 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   </div>
 </div>
 
+<!-- My Subscriptions sheet -->
+<div class="overlay" id="ordersOverlay" onclick="if(event.target===this)closeOrders()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">📋 My Subscriptions</div>
+    <div id="ordersContent"></div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
-// ── Config ─────────────────────────────────────────────────────
 const tg = window.Telegram.WebApp;
 tg.ready(); tg.expand();
 tg.setHeaderColor('secondary_bg_color');
 
-// API URL is passed as ?api= query parameter so the Mini App always knows
-// where to call without hardcoding it.
-const _params  = new URLSearchParams(window.location.search);
-const API_URL  = _params.get('api') || '';
+// ── Load subscription data from URL fragment ──────────────────────────
+// The bot encodes the user's subscriptions as base64 JSON in the URL fragment
+// (#...) when it builds the keyboard — no HTTP API call needed, no CORS issues.
+let SUBS_DATA = null;
+try {
+  const hash = window.location.hash.slice(1);
+  if (hash) {
+    const pad = '=='.slice(0, (4 - hash.length % 4) % 4);
+    const b64  = (hash + pad).replace(/-/g, '+').replace(/_/g, '/');
+    SUBS_DATA  = JSON.parse(atob(b64));
+  }
+} catch(e) { /* ignore parse errors */ }
 
-// ── Catalog data ────────────────────────────────────────────
+// ── Catalog data ──────────────────────────────────────────────────────
 const IMD = new Set(['imd_new_6m','imd_new_1y','imd_renew_6m','imd_renew_1y']);
 
 const CATALOG = [
@@ -367,385 +336,233 @@ const CATALOG = [
   ]},
 ];
 
-// Build a flat id→item lookup
 const IMAP = {};
 CATALOG.forEach(c=>{
   if(c.groups) c.groups.forEach(g=>g.items.forEach(i=>IMAP[i.id]=i));
   if(c.single) c.single.forEach(i=>IMAP[i.id]={...i,sub:'1 Year'});
 });
 
-// ── Payment data ─────────────────────────────────────────────
-const RATES = {Lebanon:['USD',1],Jordan:['JOD',0.716],India:['INR',94.5],
-  Ghana:['GHS',11.8],Pakistan:['PKR',280],Europe:['USD',1],
-  USA:['USD',1],KSA:['SAR',3.8],Russia:['RUB',85.5]};
-const FLAGS = {Lebanon:'🇱🇧',Jordan:'🇯🇴',India:'🇮🇳',Ghana:'🇬🇭',
+// ── Payment data ──────────────────────────────────────────────────────
+const FLAGS={Lebanon:'🇱🇧',Jordan:'🇯🇴',India:'🇮🇳',Ghana:'🇬🇭',
   Pakistan:'🇵🇰',Europe:'🇪🇺',USA:'🇺🇸',KSA:'🇸🇦',Russia:'🇷🇺'};
 
-function payInstructions(country,t){
-  const map = {
-    Lebanon:  `WhishMoney: <span class="mono">81666579</span><br>Amount: <strong>$${t.toFixed(2)}</strong>`,
-    Jordan:   `<strong>${(t*0.716).toFixed(3)} JOD</strong><br>CLIQ: <span class="mono">WKS777</span> (Orange · Waleed Shaqfeh)<br>CLIQ: <span class="mono">WKS999</span> (Etihad · Waleed Shaqfeh)<br>CLIQ: <span class="mono">WKS555</span> (Zain Cash · Shamalti)`,
-    India:    `UPI: <span class="mono">s4005194160889795@slc</span><br>Name: Shilpaben karetiya<br>Amount: <strong>₹${Math.round(t*94.5).toLocaleString()}</strong><br>⚠️ Leave remarks empty. Split if needed.`,
-    Ghana:    `<strong>${(t*11.8).toFixed(2)} GHS</strong><br>📲 <span class="mono">0257505632</span> MTN · Saibu Mahamadu<br>📲 <span class="mono">0204860754</span> Telecel · Saibu Mahamadu`,
-    Pakistan: `<strong>${Math.round(t*280).toLocaleString()} PKR</strong><br>Bank: HBL · Muhammad Bilal<br>Acc: <span class="mono">03577900871203</span><br>IBAN: <span class="mono">PK08HABB0003577900871203</span><br>Branch: TOTALAI`,
-    Europe:   `Revolut card: <span class="mono">5413525250267271</span><br>Name: Alijon Karimov · Tajikistan<br>Amount: <strong>$${t.toFixed(2)}</strong>`,
-    KSA:      `<strong>${(t*3.8).toFixed(2)} SAR</strong><br>IBAN: <span class="mono">SA8710000006857309000101</span><br>IBAN: <span class="mono">SA0510000062300187719603</span><br>Bank: Ahli · Jamil Hajji<br><strong>Purpose: Friends & family</strong>`,
-    Russia:   `<strong>${Math.round(t*85.5).toLocaleString()} RUB</strong><br>Sberbank → Int'l → Phone: <span class="mono">+992002373232</span><br>Tajikistan · Alijon Karimov · Alif Bank`,
+function payInstr(c,t){
+  const m={
+    Lebanon:`WhishMoney: <span class="mono">81666579</span><br>Amount: <strong>$${t.toFixed(2)}</strong>`,
+    Jordan:`<strong>${(t*.716).toFixed(3)} JOD</strong><br>CLIQ: <span class="mono">WKS777</span> Orange·Waleed Shaqfeh<br>CLIQ: <span class="mono">WKS999</span> Etihad·Waleed Shaqfeh<br>CLIQ: <span class="mono">WKS555</span> Zain·Shamalti`,
+    India:`UPI: <span class="mono">s4005194160889795@slc</span><br>Shilpaben karetiya<br><strong>₹${Math.round(t*94.5).toLocaleString()}</strong><br>⚠️ Leave remarks empty. Split if needed.`,
+    Ghana:`<strong>${(t*11.8).toFixed(2)} GHS</strong><br><span class="mono">0257505632</span> MTN·Saibu Mahamadu<br><span class="mono">0204860754</span> Telecel·Saibu Mahamadu`,
+    Pakistan:`<strong>${Math.round(t*280).toLocaleString()} PKR</strong><br>HBL·Muhammad Bilal<br>Acc: <span class="mono">03577900871203</span><br>IBAN: <span class="mono">PK08HABB0003577900871203</span><br>Branch: TOTALAI`,
+    Europe:`Revolut card: <span class="mono">5413525250267271</span><br>Alijon Karimov·Tajikistan<br><strong>$${t.toFixed(2)}</strong>`,
+    KSA:`<strong>${(t*3.8).toFixed(2)} SAR</strong><br>IBAN: <span class="mono">SA8710000006857309000101</span><br>IBAN: <span class="mono">SA0510000062300187719603</span><br>Ahli Bank·Jamil Hajji<br><strong>Purpose: Friends & family</strong>`,
+    Russia:`<strong>${Math.round(t*85.5).toLocaleString()} RUB</strong><br>Sberbank→Int'l→Phone: <span class="mono">+992002373232</span><br>Tajikistan·Alijon Karimov·Alif Bank`,
   };
-  return map[country] || `Amount: <strong>$${t.toFixed(2)}</strong>`;
+  return m[c]||`Amount: <strong>$${t.toFixed(2)}</strong>`;
 }
-const USA_APPS = {
-  'TapTap Send':`TapTap → Lebanon → Whish Money Wallet<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa · 1994`,
-  'Ria':        `App → Lebanon → Purpl<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa · Educational · 17/09/1994`,
-  'Paysend':    `App → Lebanon → Purpl<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa · Educational · 17/09/1994`,
-  'Remitly':    `App → Lebanon → Purpl<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa · Educational · 17/09/1994`,
-  'Revolut':    `Card transfer: <span class="mono">5413525250267271</span><br>Alijon Karimov · Tajikistan`,
+const USA_APPS={
+  'TapTap Send':`TapTap→Lebanon→Whish Money Wallet<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa·1994`,
+  'Ria':`App→Lebanon→Purpl<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa·Educational·17/09/1994`,
+  'Paysend':`App→Lebanon→Purpl<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa·Educational·17/09/1994`,
+  'Remitly':`App→Lebanon→Purpl<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa·Educational·17/09/1994`,
+  'Revolut':`Card: <span class="mono">5413525250267271</span><br>Alijon Karimov·Tajikistan`,
 };
 
-// ── Cart state ────────────────────────────────────────────────
-let cart = {}; // id → {name,price,qty}
-let selPay = null, selCountry = null, selApp = null;
-
-const cartTotal = () => Object.values(cart).reduce((s,i)=>s+i.price*i.qty, 0);
-const cartSize  = () => Object.values(cart).reduce((s,i)=>s+i.qty, 0);
+// ── Cart ──────────────────────────────────────────────────────────────
+let cart={};
+let selPay=null,selCountry=null,selApp=null;
+const cartTotal=()=>Object.values(cart).reduce((s,i)=>s+i.price*i.qty,0);
+const cartSize =()=>Object.values(cart).reduce((s,i)=>s+i.qty,0);
 
 function addItem(id){
-  const itm = IMAP[id]; if(!itm) return;
-  cart[id] = cart[id] ? {...cart[id],qty:cart[id].qty+1} : {name:itm.name,price:itm.price,qty:1};
-  const btn = document.getElementById('ab-'+id);
+  const itm=IMAP[id]; if(!itm) return;
+  cart[id]=cart[id]?{...cart[id],qty:cart[id].qty+1}:{name:itm.name,price:itm.price,qty:1};
+  const btn=document.getElementById('ab-'+id);
   if(btn){btn.textContent='✓';btn.classList.add('in');}
-  syncBasketUI();
-  showToast('Added · $'+itm.price);
+  syncBasket(); showToast('Added · $'+itm.price);
 }
+function removeItem(id){delete cart[id]; syncBasket(); renderBasket();}
 
-function removeItem(id){
-  delete cart[id];
-  syncBasketUI();
-  renderBasketItems();
-}
-
-function syncBasketUI(){
+function syncBasket(){
   const n=cartSize();
   const bc=document.getElementById('bc');
-  bc.textContent=n;
-  bc.classList.toggle('vis',n>0);
+  bc.textContent=n; bc.classList.toggle('vis',n>0);
 }
 
-// ── Basket overlay ────────────────────────────────────────────
-function openBasket(){
-  renderBasketItems();
-  document.getElementById('basketOverlay').classList.add('on');
+// ── My Subscriptions sheet ────────────────────────────────────────────
+function openOrders(){
+  renderOrders();
+  document.getElementById('ordersOverlay').classList.add('on');
 }
-function closeBasket(){
-  document.getElementById('basketOverlay').classList.remove('on');
+function closeOrders(){document.getElementById('ordersOverlay').classList.remove('on')}
+
+function renderOrders(){
+  const el=document.getElementById('ordersContent');
+  if(!SUBS_DATA){
+    el.innerHTML=`<div class="empty-sheet">
+      <div class="eico">📋</div>
+      <div>No subscription data available.<br>Try closing and reopening the Shop.</div>
+    </div>`;
+    return;
+  }
+  const {d=[],p=[]}=SUBS_DATA;
+  let html='';
+
+  if(d.length){
+    html+=`<div class="sub-section-lbl">✅ Delivered (${d.length})</div>`;
+    d.forEach(([name,date])=>{
+      html+=`<div class="sub-row">
+        <div class="sub-icon">✅</div>
+        <div class="sub-info">
+          <div class="sub-name">${name}</div>
+          ${date?`<div class="sub-meta">${date}</div>`:''}
+        </div>
+      </div>`;
+    });
+  }
+  if(p.length){
+    const stateLabel={needs_info:'⌛ Awaiting your details',awaiting_delivery:'🔄 Being prepared'};
+    html+=`<div class="sub-section-lbl">⏳ Pending (${p.length})</div>`;
+    p.forEach(([name,state])=>{
+      html+=`<div class="sub-row">
+        <div class="sub-icon">⏳</div>
+        <div class="sub-info">
+          <div class="sub-name">${name}</div>
+          <div class="sub-meta">${stateLabel[state]||'In progress'}</div>
+        </div>
+      </div>`;
+    });
+  }
+  if(!html){
+    html=`<div class="empty-sheet">
+      <div class="eico">📭</div>
+      <div>No subscriptions yet.<br>Your orders will appear here after purchase.</div>
+    </div>`;
+  }
+  el.innerHTML=html;
 }
-function renderBasketItems(){
+
+// Show the 📋 icon as active if there's data
+if(SUBS_DATA&&(SUBS_DATA.d?.length||SUBS_DATA.p?.length)){
+  const b=document.getElementById('subsBadge');
+  b.style.display='flex'; b.textContent=(SUBS_DATA.d?.length||0)+(SUBS_DATA.p?.length||0);
+}
+
+// ── Basket sheet ──────────────────────────────────────────────────────
+function openBasket(){renderBasket();document.getElementById('basketOverlay').classList.add('on')}
+function closeBasket(){document.getElementById('basketOverlay').classList.remove('on')}
+
+function renderBasket(){
   const el=document.getElementById('basketItems');
   const items=Object.entries(cart);
   if(!items.length){
-    el.innerHTML=`<div class="empty-cart"><div class="eico">🧺</div>Your basket is empty</div>`;
+    el.innerHTML=`<div class="empty-sheet"><div class="eico">🧺</div>Your basket is empty</div>`;
     return;
   }
-  const rows=items.map(([id,{name,price,qty}])=>
+  el.innerHTML=items.map(([id,{name,price,qty}])=>
     `<div class="ci">
       <div class="ci-name">${name}${qty>1?` ×${qty}`:''}</div>
       <div class="ci-price">$${(price*qty).toFixed(2)}</div>
       <button class="rm" onclick="removeItem('${id}')">×</button>
     </div>`
-  ).join('');
-  el.innerHTML = rows +
-    `<div class="cart-total"><span>Total</span><span>$${cartTotal().toFixed(2)}</span></div>
-     <div style="padding:0 15px">
-       <button class="btn" onclick="closeBasket();goDetails()">Proceed to Order →</button>
-     </div>`;
+  ).join('')+
+  `<div class="cart-total"><span>Total</span><span>$${cartTotal().toFixed(2)}</span></div>
+   <div style="padding:0 15px">
+     <button class="btn" onclick="closeBasket();goDetails()">Proceed to Order →</button>
+   </div>`;
 }
 
-// ── Navigation ────────────────────────────────────────────────
-function showPage(id){
-  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.id===id));
-}
+// ── Navigation ────────────────────────────────────────────────────────
+function showPage(id){document.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.id===id))}
 function setStep(n){
   [1,2,3].forEach(i=>{
     const el=document.getElementById('s'+i);
-    el.classList.toggle('done',i<n);
-    el.classList.toggle('active',i===n);
+    el.classList.toggle('done',i<n); el.classList.toggle('active',i===n);
     el.querySelector('.step-dot').textContent=i<n?'✓':i;
   });
 }
-
-function goCatalog(){
-  showPage('p1'); setStep(1);
-  document.getElementById('hdrTitle').textContent='Medic SalesBot';
-  tg.MainButton.hide();
-  window.scrollTo(0,0);
-}
-
+function goCatalog(){showPage('p1');setStep(1);document.getElementById('hdrTitle').textContent='Medic SalesBot';tg.MainButton.hide();window.scrollTo(0,0)}
 function goDetails(){
-  if(!cartSize()){showToast('Add at least one item first'); return;}
-  closeBasket();
-  buildDetailForms();
-  showPage('p2'); setStep(2);
-  document.getElementById('hdrTitle').textContent='Account Details';
-  tg.MainButton.hide();
-  window.scrollTo(0,0);
+  if(!cartSize()){showToast('Add at least one item first');return;}
+  closeBasket();buildDetailForms();
+  showPage('p2');setStep(2);document.getElementById('hdrTitle').textContent='Account Details';tg.MainButton.hide();window.scrollTo(0,0);
 }
+function goPayment(){if(!validateDetails())return;buildPaymentPage();showPage('p3');setStep(3);document.getElementById('hdrTitle').textContent='Payment';window.scrollTo(0,0)}
 
-function goPayment(){
-  if(!validateDetails()) return;
-  buildPaymentPage();
-  showPage('p3'); setStep(3);
-  document.getElementById('hdrTitle').textContent='Payment';
-  window.scrollTo(0,0);
-}
-
-// ── Catalog render ─────────────────────────────────────────────
-// KEY FIX: tabs are stored in a separate Map so tab[i] is not conflated
-// with CATALOG[i] when extra tabs (My Subscriptions) are added.
-const CAT_TAB_IDS = CATALOG.map(c=>c.id); // only catalog ids for switching
-
+// ── Catalog build ─────────────────────────────────────────────────────
 function buildCatalog(){
-  const tabsEl = document.getElementById('tabs');
-  const secEl  = document.getElementById('catSec');
-
+  const tabsEl=document.getElementById('tabs');
+  const secEl=document.getElementById('catSec');
   CATALOG.forEach((cat,ci)=>{
-    const tab = document.createElement('button');
+    const tab=document.createElement('button');
     tab.className='tab'+(ci===0?' active':'');
-    tab.dataset.catid = cat.id;  // store the id on the element, not relying on index
-    tab.textContent = cat.emoji+' '+cat.name;
-    tab.onclick = ()=>switchCat(cat.id);
+    tab.dataset.catid=cat.id;
+    tab.textContent=cat.emoji+' '+cat.name;
+    tab.onclick=()=>switchCat(cat.id);
     tabsEl.appendChild(tab);
-
     const sec=document.createElement('div');
-    sec.id='cat-'+cat.id;
-    sec.style.display=ci===0?'block':'none';
-
-    if(cat.groups){
-      cat.groups.forEach(g=>{
-        const lbl=document.createElement('div');
-        lbl.className='sl'; lbl.textContent=g.label;
-        sec.appendChild(lbl);
-        const card=document.createElement('div');
-        card.className='card';
-        g.items.forEach(itm=>card.appendChild(makeRow(itm,false)));
-        sec.appendChild(card);
-      });
-    }
+    sec.id='cat-'+cat.id; sec.style.display=ci===0?'block':'none';
+    if(cat.groups) cat.groups.forEach(g=>{
+      const lbl=document.createElement('div'); lbl.className='sl'; lbl.textContent=g.label; sec.appendChild(lbl);
+      const card=document.createElement('div'); card.className='card';
+      g.items.forEach(i=>card.appendChild(makeRow(i,false))); sec.appendChild(card);
+    });
     if(cat.single){
-      const lbl=document.createElement('div');
-      lbl.className='sl'; lbl.textContent='1 Year Subscriptions';
-      sec.appendChild(lbl);
-      cat.single.forEach(itm=>sec.appendChild(makeRow({...itm,sub:'1 Year'},true)));
+      const lbl=document.createElement('div'); lbl.className='sl'; lbl.textContent='1 Year Subscriptions'; sec.appendChild(lbl);
+      cat.single.forEach(i=>sec.appendChild(makeRow({...i,sub:'1 Year'},true)));
     }
     secEl.appendChild(sec);
   });
-
-  // ── My Subscriptions tab ─────────────────────────────────────
-  const subTab=document.createElement('button');
-  subTab.className='tab';
-  subTab.dataset.catid='mysubs';
-  subTab.textContent='📋 My Subscriptions';
-  subTab.onclick=()=>switchCat('mysubs');
-  tabsEl.appendChild(subTab);
-
-  const subSec=document.createElement('div');
-  subSec.id='cat-mysubs';
-  subSec.style.display='none';
-  subSec.innerHTML=`
-    <div class="sl">My Subscriptions</div>
-    <div id="subsContent">
-      <div style="text-align:center;padding:40px 16px;color:var(--hint)">
-        <div style="font-size:36px;margin-bottom:12px">📋</div>
-        <p style="font-size:13px">Tap below to load your subscriptions</p>
-        <button class="btn" style="max-width:240px;margin:16px auto 0;display:block" onclick="loadSubs()">Load My Subscriptions</button>
-      </div>
-    </div>`;
-  secEl.appendChild(subSec);
 }
 
-function makeRow(itm, solo){
-  const d=document.createElement('div');
-  d.className=solo?'solo':'row';
-  d.innerHTML=`
-    ${solo?`<div style="font-size:21px">${itm.e||'📦'}</div>`:''}
-    <div class="ri">
-      <div class="rn">${itm.name}</div>
-      <div class="rs">${itm.sub||''}</div>
-    </div>
+function makeRow(itm,solo){
+  const d=document.createElement('div'); d.className=solo?'solo':'row';
+  d.innerHTML=`${solo?`<div style="font-size:21px">${itm.e||'📦'}</div>`:''}
+    <div class="ri"><div class="rn">${itm.name}</div><div class="rs">${itm.sub||''}</div></div>
     <div class="rp">$${itm.price}</div>
-    <button class="add-btn" id="ab-${itm.id}" onclick="addItem('${itm.id}')">+</button>
-  `;
+    <button class="add-btn" id="ab-${itm.id}" onclick="addItem('${itm.id}')">+</button>`;
   return d;
 }
 
-// KEY FIX: use data-catid attribute instead of array index
+// KEY FIX: use data-catid so extra non-catalog tabs can't break iteration
 function switchCat(id){
-  // hide all catalog sections + mysubs
-  CATALOG.forEach(c=>{
-    const el=document.getElementById('cat-'+c.id);
-    if(el) el.style.display='none';
-  });
-  const mysubsEl=document.getElementById('cat-mysubs');
-  if(mysubsEl) mysubsEl.style.display='none';
-
-  // deactivate all tabs, activate matching one
-  document.querySelectorAll('.tabs .tab').forEach(t=>{
-    t.classList.toggle('active', t.dataset.catid===id);
-  });
-
-  // show target section
-  const target=document.getElementById('cat-'+id);
-  if(target) target.style.display='block';
-
-  // auto-load subscriptions on first visit
-  if(id==='mysubs') loadSubs();
-
+  CATALOG.forEach(c=>{const el=document.getElementById('cat-'+c.id); if(el) el.style.display='none';});
+  document.querySelectorAll('.tabs .tab').forEach(t=>t.classList.toggle('active',t.dataset.catid===id));
+  const el=document.getElementById('cat-'+id); if(el) el.style.display='block';
   window.scrollTo(0,0);
 }
 
-function viewSubs(action){
-  tg.sendData(JSON.stringify({action}));
-}
-
-async function loadSubs(){
-  const el=document.getElementById('subsContent');
-  if(!API_URL){
-    el.innerHTML=`<div style="text-align:center;padding:32px 16px;color:var(--hint);font-size:13px">
-      <div style="font-size:36px;margin-bottom:12px">⚙️</div>
-      API not configured. Please contact support.</div>`;
-    return;
-  }
-  el.innerHTML=`<div style="text-align:center;padding:40px 16px;color:var(--hint);font-size:13px">
-    <div style="font-size:32px;margin-bottom:12px">⏳</div>Loading your subscriptions...</div>`;
-  try{
-    const res=await fetch(`${API_URL}/api/subs`,{
-      headers:{'X-Telegram-Init-Data': tg.initData}
-    });
-    if(!res.ok) throw new Error('HTTP '+res.status);
-    const data=await res.json();
-    renderSubs(data);
-  }catch(err){
-    el.innerHTML=`<div style="text-align:center;padding:32px 16px;color:var(--hint);font-size:13px">
-      <div style="font-size:36px;margin-bottom:12px">⚠️</div>
-      Could not load subscriptions. Please try again.<br><br>
-      <button class="btn" style="max-width:200px;margin:0 auto;display:block" onclick="loadSubs()">Retry</button></div>`;
-  }
-}
-
-function renderSubs(data){
-  const el=document.getElementById('subsContent');
-  let html='';
-
-  if(data.delivered&&data.delivered.length){
-    html+=`<div class="sl" style="margin-top:0">✅ Delivered (${data.delivered.length})</div>
-      <div class="card">`;
-    data.delivered.forEach(s=>{
-      html+=`<div class="row" style="border-bottom:1px solid rgba(255,255,255,.05)">
-        <div class="ri"><div class="rn">${s.name}</div>${s.date?`<div class="rs">${s.date}</div>`:''}</div>
-        <div style="font-size:18px">✅</div>
-      </div>`;
-    });
-    html+=`</div>`;
-  }
-
-  if(data.pending&&data.pending.length){
-    html+=`<div class="sl">⏳ Pending (${data.pending.length})</div>
-      <div class="card">`;
-    const stateLabel={needs_info:'⌛ Awaiting your details',awaiting_delivery:'🔄 Being prepared'};
-    data.pending.forEach(s=>{
-      html+=`<div class="row">
-        <div class="ri"><div class="rn">${s.name}</div>
-        <div class="rs">${stateLabel[s.state]||'⏳ In progress'}</div></div>
-      </div>`;
-    });
-    html+=`</div>`;
-  }
-
-  if(!html){
-    html=`<div style="text-align:center;padding:36px 16px;color:var(--hint)">
-      <div style="font-size:40px;margin-bottom:12px">📭</div>
-      <div style="font-size:14px;font-weight:600;margin-bottom:6px">No subscriptions yet</div>
-      <div style="font-size:12px">Your orders will appear here after purchase.</div></div>`;
-  }
-
-  html+=`<div style="padding:4px 0 4px">
-    <button class="btn sec" style="margin-top:8px" onclick="loadSubs()">🔄 Refresh</button></div>`;
-  el.innerHTML=html;
-}
-
-// ── Detail forms ───────────────────────────────────────────────
+// ── Detail forms ──────────────────────────────────────────────────────
 function buildDetailForms(){
-  const el=document.getElementById('detForms');
-  el.innerHTML='';
-  Object.entries(cart).forEach(([id,{name,price,qty}])=>{
-    for(let q=0;q<qty;q++) el.appendChild(makeDetailBlock(id,name,price,q));
-  });
+  const el=document.getElementById('detForms'); el.innerHTML='';
+  Object.entries(cart).forEach(([id,{name,price,qty}])=>{for(let q=0;q<qty;q++) el.appendChild(makeDetailBlock(id,name,price,q));});
 }
-
 function makeDetailBlock(id,name,price,idx){
-  const w=document.createElement('div');
-  w.className='dblock';
-  w.dataset.id=id; w.dataset.idx=idx;
-  const isImdNew   = id.startsWith('imd_new');
-  const isImdRenew = id.startsWith('imd_renew');
-  const lbl = idx>0?` #${idx+1}`:'';
+  const w=document.createElement('div'); w.className='dblock'; w.dataset.id=id; w.dataset.idx=idx;
+  const isIN=id.startsWith('imd_new'), isIR=id.startsWith('imd_renew');
+  const lbl=idx>0?` #${idx+1}`:'';
   let body='';
-  if(isImdNew){
-    body=fields(id,idx,[
-      ['email','Email Address','email','Never used for iMD before'],
-      ['username','Username','text','At least 6 characters'],
-      ['password','Password','password','8+ chars, 1 capital, 1 number, one of: - _ . # @'],
-    ]);
-  } else if(isImdRenew){
-    body=fields(id,idx,[['prev_username','Existing iMD Username','text','']]);
-  } else {
-    body=`<div class="toggle">
-        <button class="tbtn active" onclick="setType(this,'new','${id}',${idx})">🆕 New Account</button>
-        <button class="tbtn" onclick="setType(this,'renew','${id}',${idx})">🔄 Renewal</button>
-      </div>
-      <div id="ff-${id}-${idx}">${newFields(id,idx)}</div>`;
-  }
-  w.innerHTML=`<div class="dheader">
-    <div class="ri"><div class="rn">${name}${lbl}</div></div>
-    <div class="ptag">$${price}</div>
-  </div>${body}`;
+  if(isIN) body=flds(id,idx,[['email','Email','email','Never used for iMD before'],['username','Username','text','≥6 chars'],['password','Password','password','8+ chars, 1 cap, 1 num, one of: - _ . # @']]);
+  else if(isIR) body=flds(id,idx,[['prev_username','Existing iMD Username','text','']]);
+  else body=`<div class="toggle"><button class="tbtn active" onclick="setType(this,'new','${id}',${idx})">🆕 New</button><button class="tbtn" onclick="setType(this,'renew','${id}',${idx})">🔄 Renewal</button></div><div id="ff-${id}-${idx}">${newFlds(id,idx)}</div>`;
+  w.innerHTML=`<div class="dheader"><div class="ri"><div class="rn">${name}${lbl}</div></div><div class="ptag">$${price}</div></div>${body}`;
   return w;
 }
-
-function newFields(id,idx){return fields(id,idx,[
-  ['first_name','First Name','text',''],['last_name','Last Name','text',''],
-  ['email','Email','email','Never used for this subscription before'],
-  ['username','Username','text','At least 6 characters'],
-  ['password','Password','password','8+ chars, 1 capital, 1 number, one of: - _ . # @'],
-]);}
-function renewFields(id,idx){return fields(id,idx,[
-  ['login_username','Username or Email (existing login)','text',''],
-  ['login_password','Password (existing login)','password',''],
-]);}
-function fields(id,idx,list){
-  return '<div class="fields">'+list.map(([n,l,t,h])=>{
-    const fid=`f-${id}-${idx}-${n}`;
-    return `<div class="field">
-      <label for="${fid}">${l}</label>
-      <input id="${fid}" name="${n}" type="${t}" autocomplete="off" spellcheck="false">
-      ${h?`<div class="fhint">${h}</div>`:''}
-      <div class="ferr" id="e-${fid}"></div>
-    </div>`;
-  }).join('')+'</div>';
-}
-
+const newFlds=(id,idx)=>flds(id,idx,[['first_name','First Name','text',''],['last_name','Last Name','text',''],['email','Email','email','Never used for this subscription before'],['username','Username','text','≥6 chars'],['password','Password','password','8+ chars, 1 cap, 1 num, one of: - _ . # @']]);
+const renewFlds=(id,idx)=>flds(id,idx,[['login_username','Username or Email (existing)','text',''],['login_password','Existing Password','password','']]);
+function flds(id,idx,list){return'<div class="fields">'+list.map(([n,l,t,h])=>{const fid=`f-${id}-${idx}-${n}`;return`<div class="field"><label for="${fid}">${l}</label><input id="${fid}" name="${n}" type="${t}" autocomplete="off" spellcheck="false">${h?`<div class="fhint">${h}</div>`:''}<div class="ferr" id="e-${fid}"></div></div>`;}).join('')+'</div>';}
 function setType(btn,type,id,idx){
   btn.parentElement.querySelectorAll('.tbtn').forEach(b=>b.classList.toggle('active',b===btn));
-  const w=btn.closest('.dblock'); w.dataset.type=type;
-  document.getElementById(`ff-${id}-${idx}`).innerHTML=type==='new'?newFields(id,idx):renewFields(id,idx);
+  btn.closest('.dblock').dataset.type=type;
+  document.getElementById(`ff-${id}-${idx}`).innerHTML=type==='new'?newFlds(id,idx):renewFlds(id,idx);
 }
 
-// ── Validation ─────────────────────────────────────────────────
+// ── Validation ────────────────────────────────────────────────────────
 function validateDetails(){
   let ok=true;
   document.querySelectorAll('.dblock').forEach(block=>{
     const id=block.dataset.id, idx=parseInt(block.dataset.idx||0);
-    const isImdNew=id.startsWith('imd_new'), isImdRenew=id.startsWith('imd_renew');
-    const type=block.dataset.type||(isImdNew?'new':isImdRenew?'renew':'new');
+    const isIN=id.startsWith('imd_new'), isIR=id.startsWith('imd_renew');
+    const type=block.dataset.type||(isIN?'new':isIR?'renew':'new');
     block.querySelectorAll('input').forEach(inp=>{
       const n=inp.name,v=inp.value.trim();
       const fe=document.getElementById('e-'+inp.id);
@@ -764,30 +581,21 @@ function validateDetails(){
   if(!ok) showToast('Fix highlighted fields');
   return ok;
 }
-function setErr(inp,msg){
-  inp.classList.add('err');
-  const el=document.getElementById('e-'+inp.id);
-  if(el) el.textContent=msg;
-}
+function setErr(inp,msg){inp.classList.add('err');const el=document.getElementById('e-'+inp.id);if(el)el.textContent=msg;}
 
-// ── Payment page ───────────────────────────────────────────────
+// ── Payment page ──────────────────────────────────────────────────────
 function buildPaymentPage(){
   const total=cartTotal();
-  const methods=[
-    {id:'stars',  ico:'⭐',lbl:'Telegram Stars',   sub:'Pay with Stars'},
-    {id:'credits',ico:'🎁',lbl:'My Credits',        sub:'Use earned credits'},
-    {id:'card',   ico:'💳',lbl:'Visa/Mastercard',   sub:'Pay online'},
-    {id:'local',  ico:'🌍',lbl:'Local Transfer',    sub:'9 countries'},
-    {id:'crypto', ico:'₿', lbl:'Cryptocurrency',    sub:'USDT, BTC, more'},
-  ];
-  const grid=document.getElementById('pmGrid');
-  grid.innerHTML='';
-  methods.forEach(m=>{
-    const d=document.createElement('div');
-    d.className='pm'; d.dataset.id=m.id;
+  [{id:'stars',ico:'⭐',lbl:'Telegram Stars',sub:'Pay with Stars'},
+   {id:'credits',ico:'🎁',lbl:'My Credits',sub:'Use earned credits'},
+   {id:'card',ico:'💳',lbl:'Visa/Mastercard',sub:'Pay online'},
+   {id:'local',ico:'🌍',lbl:'Local Transfer',sub:'9 countries'},
+   {id:'crypto',ico:'₿',lbl:'Cryptocurrency',sub:'USDT, BTC, more'},
+  ].forEach(m=>{
+    const d=document.createElement('div'); d.className='pm'; d.dataset.id=m.id;
     d.innerHTML=`<div class="ico">${m.ico}</div><div class="lbl">${m.lbl}</div><div class="sub">${m.sub}</div>`;
     d.onclick=()=>selMethod(m.id,total);
-    grid.appendChild(d);
+    document.getElementById('pmGrid').appendChild(d);
   });
   const sc=document.getElementById('sumCard');
   sc.innerHTML=Object.entries(cart).map(([id,{name,price,qty}])=>
@@ -799,108 +607,80 @@ function buildPaymentPage(){
 }
 
 function selMethod(id,total){
-  selPay=id;selCountry=null;selApp=null;
+  selPay=id; selCountry=null; selApp=null;
   document.querySelectorAll('.pm').forEach(c=>c.classList.toggle('sel',c.dataset.id===id));
-  const det=document.getElementById('pmDetail');
-  const sub=document.getElementById('submitBtn');
+  const det=document.getElementById('pmDetail'), sub=document.getElementById('submitBtn');
   if(id==='stars'){
-    det.innerHTML=`<div class="pdtl on">⭐ You'll receive a Stars invoice after placing the order and pay directly in Telegram.</div>`;
+    det.innerHTML=`<div class="pdtl on">⭐ You'll receive a Stars invoice after placing the order.</div>`;
     sub.textContent='Place Order → Pay with Stars ⭐'; sub.style.display='block';
-  } else if(id==='credits'){
-    const need=Math.ceil(total/4);
-    det.innerHTML=`<div class="pdtl on">🎁 ${need} credit${need!==1?'s':''} needed ($4 each). If you don't have enough, the bot will let you know.</div>`;
+  }else if(id==='credits'){
+    det.innerHTML=`<div class="pdtl on">🎁 ${Math.ceil(total/4)} credits needed ($4 each). If insufficient, the bot will let you know.</div>`;
     sub.textContent='Pay with Credits 🎁'; sub.style.display='block';
-  } else if(id==='card'){
-    det.innerHTML=`<div class="pdtl on">
-      1. Tap the link: <a href="https://payments.suyool.com/pay/g401_MD" target="_blank" style="color:var(--teal2)">Open Payment Link ↗</a><br>
-      2. Choose "Pay online with your card"<br>
-      3. From: your name · Amount: <strong>$${total.toFixed(2)}</strong> · Message: empty<br>
-      4. Enter card details and complete
-    </div>`;
+  }else if(id==='card'){
+    det.innerHTML=`<div class="pdtl on">1. <a href="https://payments.suyool.com/pay/g401_MD" target="_blank" style="color:var(--teal2)">Open Payment Link ↗</a><br>2. "Pay online with your card"<br>3. From: your name · Amount: <strong>$${total.toFixed(2)}</strong> · Message: empty<br>4. Enter card details and complete</div>`;
     sub.textContent="I've Paid ✅"; sub.style.display='block';
-  } else if(id==='local'){
-    const countries=Object.keys(RATES);
-    det.innerHTML=`<div class="sl" style="margin-top:0">Select your country</div>
-      <div class="cg">${countries.map(c=>`<div class="cb" data-c="${c}" onclick="selCountryFn('${c}',${total})">${FLAGS[c]||''} ${c}</div>`).join('')}</div>
-      <div id="lclDtl"></div>`;
+  }else if(id==='local'){
+    const countries=Object.keys(FLAGS);
+    det.innerHTML=`<div class="sl" style="margin-top:0">Select your country</div><div class="cg">${countries.map(c=>`<div class="cb" data-c="${c}" onclick="selCountryFn('${c}',${total})">${FLAGS[c]} ${c}</div>`).join('')}</div><div id="lclDtl"></div>`;
     sub.style.display='none';
-  } else if(id==='crypto'){
-    det.innerHTML=`<div class="pdtl on">
-      <strong>USDT BEP20:</strong><br><span class="mono">0x4ccff0e89e4ee00e96ae6e15e3b5e12fa0c66b20</span><br><br>
-      <strong>USDT TRC20:</strong><br><span class="mono">TBdXHpNMWsGDUTeTCBQkbJzamxvgW2hHyj</span><br><br>
-      <strong>BTC:</strong><br><span class="mono">bc1q2ccf4yzptwtdmnfdwuphvefmksy4ry2lylfhrj</span><br><br>
-      <strong>Bybit/OKX/BingX UID:</strong> <span class="mono">306834837</span><br><br>
-      Amount: <strong>$${total.toFixed(2)}</strong>
-    </div>`;
+  }else if(id==='crypto'){
+    det.innerHTML=`<div class="pdtl on"><strong>USDT BEP20:</strong><br><span class="mono">0x4ccff0e89e4ee00e96ae6e15e3b5e12fa0c66b20</span><br><br><strong>USDT TRC20:</strong><br><span class="mono">TBdXHpNMWsGDUTeTCBQkbJzamxvgW2hHyj</span><br><br><strong>BTC:</strong><br><span class="mono">bc1q2ccf4yzptwtdmnfdwuphvefmksy4ry2lylfhrj</span><br><br><strong>Bybit/OKX/BingX UID:</strong> <span class="mono">306834837</span><br><br>Amount: <strong>$${total.toFixed(2)}</strong></div>`;
     sub.textContent="I've Paid ✅"; sub.style.display='block';
   }
 }
-
 function selCountryFn(c,total){
   selCountry=c; selApp=null;
-  document.querySelectorAll('.cb').forEach(b=>b.classList.toggle('sel',b.dataset.c===c));
+  document.querySelectorAll('.cb').forEach(b=>b.classList.toggle('sel',b.dataset&&b.dataset.c===c));
   const det=document.getElementById('lclDtl');
   if(c==='USA'){
-    det.innerHTML=`<div class="sl">Choose app</div>
-      <div class="cg">${Object.keys(USA_APPS).map(a=>`<div class="cb" data-a="${a}" onclick="selAppFn('${a}')">${a}</div>`).join('')}</div>
-      <div id="appDtl"></div>`;
+    det.innerHTML=`<div class="sl">Choose app</div><div class="cg">${Object.keys(USA_APPS).map(a=>`<div class="cb" data-a="${a}" onclick="selAppFn('${a}')">${a}</div>`).join('')}</div><div id="appDtl"></div>`;
     document.getElementById('submitBtn').style.display='none';
-  } else {
-    det.innerHTML=`<div class="pdtl on">${payInstructions(c,total)}</div>`;
-    const sub=document.getElementById('submitBtn');
-    sub.textContent="I've Paid ✅"; sub.style.display='block';
+  }else{
+    det.innerHTML=`<div class="pdtl on">${payInstr(c,total)}</div>`;
+    const sub=document.getElementById('submitBtn'); sub.textContent="I've Paid ✅"; sub.style.display='block';
   }
 }
-
 function selAppFn(a){
   selApp=a;
   document.querySelectorAll('[data-a]').forEach(b=>b.classList.toggle('sel',b.dataset.a===a));
   const total=cartTotal();
   document.getElementById('appDtl').innerHTML=`<div class="pdtl on">${USA_APPS[a]||''}<br><br>Amount: <strong>$${total.toFixed(2)}</strong></div>`;
-  const sub=document.getElementById('submitBtn');
-  sub.textContent="I've Paid ✅"; sub.style.display='block';
+  const sub=document.getElementById('submitBtn'); sub.textContent="I've Paid ✅"; sub.style.display='block';
 }
 
-// ── Collect + submit ───────────────────────────────────────────
+// ── Submit order ──────────────────────────────────────────────────────
 function collectDetails(){
   const out=[];
   document.querySelectorAll('.dblock').forEach(block=>{
     const id=block.dataset.id, idx=parseInt(block.dataset.idx||0);
-    const isImdNew=id.startsWith('imd_new'), isImdRenew=id.startsWith('imd_renew');
-    const type=block.dataset.type||(isImdNew?'new':isImdRenew?'renew':'new');
+    const isIN=id.startsWith('imd_new'), isIR=id.startsWith('imd_renew');
+    const type=block.dataset.type||(isIN?'new':isIR?'renew':'new');
     const entry={id,account_type:type};
     block.querySelectorAll('input').forEach(inp=>{if(inp.value.trim()) entry[inp.name]=inp.value.trim();});
     out.push(entry);
   });
   return out;
 }
-
 function submitOrder(){
   if(!selPay){showToast('Choose a payment method');return;}
   if(selPay==='local'&&!selCountry){showToast('Choose your country');return;}
   if(selPay==='local'&&selCountry==='USA'&&!selApp){showToast('Choose a transfer app');return;}
   let pay=selPay;
   if(selPay==='local') pay=selCountry+(selApp?' — '+selApp:'');
-  tg.sendData(JSON.stringify({
-    action:'full_order',
-    items:collectDetails(),
-    payment_method:pay,
-    total:cartTotal(),
-  }));
+  tg.sendData(JSON.stringify({action:'full_order',items:collectDetails(),payment_method:pay,total:cartTotal()}));
 }
 
-// ── Toast ──────────────────────────────────────────────────────
+// ── Toast ─────────────────────────────────────────────────────────────
 let _tt;
 function showToast(msg){
-  const el=document.getElementById('toast');
-  el.textContent=msg; el.classList.add('on');
+  const el=document.getElementById('toast'); el.textContent=msg; el.classList.add('on');
   clearTimeout(_tt); _tt=setTimeout(()=>el.classList.remove('on'),1900);
 }
 
-// ── Main button ────────────────────────────────────────────────
+// ── Main button ───────────────────────────────────────────────────────
 tg.MainButton.onClick(submitOrder);
 
-// ── Init ───────────────────────────────────────────────────────
+// ── Init ──────────────────────────────────────────────────────────────
 buildCatalog();
 </script>
 </body>
