@@ -703,6 +703,50 @@ function showToast(msg){
 
 // ── Init ────────────────────────────────────────────────
 buildCatalog();
+
+// Add My Orders tab after catalog tabs are built
+(function(){
+  const tabsEl = document.getElementById('tabs');
+  const secEl  = document.getElementById('catSections');
+
+  // Tab
+  const tab = document.createElement('button');
+  tab.className = 'tab';
+  tab.textContent = '📋 My Orders';
+  tab.onclick = () => openMyOrders();
+  tabsEl.appendChild(tab);
+
+  // Section placeholder
+  const sec = document.createElement('div');
+  sec.id = 'cat-myorders';
+  sec.style.display = 'none';
+  sec.innerHTML = `
+    <div style="text-align:center;padding:40px 20px">
+      <div style="font-size:48px;margin-bottom:16px">📋</div>
+      <h3 style="margin-bottom:8px">Your Subscriptions</h3>
+      <p style="color:var(--hint);font-size:13px;line-height:1.6;margin-bottom:20px">
+        Tap below to see your delivered subscriptions in the chat.
+      </p>
+      <button class="btn-primary" style="max-width:260px;margin:0 auto;display:block"
+        onclick="viewMyOrders()">View My Subscriptions</button>
+    </div>`;
+  secEl.appendChild(sec);
+})();
+
+function openMyOrders(){
+  document.querySelectorAll('.tabs .tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tabs .tab').forEach((t,i)=>{
+    if(t.textContent.includes('My Orders')) t.classList.add('active');
+  });
+  CATALOG.forEach(c=>{ const el=document.getElementById('cat-'+c.id); if(el) el.style.display='none'; });
+  document.getElementById('cat-myorders').style.display='block';
+  document.getElementById('pageTitle').textContent = 'My Orders';
+  tg.MainButton.hide();
+}
+
+function viewMyOrders(){
+  tg.sendData(JSON.stringify({ action: 'view_subscriptions' }));
+}
 </script>
 </body>
 </html>

@@ -1797,6 +1797,23 @@ ADMIN_LABELS = [
     A_ADD_SUBSCRIPTION, A_BOOK_REQUESTS, A_CUSTOMER_VIEW,
 ]
 
+# Every key the admin's text_state_router uses. clear_admin_flow_state()
+# must be called at the start of every new admin interactive flow so a
+# stale earlier state never intercepts input meant for the new one.
+ADMIN_FLOW_KEYS = [
+    "awaiting_admin_input",
+    "awaiting_comment_for_order",
+    "awaiting_ticket_resolution",
+    "awaiting_credentials_fulfilment",
+    "awaiting_admin_message_for_order",
+    "awaiting_new_sub_field", "new_sub_data",
+    "awaiting_book_price_for",
+]
+
+def clear_admin_flow_state(user_data: dict):
+    for key in ADMIN_FLOW_KEYS:
+        user_data.pop(key, None)
+
 
 def _badge(label: str, count: int) -> str:
     """Appends a 🔴 and the count to a button label when there's something
@@ -1806,28 +1823,36 @@ def _badge(label: str, count: int) -> str:
 
 
 def main_menu_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
-    """A persistent keyboard pinned to the bottom of the chat. Badges the
-    Announcements button with unseen count, and includes a WebApp keyboard
-    button for the Mini App when MINI_APP_URL is configured — this is the
-    only button type that makes tg.sendData() work correctly (the menu
-    button set via BotFather does NOT support sendData)."""
+    """A persistent keyboard. When MINI_APP_URL is configured, the 🏪 Shop
+    button (a proper WebApp KeyboardButton so sendData() works) is shown
+    first and prominently, and the catalog-only buttons (Buy, My Subscriptions,
+    Basket) are hidden since they're accessible inside the Mini App. Without
+    MINI_APP_URL those buttons stay, so nothing breaks if it isn't configured."""
     ann_count = db_unseen_announcement_count(user_id) if user_id else 0
 
-    shop_row = (
-        [KeyboardButton("🏪 Shop", web_app=WebAppInfo(url=MINI_APP_URL)), BOOK_REQUEST_LABEL]
-        if MINI_APP_URL else [BOOK_REQUEST_LABEL]
-    )
-
-    return ReplyKeyboardMarkup(
-        [
-            [BUY_LABEL, MY_SUBS_LABEL], [BASKET_LABEL],
-            [_badge(ANNOUNCEMENTS_LABEL, ann_count), JOIN_CHANNEL_LABEL],
-            [GET_FREE_LABEL, MY_CREDITS_LABEL],
-            shop_row,
-            [TICKET_LABEL, SUPPORT_LABEL],
-        ],
-        resize_keyboard=True,
-    )
+    if MINI_APP_URL:
+        # Shop is first — big and prominent. Catalog buttons removed.
+        return ReplyKeyboardMarkup(
+            [
+                [KeyboardButton("🏪 Shop", web_app=WebAppInfo(url=MINI_APP_URL))],
+                [_badge(ANNOUNCEMENTS_LABEL, ann_count), JOIN_CHANNEL_LABEL],
+                [GET_FREE_LABEL, MY_CREDITS_LABEL],
+                [BOOK_REQUEST_LABEL, TICKET_LABEL],
+                [SUPPORT_LABEL],
+            ],
+            resize_keyboard=True,
+        )
+    else:
+        return ReplyKeyboardMarkup(
+            [
+                [BUY_LABEL, MY_SUBS_LABEL], [BASKET_LABEL],
+                [_badge(ANNOUNCEMENTS_LABEL, ann_count), JOIN_CHANNEL_LABEL],
+                [GET_FREE_LABEL, MY_CREDITS_LABEL],
+                [BOOK_REQUEST_LABEL, TICKET_LABEL],
+                [SUPPORT_LABEL],
+            ],
+            resize_keyboard=True,
+        )
 
 
 def admin_menu_keyboard() -> ReplyKeyboardMarkup:
@@ -2227,6 +2252,7 @@ async def book_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     request_id = int(query.data.split(":", 1)[1])
+    clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_book_price_for"] = request_id
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID, text=f"Enter the price in USD for book request #{request_id}:"
@@ -3638,6 +3664,7 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif text == A_REMOVE_SERIAL:
+        clear_admin_flow_state(context.user_data)
         context.user_data["awaiting_admin_input"] = "remove_serial"
         await update.message.reply_text("Send the serial code to remove:")
 
@@ -3654,6 +3681,7 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await inbox_menu(update, context)
 
     elif text == A_BROADCAST:
+        clear_admin_flow_state(context.user_data)
         context.user_data["awaiting_admin_input"] = "broadcast"
         recipient_count = len(db_all_user_ids(exclude=ADMIN_CHAT_ID))
         await update.message.reply_text(
@@ -3661,10 +3689,12 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif text == A_FIND_ORDER:
+        clear_admin_flow_state(context.user_data)
         context.user_data["awaiting_admin_input"] = "find_order"
         await update.message.reply_text("Send the order number:")
 
     elif text == A_FIND_CUSTOMER:
+        clear_admin_flow_state(context.user_data)
         context.user_data["awaiting_admin_input"] = "find_customer"
         await update.message.reply_text("Send the customer's Telegram ID or @username:")
 
@@ -3678,6 +3708,7 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await credits_menu(update, context)
 
     elif text == A_ADD_SUBSCRIPTION:
+        clear_admin_flow_state(context.user_data)
         context.user_data["awaiting_new_sub_field"] = "name"
         context.user_data["new_sub_data"] = {}
         await update.message.reply_text("Enter the name of the new subscription:")
@@ -3793,6 +3824,7 @@ async def admin_comment_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
 
     order_id = int(query.data.split(":", 1)[1])
+    clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_comment_for_order"] = order_id
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
@@ -3801,7 +3833,8 @@ async def admin_comment_start(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def admin_comment_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends the admin's typed comment to the customer."""
+    """Sends the admin's typed comment to the customer, with a Reply button
+    so the customer can respond directly — same pattern as the Inbox messages."""
     order_id = context.user_data.pop("awaiting_comment_for_order", None)
     if not order_id:
         return
@@ -3815,6 +3848,9 @@ async def admin_comment_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
     await context.bot.send_message(
         chat_id=user_id,
         text=f"💬 Message about your order #{order_id}:\n\n{update.message.text}",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("↩️ Reply", callback_data=f"cust_reply:{order_id}")]]
+        ),
     )
     await update.message.reply_text(f"✅ Comment sent to the customer for order #{order_id}.")
 
@@ -4181,6 +4217,7 @@ async def ticket_resolve_start(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
 
     ticket_id = int(query.data.split(":", 1)[1])
+    clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_ticket_resolution"] = ticket_id
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
@@ -4345,6 +4382,7 @@ async def admin_msg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     order_id = int(query.data.split(":", 1)[1])
+    clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_admin_message_for_order"] = order_id
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID, text=f"Type the message to send the customer about order #{order_id}:"
@@ -4668,6 +4706,7 @@ async def add_serials_pick_duration(update: Update, context: ContextTypes.DEFAUL
     await query.answer()
 
     duration = query.data.split(":", 1)[1]
+    clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_admin_input"] = "add_serials"
     context.user_data["add_serials_duration"] = duration
     label = "1 Year" if duration == "1y" else "6 Months"
@@ -4741,40 +4780,50 @@ async def admin_input_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Single entry point for all free-text messages that aren't the main
-    menu buttons. Dispatches based on what state the sender is in, so only
-    one handler ever needs to be registered for generic text — registering
-    two separate broad text handlers would cause them to silently steal
-    each other's messages.
+    """Single entry point for all free-text messages. Priority rules:
+    1. Explicit Reply-button taps (most recent intent, never swallowed)
+    2. All admin interactive states — ALL in one block so clear_admin_flow_state()
+       guarantees only ONE can be active at a time (prevents the bug where
+       awaiting_book_price_for intercepts text meant for awaiting_comment_for_order)
+    3. Customer collection flows (registration, receipt, book link, ticket)
+    4. Generic text (not a command or button tap)"""
 
-    Reply-to-message states go FIRST, above everything else. Tapping a
-    "Reply" button is the most recent, most explicit thing the person did,
-    and must never be swallowed by an unrelated flow that happened to
-    still be open underneath it (e.g. an unfinished registration form —
-    this was exactly the bug where a reply to an admin message got
-    consumed as the answer to "email address" instead)."""
+    # ── 1. Explicit reply-button taps ────────────────────────────────
     if context.user_data.get("awaiting_customer_reply_for_order"):
         await customer_reply_text(update, context)
         return
 
-    if update.effective_user.id == ADMIN_CHAT_ID and context.user_data.get("awaiting_admin_message_for_order"):
-        await admin_message_reply(update, context)
-        return
+    # ── 2. Admin interactive states (all here, in a single block) ────
+    if update.effective_user.id == ADMIN_CHAT_ID:
+        if context.user_data.get("awaiting_admin_message_for_order"):
+            await admin_message_reply(update, context)
+            return
+        if context.user_data.get("awaiting_comment_for_order"):
+            await admin_comment_reply(update, context)
+            return
+        if context.user_data.get("awaiting_book_price_for"):
+            await book_price_reply(update, context)
+            return
+        if context.user_data.get("awaiting_new_sub_field"):
+            await new_subscription_field_reply(update, context)
+            return
+        if context.user_data.get("awaiting_admin_input"):
+            await admin_input_reply(update, context)
+            return
+        if context.user_data.get("awaiting_ticket_resolution"):
+            await ticket_resolution_reply(update, context)
+            return
+        if context.user_data.get("awaiting_credentials_fulfilment"):
+            await credentials_reply(update, context)
+            return
 
-    if update.effective_user.id == ADMIN_CHAT_ID and context.user_data.get("awaiting_new_sub_field"):
-        await new_subscription_field_reply(update, context)
-        return
-
-    if update.effective_user.id == ADMIN_CHAT_ID and context.user_data.get("awaiting_book_price_for"):
-        await book_price_reply(update, context)
+    # ── 3. Customer collection flows ─────────────────────────────────
+    if context.user_data.get("awaiting_ticket_field") == "message":
+        await ticket_field_reply(update, context)
         return
 
     if context.user_data.get("awaiting_book_link"):
         await book_link_reply(update, context)
-        return
-
-    if context.user_data.get("awaiting_ticket_field") == "message":
-        await ticket_field_reply(update, context)
         return
 
     if context.user_data.get("awaiting_registration_field"):
@@ -4788,22 +4837,6 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("awaiting_payer_name_for_order"):
         await payer_name_reply(update, context)
         return
-
-    if update.effective_user.id == ADMIN_CHAT_ID:
-        # Panel-button follow-ups take priority — they're the most recent
-        # thing the admin explicitly asked to do.
-        if context.user_data.get("awaiting_admin_input"):
-            await admin_input_reply(update, context)
-            return
-        if context.user_data.get("awaiting_comment_for_order"):
-            await admin_comment_reply(update, context)
-            return
-        if context.user_data.get("awaiting_ticket_resolution"):
-            await ticket_resolution_reply(update, context)
-            return
-        if context.user_data.get("awaiting_credentials_fulfilment"):
-            await credentials_reply(update, context)
-            return
 
 
 async def start_order_fulfilment(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int, items: dict):
@@ -5840,6 +5873,27 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     action = data.get("action")
+    if action == "view_subscriptions":
+        # Customer tapped "My Orders" in the Mini App — send their delivered
+        # subscriptions as a message in the bot chat.
+        delivered = db_user_delivered_units(user_id)
+        if not delivered:
+            await update.message.reply_text(
+                "You don't have any delivered subscriptions yet.",
+                reply_markup=main_menu_keyboard(user_id),
+            )
+            return
+        lines = []
+        for delivery_id, item_id, delivered_at in delivered:
+            name = MENU.get(item_id, (item_id,))[0]
+            date = delivered_at[:10] if delivered_at else ""
+            lines.append(f"✅ {name}" + (f" — {date}" if date else ""))
+        await update.message.reply_text(
+            "📋 Your subscriptions:\n\n" + "\n".join(lines),
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return
+
     if action not in ("cart_checkout", "full_order"):
         return
 
