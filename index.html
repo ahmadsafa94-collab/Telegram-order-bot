@@ -401,13 +401,18 @@ function renderOrders(){
   if(!SUBS_DATA){
     el.innerHTML=`<div class="empty-sheet">
       <div class="eico">📋</div>
-      <div>No subscription data available.<br>Try closing and reopening the Shop.</div>
+      <div style="margin-bottom:4px;font-size:14px;font-weight:600;color:var(--text)">Subscription data not loaded</div>
+      <div style="font-size:12px;line-height:1.7;margin-bottom:18px">
+        Send <code style="background:rgba(255,255,255,.1);padding:2px 6px;border-radius:5px">/start</code>
+        in the bot chat to refresh, then reopen the Shop and come back here.
+        <br><br>Or tap below to load your subscriptions in the chat right now:
+      </div>
+      <button class="btn" style="max-width:240px;margin:0 auto;display:block" onclick="loadSubsInChat()">View in Chat →</button>
     </div>`;
     return;
   }
   const {d=[],p=[]}=SUBS_DATA;
   let html='';
-
   if(d.length){
     html+=`<div class="sub-section-lbl">✅ Delivered (${d.length})</div>`;
     d.forEach(([name,date])=>{
@@ -436,10 +441,15 @@ function renderOrders(){
   if(!html){
     html=`<div class="empty-sheet">
       <div class="eico">📭</div>
-      <div>No subscriptions yet.<br>Your orders will appear here after purchase.</div>
+      <div style="font-size:14px;font-weight:600;margin-bottom:6px">No subscriptions yet</div>
+      <div style="font-size:12px;color:var(--hint)">Your orders appear here after purchase.</div>
     </div>`;
   }
   el.innerHTML=html;
+}
+
+function loadSubsInChat(){
+  tg.sendData(JSON.stringify({action:'view_subscriptions'}));
 }
 
 // Show the 📋 icon as active if there's data
@@ -587,6 +597,14 @@ function setErr(inp,msg){inp.classList.add('err');const el=document.getElementBy
 // ── Payment page ──────────────────────────────────────────────────────
 function buildPaymentPage(){
   const total=cartTotal();
+  // Clear previous payment method buttons — they capture `total` in their onclick
+  // closure, so stale buttons from a previous buildPaymentPage call would fire
+  // with the wrong amount if the user modified the basket and came back.
+  document.getElementById('pmGrid').innerHTML='';
+  document.getElementById('pmDetail').innerHTML='';
+  document.getElementById('sumCard').innerHTML='';
+  document.getElementById('submitBtn').style.display='none';
+  selPay=null; selCountry=null; selApp=null;
   [{id:'stars',ico:'⭐',lbl:'Telegram Stars',sub:'Pay with Stars'},
    {id:'credits',ico:'🎁',lbl:'My Credits',sub:'Use earned credits'},
    {id:'card',ico:'💳',lbl:'Visa/Mastercard',sub:'Pay online'},
@@ -602,9 +620,7 @@ function buildPaymentPage(){
   sc.innerHTML=Object.entries(cart).map(([id,{name,price,qty}])=>
     `<div class="sumrow"><div>${name}${qty>1?` ×${qty}`:''}</div><div class="r">$${(price*qty).toFixed(2)}</div></div>`
   ).join('')+`<div class="sumrow"><div>Total</div><div class="r">$${total.toFixed(2)}</div></div>`;
-  selPay=null;selCountry=null;selApp=null;
-  document.getElementById('pmDetail').innerHTML='';
-  document.getElementById('submitBtn').style.display='none';
+  // (state already reset at top of buildPaymentPage)
 }
 
 function selMethod(id,total){
