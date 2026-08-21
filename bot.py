@@ -4289,7 +4289,8 @@ async def extract_imd_catalog_playwright(username: str, password: str,
 
         # ── Login ─────────────────────────────────────────────────────
         await status_cb("🔑 Logging in to imdweb.org...")
-        await page.goto("https://imdweb.org/login", wait_until="networkidle", timeout=30000)
+        await page.goto("https://imdweb.org/login", wait_until="load", timeout=60000)
+        await page.wait_for_timeout(3000)
 
         # Fill login form — try common selectors
         for sel in ['input[name="username"]', 'input[name="user"]', 'input[type="text"]']:
@@ -4301,8 +4302,13 @@ async def extract_imd_catalog_playwright(username: str, password: str,
                 await page.fill(sel, password)
                 break
         await page.click('button[type="submit"], input[type="submit"], button:has-text("Login")')
-        await page.wait_for_load_state("networkidle", timeout=20000)
-        await page.wait_for_timeout(3000)
+        # Wait for navigation after login — use "load" not "networkidle"
+        # since SPAs like imdweb.org keep background requests alive forever
+        try:
+            await page.wait_for_load_state("load", timeout=30000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(4000)
 
         current_url = page.url
         if "login" in current_url.lower():
@@ -4319,8 +4325,11 @@ async def extract_imd_catalog_playwright(username: str, password: str,
         for sel in nav_selectors:
             if await page.locator(sel).first.count():
                 await page.locator(sel).first.click()
-                await page.wait_for_load_state("networkidle", timeout=15000)
-                await page.wait_for_timeout(2000)
+                try:
+                    await page.wait_for_load_state("load", timeout=10000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(3000)
                 break
 
         # Scroll to trigger lazy-loaded items and more API calls
