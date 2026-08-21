@@ -722,6 +722,20 @@ def db_init():
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS imd_catalog (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            category TEXT,
+            extracted_at TEXT NOT NULL
+        )
+        """
+    )
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_imd_name ON imd_catalog(name)")
+    except Exception:
+        pass
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS tickets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -1782,6 +1796,7 @@ BASKET_LABEL = "🧺 Check the Basket and Pay"
 ANNOUNCEMENTS_LABEL = "📢 Announcements"
 JOIN_CHANNEL_LABEL = "📡 Join Channel"
 TICKET_LABEL = "🎫 Send a Ticket"
+IMD_SEARCH_LABEL = "🔬 Search iMD Resources"
 GET_FREE_LABEL = "🎁 Get Free Accounts"
 MY_CREDITS_LABEL = "💳 My Credits"
 BOOK_REQUEST_LABEL = "📚 Request a Book"
@@ -1804,13 +1819,14 @@ A_CREDITS = "💳 Customer Credits"
 A_ADD_SUBSCRIPTION = "➕ Add New Subscription"
 A_BOOK_REQUESTS = "📚 Book Requests"
 A_DELIVERED = "📦 Delivered Subscriptions"
+A_IMD_CATALOG = "🔬 Update iMD Catalog"
 A_CUSTOMER_VIEW = "🛍 Customer Menu"
 
 ADMIN_LABELS = [
     A_VIEW_SERIALS, A_ADD_SERIALS, A_REMOVE_SERIAL,
     A_RECENT_ORDERS, A_PENDING, A_INPUT, A_INBOX, A_BROADCAST,
     A_FIND_ORDER, A_FIND_CUSTOMER, A_STOCK, A_TICKETS, A_CREDITS,
-    A_ADD_SUBSCRIPTION, A_BOOK_REQUESTS, A_DELIVERED, A_CUSTOMER_VIEW,
+    A_ADD_SUBSCRIPTION, A_BOOK_REQUESTS, A_DELIVERED, A_IMD_CATALOG, A_CUSTOMER_VIEW,
 ]
 
 # Every key the admin's text_state_router uses. clear_admin_flow_state()
@@ -1824,6 +1840,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_admin_message_for_order",
     "awaiting_new_sub_field", "new_sub_data",
     "awaiting_book_price_for",
+    "awaiting_imd_catalog_username", "awaiting_imd_catalog_password",
 ]
 
 def clear_admin_flow_state(user_data: dict):
@@ -1980,6 +1997,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [A_CREDITS, A_ADD_SUBSCRIPTION],
             [A_BOOK_REQUESTS],
             [A_DELIVERED],
+            [A_IMD_CATALOG],
             [A_CUSTOMER_VIEW],
         ],
         resize_keyboard=True,
@@ -2107,6 +2125,9 @@ async def main_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == BOOK_REQUEST_LABEL:
         context.user_data["awaiting_book_link"] = True
         await update.message.reply_text("Please send the link of the book you're looking for:")
+
+    elif text == IMD_SEARCH_LABEL:
+        await imd_search_start(update, context)
 
     elif text == SUPPORT_LABEL:
         await update.message.reply_text(
@@ -3827,6 +3848,9 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == A_DELIVERED:
         await delivered_subscriptions_menu(update, context)
 
+    elif text == A_IMD_CATALOG:
+        await imd_catalog_extract_start(update, context)
+
     elif text == A_CUSTOMER_VIEW:
         await update.message.reply_text(
             "Switched to the customer menu. Send /start to return to the admin panel.",
@@ -4172,6 +4196,329 @@ async def book_request_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"bookreqs:{status}")])
 
     await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+# ── iMD catalog extraction & search ──────────────────────────────────
+
+def db_imd_catalog_count() -> int:
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT COUNT(*) FROM imd_catalog").fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+def db_imd_search(query: str, limit: int = 10, offset: int = 0):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT name, category FROM imd_catalog WHERE name LIKE ? ORDER BY name LIMIT ? OFFSET ?",
+        (f"%{query}%", limit, offset),
+    ).fetchall()
+    count = conn.execute(
+        "SELECT COUNT(*) FROM imd_catalog WHERE name LIKE ?",
+        (f"%{query}%",),
+    ).fetchone()[0]
+    conn.close()
+    return rows, count
+
+
+def db_imd_save_catalog(names: list):
+    """Replaces the entire catalog with a fresh extraction."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM imd_catalog")
+    now = datetime.utcnow().isoformat()
+    conn.executemany(
+        "INSERT INTO imd_catalog (name, category, extracted_at) VALUES (?, ?, ?)",
+        [(name, category, now) for name, category in names],
+    )
+    conn.commit()
+    conn.close()
+
+
+async def extract_imd_catalog_playwright(username: str, password: str,
+                                          status_cb) -> list:
+    """Logs into imdweb.org, intercepts the database list API calls, and
+    returns a list of (name, category) tuples for every entry found.
+
+    The iMD web app is a SPA — it loads its catalog via JSON API calls.
+    We intercept those calls to get the full list without DOM scraping.
+    Falls back to DOM scraping if the API calls can't be captured."""
+    from playwright.async_api import async_playwright
+
+    databases = []
+    api_endpoint = None
+    auth_headers = {}
+    api_responses = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+        )
+        ctx = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 900},
+        )
+        page = await ctx.new_page()
+
+        # ── Intercept all JSON API responses ─────────────────────────
+        async def on_response(response):
+            nonlocal api_endpoint
+            try:
+                ct = response.headers.get("content-type", "")
+                if "json" not in ct or response.status != 200:
+                    return
+                url = response.url
+                # Look for calls that look like a database/library listing
+                if any(kw in url.lower() for kw in ["db", "database", "library", "book", "list", "catalog", "search"]):
+                    data = await response.json()
+                    req_headers = dict(response.request.headers)
+                    api_responses.append({"url": url, "data": data, "headers": req_headers})
+                    if not api_endpoint:
+                        api_endpoint = url
+                        auth_headers.update({
+                            k: v for k, v in req_headers.items()
+                            if k.lower() in ("authorization", "x-auth-token", "cookie", "token", "x-token")
+                        })
+            except Exception:
+                pass
+
+        page.on("response", on_response)
+
+        # ── Login ─────────────────────────────────────────────────────
+        await status_cb("🔑 Logging in to imdweb.org...")
+        await page.goto("https://imdweb.org/login", wait_until="networkidle", timeout=30000)
+
+        # Fill login form — try common selectors
+        for sel in ['input[name="username"]', 'input[name="user"]', 'input[type="text"]']:
+            if await page.locator(sel).count():
+                await page.fill(sel, username)
+                break
+        for sel in ['input[name="password"]', 'input[type="password"]']:
+            if await page.locator(sel).count():
+                await page.fill(sel, password)
+                break
+        await page.click('button[type="submit"], input[type="submit"], button:has-text("Login")')
+        await page.wait_for_load_state("networkidle", timeout=20000)
+        await page.wait_for_timeout(3000)
+
+        current_url = page.url
+        if "login" in current_url.lower():
+            await browser.close()
+            raise ValueError("Login failed — check your iMD username and password.")
+
+        await status_cb(f"✅ Logged in. Navigating to database list...")
+
+        # ── Navigate to Databases tab ─────────────────────────────────
+        nav_selectors = [
+            '[href*="database"]', '[href*="databases"]', '[href*="db"]',
+            'a:has-text("Databases")', 'button:has-text("Databases")', '[class*="database"]',
+        ]
+        for sel in nav_selectors:
+            if await page.locator(sel).first.count():
+                await page.locator(sel).first.click()
+                await page.wait_for_load_state("networkidle", timeout=15000)
+                await page.wait_for_timeout(2000)
+                break
+
+        # Scroll to trigger lazy-loaded items and more API calls
+        await status_cb("📜 Loading databases list (this may take 1-2 minutes)...")
+        for _ in range(30):
+            await page.evaluate("window.scrollBy(0, window.innerHeight * 5)")
+            await page.wait_for_timeout(800)
+            if api_responses:
+                break
+
+        # Wait for any remaining API calls to complete
+        await page.wait_for_timeout(3000)
+
+        # ── Parse captured API responses ──────────────────────────────
+        for resp in api_responses:
+            data = resp["data"]
+            found = _extract_names_from_json(data)
+            databases.extend(found)
+
+        # ── DOM fallback if API capture missed everything ─────────────
+        if not databases:
+            await status_cb("🔍 API capture empty — trying DOM scraping...")
+            # Scroll to load all items first
+            prev_count = 0
+            for _ in range(200):
+                await page.evaluate("window.scrollBy(0, window.innerHeight * 3)")
+                await page.wait_for_timeout(400)
+                rows = await page.locator("li, [class*='item'], [class*='db-item'], [class*='database']").all()
+                if len(rows) == prev_count:
+                    break
+                prev_count = len(rows)
+
+            # Extract names from DOM
+            for el in await page.locator("li, [class*='item'], [class*='row']").all():
+                try:
+                    name = await el.inner_text()
+                    name = name.strip()
+                    if 5 < len(name) < 200 and not name.lower() in ("open", "activate", "download"):
+                        databases.append((name, None))
+                except Exception:
+                    pass
+
+        await browser.close()
+
+    # De-duplicate
+    seen = set()
+    unique = []
+    for entry in databases:
+        name = entry[0].strip() if entry[0] else ""
+        if name and name not in seen:
+            seen.add(name)
+            unique.append(entry if len(entry) == 2 else (name, None))
+
+    return unique
+
+
+def _extract_names_from_json(data, depth=0) -> list:
+    """Recursively digs through a JSON response to find database name strings."""
+    if depth > 6:
+        return []
+    results = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                name = (item.get("name") or item.get("title") or item.get("db_name")
+                        or item.get("database_name") or item.get("label") or "")
+                category = (item.get("category") or item.get("type")
+                            or item.get("specialty") or "")
+                if name and 3 < len(name) < 300:
+                    results.append((name.strip(), category.strip() if category else None))
+                else:
+                    results.extend(_extract_names_from_json(item, depth + 1))
+            elif isinstance(item, str) and 5 < len(item) < 200:
+                results.append((item.strip(), None))
+    elif isinstance(data, dict):
+        for key in ("data", "results", "items", "databases", "books", "list", "records"):
+            if key in data:
+                results.extend(_extract_names_from_json(data[key], depth + 1))
+        if not results:
+            for v in data.values():
+                results.extend(_extract_names_from_json(v, depth + 1))
+    return results
+
+
+# ── Admin: start extraction flow ──────────────────────────────────────
+
+async def imd_catalog_extract_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    clear_admin_flow_state(context.user_data)
+    count = db_imd_catalog_count()
+    msg = ""
+    if count:
+        msg = f"Current catalog has {count:,} databases.\n\n"
+    context.user_data["awaiting_imd_catalog_username"] = True
+    await update.message.reply_text(
+        f"{msg}🔬 Extract iMD Catalog\n\n"
+        "This will log into imdweb.org, extract all database names, and save them "
+        "so customers can search before having credentials.\n\n"
+        "Send your iMD username:"
+    )
+
+
+async def imd_catalog_username_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("awaiting_imd_catalog_username", None)
+    context.user_data["imd_extract_username"] = update.message.text.strip()
+    context.user_data["awaiting_imd_catalog_password"] = True
+    await update.message.reply_text(
+        "Send your iMD password:\n_(it won't be stored — used once for extraction)_",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def imd_catalog_password_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("awaiting_imd_catalog_password", None)
+    username = context.user_data.pop("imd_extract_username", "")
+    password = update.message.text.strip()
+
+    # Delete the message containing the password immediately
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    status_msg = await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text="🔄 Starting extraction..."
+    )
+
+    async def update_status(text: str):
+        try:
+            await status_msg.edit_text(text)
+        except Exception:
+            pass
+
+    try:
+        databases = await extract_imd_catalog_playwright(username, password, update_status)
+        if not databases:
+            await update_status("❌ No databases found. The login may have failed or the page structure changed.")
+            return
+
+        await update_status(f"💾 Saving {len(databases):,} databases to catalog...")
+        db_imd_save_catalog(databases)
+        await update_status(
+            f"✅ iMD Catalog updated!\n\n"
+            f"📚 {len(databases):,} databases extracted and saved.\n\n"
+            f"Customers can now search with 🔬 Search iMD Resources."
+        )
+    except ValueError as e:
+        await update_status(f"❌ {e}")
+    except Exception as e:
+        logger.exception("iMD catalog extraction failed")
+        await update_status(f"❌ Extraction failed: {e}")
+
+
+# ── Customer: search the local catalog ───────────────────────────────
+
+async def imd_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    count = db_imd_catalog_count()
+    if count == 0:
+        await update.message.reply_text(
+            "🔬 The iMD resource catalog hasn't been loaded yet.\n"
+            "Please contact support — the admin needs to sync the catalog first."
+        )
+        return
+    context.user_data["awaiting_imd_search"] = True
+    await update.message.reply_text(
+        f"🔬 Search iMD Resources\n\n"
+        f"Our catalog has {count:,} medical databases and textbooks.\n"
+        "Type the name of what you're looking for:"
+    )
+
+
+async def imd_search_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("awaiting_imd_search", None)
+    query = update.message.text.strip()
+    if not query or len(query) < 2:
+        await update.message.reply_text("Please send at least 2 characters to search.")
+        return
+
+    rows, total = db_imd_search(query, limit=10, offset=0)
+    if not rows:
+        await update.message.reply_text(
+            f"No results found for '{query}'.\n\n"
+            "Try a shorter or different search term."
+        )
+        return
+
+    lines = [f"🔬 *iMD Search: '{query}'*\n{total:,} result{'s' if total != 1 else ''} found\n"]
+    for name, category in rows:
+        cat = f" · _{category}_" if category else ""
+        lines.append(f"📖 {name}{cat}")
+
+    if total > 10:
+        lines.append(f"\n_Showing first 10 of {total:,}. Narrow your search for more specific results._")
+
+    text = "\n".join(lines)
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def delivered_subscriptions_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4964,6 +5311,12 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get("awaiting_book_price_for"):
             await book_price_reply(update, context)
             return
+        if context.user_data.get("awaiting_imd_catalog_username"):
+            await imd_catalog_username_reply(update, context)
+            return
+        if context.user_data.get("awaiting_imd_catalog_password"):
+            await imd_catalog_password_reply(update, context)
+            return
         if context.user_data.get("awaiting_new_sub_field"):
             await new_subscription_field_reply(update, context)
             return
@@ -4984,6 +5337,10 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get("awaiting_book_link"):
         await book_link_reply(update, context)
+        return
+
+    if context.user_data.get("awaiting_imd_search"):
+        await imd_search_query(update, context)
         return
 
     if context.user_data.get("awaiting_registration_field"):
@@ -6492,7 +6849,7 @@ def main():
     # function signature for PTB 21 and broke all keyboard button routing.
     _customer_labels = [BUY_LABEL, MY_SUBS_LABEL, BASKET_LABEL, ANNOUNCEMENTS_LABEL,
                         JOIN_CHANNEL_LABEL, TICKET_LABEL, GET_FREE_LABEL, MY_CREDITS_LABEL,
-                        BOOK_REQUEST_LABEL, SUPPORT_LABEL]
+                        BOOK_REQUEST_LABEL, IMD_SEARCH_LABEL, SUPPORT_LABEL]
     _customer_pat = "^(" + "|".join(re.escape(l) for l in _customer_labels) + r")( 🔴\d+)?$"
     _admin_pat    = "^(" + "|".join(re.escape(l) for l in ADMIN_LABELS)    + r")( 🔴\d+)?$"
 
