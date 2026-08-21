@@ -4378,22 +4378,53 @@ async def extract_imd_catalog_playwright(username: str, password: str,
                 "Screenshot sent — please check the image."
             )
 
-        await status_cb(f"✅ Logged in. Navigating to database list...")
+        await status_cb(f"✅ Logged in. Checking for post-login dialogs...")
 
-        # ── Dismiss any modal dialogs that appear post-login ──────────
-        # imdweb.org shows a User Agreement modal on first login —
-        # click Agree if it's there, otherwise just continue.
-        for agree_sel in [
-            'button:has-text("Agree")',
-            'button:has-text("Accept")',
-            'button:has-text("OK")',
-            '[class*="agree"]',
-        ]:
-            if await page.locator(agree_sel).count():
-                await page.locator(agree_sel).first.click()
-                await page.wait_for_timeout(2000)
-                logger.info("Dismissed post-login modal")
-                break
+        # ── Dismiss User Agreement modal ──────────────────────────────
+        # imdweb.org shows a User Agreement modal after login.
+        # We try multiple strategies to click "Agree".
+        await page.wait_for_timeout(3000)  # give the modal time to render
+
+        # Strategy 1: JavaScript click — works even if the button is inside
+        # a React portal that's detached from normal selector scope
+        dismissed = await page.evaluate("""() => {
+            const all = Array.from(document.querySelectorAll('button'));
+            for (const btn of all) {
+                if (btn.textContent.trim() === 'Agree' ||
+                    btn.innerText.trim() === 'Agree') {
+                    btn.click();
+                    return true;
+                }
+            }
+            return false;
+        }""")
+
+        if not dismissed:
+            # Strategy 2: Playwright text locator (handles shadow DOM better)
+            try:
+                await page.get_by_text("Agree", exact=True).first.click(timeout=5000)
+                dismissed = True
+            except Exception:
+                pass
+
+        if not dismissed:
+            # Strategy 3: Any button that contains the word Agree
+            try:
+                btns = await page.locator("button").all()
+                for btn in btns:
+                    txt = await btn.inner_text()
+                    if "agree" in txt.lower():
+                        await btn.click()
+                        dismissed = True
+                        break
+            except Exception:
+                pass
+
+        if dismissed:
+            logger.info("Dismissed User Agreement modal")
+            await page.wait_for_timeout(2000)
+
+        await status_cb("📂 Navigating to database list...")
 
         # ── Navigate to Databases tab ─────────────────────────────────
         nav_selectors = [
