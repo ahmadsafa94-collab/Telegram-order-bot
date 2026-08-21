@@ -1516,12 +1516,19 @@ def db_pop_serial(duration: str):
     return serial_id, code
 
 
-def db_finalize_serial(serial_id: int, order_id: int, success: bool):
+def db_finalize_serial(serial_id: int, order_id: int, success: bool, mark_not_working: bool = False):
     conn = sqlite3.connect(DB_PATH)
     if success:
         conn.execute(
             "UPDATE serials SET status = 'used', used_for_order = ?, used_at = ? WHERE id = ?",
             (order_id, datetime.utcnow().isoformat(), serial_id),
+        )
+    elif mark_not_working:
+        # Serial was rejected by iMD — mark for admin review rather than
+        # releasing it back to the pool where it would fail again.
+        conn.execute(
+            "UPDATE serials SET status = 'not_working' WHERE id = ?",
+            (serial_id,),
         )
     else:
         conn.execute("UPDATE serials SET status = 'available' WHERE id = ?", (serial_id,))
@@ -1859,30 +1866,50 @@ def _shop_url(user_id: int = 0) -> str:
 
     try:
         conn = sqlite3.connect(DB_PATH)
-        # Use the deliveries table — has item_id + delivered_at as a 3-tuple
+        # Deliveries with credentials message for the "tap to see details" feature
         del_rows = conn.execute(
-            "SELECT id, item_id, delivered_at FROM deliveries WHERE user_id = ? ORDER BY id DESC",
+            "SELECT id, item_id, delivered_at, message FROM deliveries "
+            "WHERE user_id = ? ORDER BY id DESC",
             (user_id,),
         ).fetchall()
-        # Pending: fulfilment rows not yet delivered
+        # Pending: include fulfilment_id and order_id so the Mini App can
+        # send the right resume action back to the bot
         pend_rows = conn.execute(
-            "SELECT f.id, f.item_id, f.state FROM fulfilment f "
+            "SELECT f.id, f.order_id, f.item_id, f.state FROM fulfilment f "
             "JOIN orders o ON o.id = f.order_id "
             "WHERE f.user_id = ? AND f.state != 'delivered' "
             "AND o.status NOT IN ('cancelled','rejected')",
             (user_id,),
         ).fetchall()
+        # Items marked out-of-stock by the admin
+        oos_rows = conn.execute(
+            "SELECT item_id FROM stock_status WHERE status = 'out_of_stock'"
+        ).fetchall()
         conn.close()
 
+        oos_ids = [r[0] for r in oos_rows]
+
         delivered = [
-            [MENU.get(iid, (iid,))[0], dat[:10] if dat else ""]
-            for _, iid, dat in del_rows
+            [MENU.get(iid, (iid,))[0], dat[:10] if dat else "", msg or ""]
+            for _, iid, dat, msg in del_rows
         ]
         pending = [
-            [MENU.get(iid, (iid,))[0], state]
-            for _, iid, state in pend_rows
+            [MENU.get(iid, (iid,))[0], state, fid, oid]
+            for fid, oid, iid, state in pend_rows
         ]
-        data = {"d": delivered, "p": pending, "c": custom}
+        # Custom items — exclude out-of-stock ones so the Mini App catalog
+        # automatically stays in sync with the admin's stock toggles
+        custom_filtered = [
+            [item_id, name, float(price)]
+            for item_id, name, price in db_load_custom_items()
+            if item_id not in oos_ids
+        ]
+        data = {
+            "d": delivered,
+            "p": pending,
+            "c": custom_filtered,
+            "oos": oos_ids,
+        }
         return f"{MINI_APP_URL}?subs={_encode(data)}"
     except Exception:
         logger.exception("_shop_url: failed to encode subscription data for user %s", user_id)
@@ -4747,24 +4774,40 @@ async def admin_pending_back(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def show_serials(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lists the actual available serial codes in each pool, not just counts."""
-    rows = db_list_serials(status="available")
-    if not rows:
-        await update.message.reply_text("No available serials in either pool.")
-        return
-
-    grouped = {"6m": [], "1y": []}
-    for duration, code, status, used_for_order in rows:
-        grouped.setdefault(duration, []).append(code)
+    """Lists available serials and any not_working ones so the admin can
+    review and delete failed serials."""
+    available = db_list_serials(status="available")
+    not_working = db_list_serials(status="not_working")
 
     lines = []
+
+    grouped = {"6m": [], "1y": []}
+    for duration, code, status, used_for_order in available:
+        grouped.setdefault(duration, []).append(code)
+
+    lines.append("🔑 Available Serials")
     for duration, label in (("6m", "6 Months"), ("1y", "1 Year")):
         codes = grouped.get(duration, [])
-        lines.append(f"\n🔑 {label} — {len(codes)} available")
+        lines.append(f"\n  {label} — {len(codes)} available")
         if codes:
-            lines.extend(f"  {code}" for code in codes)
+            lines.extend(f"    {code}" for code in codes)
         else:
-            lines.append("  (none)")
+            lines.append("    (none)")
+
+    if not_working:
+        lines.append("\n\n❌ Not Working Serials (rejected by iMD — review and delete)")
+        nw_grouped = {"6m": [], "1y": []}
+        for duration, code, status, used_for_order in not_working:
+            nw_grouped.setdefault(duration, []).append(code)
+        for duration, label in (("6m", "6 Months"), ("1y", "1 Year")):
+            codes = nw_grouped.get(duration, [])
+            if codes:
+                lines.append(f"\n  {label}:")
+                lines.extend(f"    ✕ {code}" for code in codes)
+
+    if not available and not not_working:
+        await update.message.reply_text("No serials in either pool.")
+        return
 
     text = "\n".join(lines).strip()
     for i in range(0, len(text), 3500):
@@ -5361,23 +5404,48 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
             await process_next_in_queue(context, customer_user_id, order_id)
         return
 
-    # Everything below is a non-success: the serial goes back to the pool
-    # so it isn't lost, and the customer is NOT sent any credentials.
-    db_finalize_serial(serial_id, order_id, success=False)
-
-    # ---- Serial problem: admin's to fix, customer isn't involved.
+    # Everything below is a non-success. For serial errors, mark the serial
+    # as not_working (not back to available — it would fail again) and retry
+    # automatically with the next available serial before bothering the admin.
     if status == "serial_error":
-        await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=(
-                f"🔴 SERIAL PROBLEM — Order #{order_id} ({action_label})\n\n"
-                f"Serial `{serial_code}` was rejected by iMD and has been returned to the pool.\n"
-                f"Remove it with /removeserial {serial_code}, add a working one with "
-                f"/addserials {duration} <code>, then retry.\n\n{detail}"
-            ),
-            reply_markup=retry_button,
+        db_finalize_serial(serial_id, order_id, success=False, mark_not_working=True)
+        logger.warning(
+            "iMD serial %s rejected for order #%s — marked not_working, trying next serial",
+            serial_code, order_id,
         )
+        # Try next available serial of the same duration
+        next_serial = db_pop_serial(duration)
+        if next_serial:
+            next_serial_id, next_serial_code = next_serial
+            pending[order_id] = (next_serial_id, next_serial_code)
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    f"🔄 Serial `{serial_code}` failed for order #{order_id} — "
+                    f"marked as not working, trying next serial `{next_serial_code}`..."
+                ),
+            )
+            # Re-run the registration with the new serial (same data/context)
+            context.application.create_task(
+                run_imd_registration(context, order_id)
+            )
+        else:
+            # Pool exhausted — notify admin to add more serials
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    f"🔴 ALL SERIALS EXHAUSTED — Order #{order_id} ({action_label})\n\n"
+                    f"Serial `{serial_code}` and all others in the pool have been tried and failed.\n"
+                    "Add a working serial and then retry the order.\n\n"
+                    f"{detail}"
+                ),
+                reply_markup=retry_button,
+            )
         return
+
+    # Everything else (username_error, email_error, etc.) — serial goes back
+    # to the pool (it's not the serial's fault).
+    db_finalize_serial(serial_id, order_id, success=False)
 
     # ---- Username problem: ask the customer to supply a different one.
     if status == "username_error":
@@ -5967,6 +6035,45 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
+    if action == "complete_registration":
+        fid = data.get("fulfilment_id")
+        oid = data.get("order_id")
+        if not fid or not oid:
+            await update.message.reply_text("Could not find that pending order. Please contact support.")
+            return
+        # Verify it belongs to this user and still needs action
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute(
+            "SELECT item_id, state FROM fulfilment WHERE id = ? AND user_id = ? AND order_id = ?",
+            (fid, user_id, oid),
+        ).fetchone()
+        conn.close()
+        if not row:
+            await update.message.reply_text("Order not found or already processed.")
+            return
+        item_id, state = row
+        if state == "awaiting_delivery":
+            await update.message.reply_text("✅ Your subscription is being prepared. We'll deliver it shortly.")
+            return
+        await update.message.reply_text(
+            f"Let's complete your registration for {MENU.get(item_id,(item_id,))[0]}:",
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        await process_next_in_queue(context, user_id, oid)
+        return
+
+    if action == "send_receipt":
+        oid = data.get("order_id")
+        if not oid:
+            await update.message.reply_text("Could not find that order. Please contact support.")
+            return
+        context.user_data["awaiting_receipt_for_order"] = oid
+        await update.message.reply_text(
+            "Please send a photo of your payment receipt:",
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return
+
     if action == "view_pending":
         pending = db_user_pending_items(user_id)
         if not pending:
@@ -6026,26 +6133,72 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     # Create a fulfilment row for each unit and pre-populate it with the
     # registration details the customer already filled in the Mini App.
     db_add_fulfilment_items(order_id, user_id, order_items)
-    fulfilment_rows = db_all_pending_items()
-    # Match detail entries to fulfilment rows in order
-    detail_map = {}  # item_id → list of detail dicts
+
+    # Store credentials from the Mini App directly into fulfilment rows —
+    # using a targeted query for THIS order so we get the exact rows we just
+    # inserted (db_all_pending_items queries for admin view and returns a
+    # different set of rows than what we need here).
+    detail_map = {}
     for entry in items_raw:
         iid = entry.get("id")
         if iid and iid in order_items:
             detail_map.setdefault(iid, []).append(entry)
 
-    for row in fulfilment_rows:
-        fid, oid, uid, iid, unit_no, state, info_json = row
-        if oid != order_id:
-            continue
+    conn = sqlite3.connect(DB_PATH)
+    order_fuls = conn.execute(
+        "SELECT id, item_id, unit_no FROM fulfilment WHERE order_id = ? ORDER BY id",
+        (order_id,),
+    ).fetchall()
+    conn.close()
+
+    for fid, iid, unit_no in order_fuls:
         details_list = detail_map.get(iid, [])
         detail_entry = details_list[unit_no - 1] if unit_no - 1 < len(details_list) else {}
-        if detail_entry:
-            # Strip the routing keys, keep only the credential fields
-            info = {k: v for k, v in detail_entry.items() if k not in ("id", "account_type")}
-            info["account_type"] = detail_entry.get("account_type", "new")
-            db_set_fulfilment_info(fid, info)
+        if not detail_entry:
+            continue
+        info = {k: v for k, v in detail_entry.items() if k not in ("id", "account_type")}
+        info["account_type"] = detail_entry.get("account_type", "new")
+        db_set_fulfilment_info(fid, info)
+        # Mark awaiting_delivery so process_next_in_queue skips re-asking
+        # for credentials — they've already been collected in the Mini App.
+        if iid not in IMD_TRIGGER_ITEMS:
             db_set_fulfilment_state(fid, "awaiting_delivery")
+            # Notify admin immediately with the stored credentials so they
+            # can register as soon as the payment is confirmed.
+            item_name = MENU.get(iid, (iid,))[0]
+            atype = detail_entry.get("account_type", "new")
+            if atype == "new":
+                cred_lines = (
+                    f"First name: {info.get('first_name','')}\n"
+                    f"Last name: {info.get('last_name','')}\n"
+                    f"Email: {info.get('email','')}\n"
+                    f"Username: {info.get('username','')}\n"
+                    f"Password: {info.get('password','')}"
+                )
+                tag = "🆕 NEW"
+            else:
+                cred_lines = (
+                    f"Username/Email: {info.get('login_username','')}\n"
+                    f"Password: {info.get('login_password','')}"
+                )
+                tag = "🔄 RENEWAL"
+            if ADMIN_CHAT_ID:
+                try:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        text=(
+                            f"📝 Credentials received ({tag}) — Order #{order_id} (awaiting payment)\n"
+                            f"Product: {item_name}\n\n{cred_lines}\n\n"
+                            "Deliver once payment is confirmed using the 📤 Send Credentials button."
+                        ),
+                        reply_markup=InlineKeyboardMarkup(
+                            [[InlineKeyboardButton("📤 Send Credentials",
+                                                   callback_data=f"deliver:{fid}")]]
+                        ),
+                    )
+                except Exception:
+                    logger.exception("Failed to send pre-payment credentials to admin")
+
 
     # Summary line for the customer confirmation message
     lines = [f"{q}× {MENU[i][0]}" for i, q in order_items.items()]
