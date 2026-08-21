@@ -4235,7 +4235,7 @@ def db_imd_save_catalog(names: list):
 
 
 async def extract_imd_catalog_playwright(username: str, password: str,
-                                          status_cb) -> list:
+                                          status_cb, bot=None, admin_id=None) -> list:
     """Logs into imdweb.org, intercepts the database list API calls, and
     returns a list of (name, category) tuples for every entry found.
 
@@ -4290,37 +4290,101 @@ async def extract_imd_catalog_playwright(username: str, password: str,
         # ── Login ─────────────────────────────────────────────────────
         await status_cb("🔑 Logging in to imdweb.org...")
         await page.goto("https://imdweb.org/login", wait_until="load", timeout=60000)
-        await page.wait_for_timeout(3000)
-
-        # Fill login form — try common selectors
-        for sel in ['input[name="username"]', 'input[name="user"]', 'input[type="text"]']:
-            if await page.locator(sel).count():
-                await page.fill(sel, username)
-                break
-        for sel in ['input[name="password"]', 'input[type="password"]']:
-            if await page.locator(sel).count():
-                await page.fill(sel, password)
-                break
-        await page.click('button[type="submit"], input[type="submit"], button:has-text("Login")')
-        # Wait for navigation after login — use "load" not "networkidle"
-        # since SPAs like imdweb.org keep background requests alive forever
-        try:
-            await page.wait_for_load_state("load", timeout=30000)
-        except Exception:
-            pass
         await page.wait_for_timeout(4000)
 
-        current_url = page.url
-        if "login" in current_url.lower():
+        # Take a screenshot of the login page to debug selector issues
+        login_screenshot = "/tmp/imd_login.png"
+        await page.screenshot(path=login_screenshot)
+
+        # Dump all inputs visible on the page so we know what we're dealing with
+        inputs = await page.evaluate("""() => {
+            return Array.from(document.querySelectorAll('input')).map(i => ({
+                type: i.type, name: i.name, id: i.id,
+                placeholder: i.placeholder, className: i.className
+            }));
+        }""")
+        logger.info("iMD login page inputs: %s", inputs)
+
+        # Fill by position — first text/email input = username, first password = password.
+        # This avoids selector guessing since SPAs often use generated class names.
+        text_inputs = await page.locator('input[type="text"], input[type="email"], input:not([type])').all()
+        pwd_inputs  = await page.locator('input[type="password"]').all()
+
+        if not text_inputs or not pwd_inputs:
+            # Send screenshot to admin so they can see what the page looks like
+            if bot and admin_id:
+                await bot.send_photo(
+                    chat_id=admin_id,
+                    photo=open(login_screenshot, "rb"),
+                    caption=f"⚠️ iMD login: could not find form fields.\n"
+                            f"Inputs found: {inputs}\nURL: {page.url}",
+                )
             await browser.close()
-            raise ValueError("Login failed — check your iMD username and password.")
+            raise ValueError("Could not find the login form fields on imdweb.org. Screenshot sent.")
+
+        await text_inputs[0].click()
+        await text_inputs[0].fill(username)
+        await page.wait_for_timeout(500)
+        await pwd_inputs[0].click()
+        await pwd_inputs[0].fill(password)
+        await page.wait_for_timeout(500)
+
+        # Click the login/submit button
+        clicked = False
+        for sel in [
+            'button[type="submit"]', 'input[type="submit"]',
+            'button:has-text("Login")', 'button:has-text("Sign in")',
+            'button:has-text("Log in")',
+        ]:
+            if await page.locator(sel).count():
+                await page.locator(sel).first.click()
+                clicked = True
+                break
+        if not clicked:
+            # Last resort: press Enter in the password field
+            await pwd_inputs[0].press("Enter")
+
+        # Wait for SPA navigation — give it up to 10 seconds
+        await page.wait_for_timeout(8000)
+        try:
+            await page.wait_for_load_state("load", timeout=15000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(2000)
+
+        current_url = page.url
+        page_text = await page.inner_text("body") if await page.locator("body").count() else ""
+
+        # Success = URL no longer contains "login" OR page shows post-login elements
+        # (some SPAs stay on the same URL and only swap content)
+        logged_in = (
+            "login" not in current_url.lower()
+            or any(kw in page_text for kw in ("Databases", "Favorites", "Home", "Account", "Search"))
+        )
+
+        if not logged_in:
+            # Send screenshot so admin can see the error message
+            post_screenshot = "/tmp/imd_after_login.png"
+            await page.screenshot(path=post_screenshot)
+            if bot and admin_id:
+                await bot.send_photo(
+                    chat_id=admin_id,
+                    photo=open(post_screenshot, "rb"),
+                    caption=f"⚠️ Login result — URL: {current_url}",
+                )
+            await browser.close()
+            raise ValueError(
+                f"Login did not succeed (URL: {current_url}). "
+                "Screenshot sent — please check the image."
+            )
 
         await status_cb(f"✅ Logged in. Navigating to database list...")
 
         # ── Navigate to Databases tab ─────────────────────────────────
         nav_selectors = [
+            'a:has-text("Databases")', 'button:has-text("Databases")',
             '[href*="database"]', '[href*="databases"]', '[href*="db"]',
-            'a:has-text("Databases")', 'button:has-text("Databases")', '[class*="database"]',
+            '[class*="database"]',
         ]
         for sel in nav_selectors:
             if await page.locator(sel).first.count():
@@ -4329,7 +4393,7 @@ async def extract_imd_catalog_playwright(username: str, password: str,
                     await page.wait_for_load_state("load", timeout=10000)
                 except Exception:
                     pass
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(4000)
                 break
 
         # Scroll to trigger lazy-loaded items and more API calls
@@ -4466,7 +4530,10 @@ async def imd_catalog_password_reply(update: Update, context: ContextTypes.DEFAU
             pass
 
     try:
-        databases = await extract_imd_catalog_playwright(username, password, update_status)
+        databases = await extract_imd_catalog_playwright(
+            username, password, update_status,
+            bot=context.bot, admin_id=ADMIN_CHAT_ID,
+        )
         if not databases:
             await update_status("❌ No databases found. The login may have failed or the page structure changed.")
             return
