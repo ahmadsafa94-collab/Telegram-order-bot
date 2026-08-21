@@ -339,8 +339,12 @@ const CATALOG = [
 
 const IMAP = {};
 CATALOG.forEach(c=>{
-  if(c.groups) c.groups.forEach(g=>g.items.forEach(i=>IMAP[i.id]=i));
-  if(c.single) c.single.forEach(i=>IMAP[i.id]={...i,sub:'1 Year'});
+  if(c.groups) c.groups.forEach(g=>g.items.forEach(i=>{
+    IMAP[i.id]={...i, fullname: c.name+' — '+i.name+(i.sub?' ('+i.sub+')':'')};
+  }));
+  if(c.single) c.single.forEach(i=>{
+    IMAP[i.id]={...i, sub:'1 Year', fullname: i.name+' — 1 Year'};
+  });
 });
 
 // ── Payment data ──────────────────────────────────────────────────────
@@ -349,23 +353,125 @@ const FLAGS={Lebanon:'🇱🇧',Jordan:'🇯🇴',India:'🇮🇳',Ghana:'🇬�
 
 function payInstr(c,t){
   const m={
-    Lebanon:`WhishMoney: <span class="mono">81666579</span><br>Amount: <strong>$${t.toFixed(2)}</strong>`,
-    Jordan:`<strong>${(t*0.7066).toFixed(1)} JOD</strong><br>CLIQ: <span class="mono">WKS777</span> Orange·Waleed Shaqfeh<br>CLIQ: <span class="mono">WKS999</span> Etihad·Waleed Shaqfeh<br>CLIQ: <span class="mono">WKS555</span> Zain·Shamalti`,
-    India:`UPI: <span class="mono">s4005194160889795@slc</span><br>Shilpaben karetiya<br><strong>₹${Math.round(t*94.6666).toLocaleString()}</strong><br>⚠️ Leave remarks empty. Split if needed.`,
-    Ghana:`<strong>${(t*11.8).toFixed(2)} GHS</strong><br><span class="mono">0257505632</span> MTN·Saibu Mahamadu<br><span class="mono">0204860754</span> Telecel·Saibu Mahamadu`,
-    Pakistan:`<strong>${Math.round(t*280).toLocaleString()} PKR</strong><br>HBL·Muhammad Bilal<br>Acc: <span class="mono">03577900871203</span><br>IBAN: <span class="mono">PK08HABB0003577900871203</span><br>Branch: TOTALAI`,
-    Europe:`Revolut card: <span class="mono">5413525250267271</span><br>Alijon Karimov·Tajikistan<br><strong>$${t.toFixed(2)}</strong>`,
-    KSA:`<strong>${(t*3.8).toFixed(2)} SAR</strong><br>IBAN: <span class="mono">SA8710000006857309000101</span><br>IBAN: <span class="mono">SA0510000062300187719603</span><br>Ahli Bank·Jamil Hajji<br><strong>Purpose: Friends & family</strong>`,
-    Russia:`<strong>${Math.round(t*85.5).toLocaleString()} RUB</strong><br>Sberbank→Int'l→Phone: <span class="mono">+992002373232</span><br>Tajikistan·Alijon Karimov·Alif Bank`,
+    Lebanon:`
+      <strong>📱 WhishMoney Transfer</strong><br>
+      1. Open the WhishMoney app<br>
+      2. Tap <em>Send Money</em> → <em>Whish Wallet</em><br>
+      3. Phone number: <span class="mono">81666579</span><br>
+      4. Amount: <strong>$${t.toFixed(2)} USD</strong><br>
+      5. Leave note/reason empty<br>
+      6. Confirm and take a screenshot`,
+
+    Jordan:`
+      <strong>💳 CliQ Transfer — ${(t*0.7066).toFixed(1)} JOD</strong><br>
+      Choose any of these CliQ aliases:<br><br>
+      🔸 Orange Money: <span class="mono">WKS777</span> — Waleed Shaqfeh<br>
+      🔸 Etihad Bank: <span class="mono">WKS999</span> — Waleed Shaqfeh<br>
+      🔸 Zain Cash: <span class="mono">WKS555</span> — Mohammad Shamalti<br><br>
+      Amount: <strong>${(t*0.7066).toFixed(1)} JOD</strong><br>
+      Leave description/reason empty. Screenshot after sending.`,
+
+    India:`
+      <strong>💸 UPI Transfer — ₹${Math.round(t*94.6666).toLocaleString()}</strong><br>
+      1. Open any UPI app (GPay, PhonePe, Paytm, etc.)<br>
+      2. Send to UPI ID: <span class="mono">s4005194160889795@slc</span><br>
+      3. Recipient name: <strong>Shilpaben karetiya</strong><br>
+      4. Amount: <strong>₹${Math.round(t*94.6666).toLocaleString()}</strong><br>
+      ⚠️ Leave remarks/note completely empty<br>
+      ⚠️ If payment fails, split into 2–3 smaller amounts`,
+
+    Ghana:`
+      <strong>📲 Mobile Money — ${(t*11.8).toFixed(2)} GHS</strong><br>
+      Choose any option:<br><br>
+      🔸 MTN Mobile Money: <span class="mono">0257505632</span> — Saibu Mahamadu<br>
+      🔸 Telecel/Vodafone: <span class="mono">0204860754</span> — Saibu Mahamadu<br><br>
+      Amount: <strong>${(t*11.8).toFixed(2)} GHS</strong><br>
+      ⚠️ Do not call the number. Screenshot after sending.`,
+
+    Pakistan:`
+      <strong>🏦 Bank Transfer — ${Math.round(t*280).toLocaleString()} PKR</strong><br>
+      Bank: <strong>HBL (Habib Bank)</strong><br>
+      Account name: <strong>Muhammad Bilal</strong><br>
+      Account No.: <span class="mono">03577900871203</span><br>
+      IBAN: <span class="mono">PK08HABB0003577900871203</span><br>
+      Branch: <strong>TOTALAI</strong><br><br>
+      Amount: <strong>${Math.round(t*280).toLocaleString()} PKR</strong><br>
+      Leave payment description empty. Screenshot the confirmation.`,
+
+    Europe:`
+      <strong>💳 Revolut Card Transfer</strong><br>
+      1. Open Revolut → Send → By card number<br>
+      2. Card number: <span class="mono">5413525250267271</span><br>
+      3. Cardholder: <strong>Alijon Karimov</strong> (Tajikistan)<br>
+      4. Amount: <strong>$${t.toFixed(2)} USD</strong> (or equivalent EUR)<br>
+      5. Purpose: Personal / Educational<br>
+      Screenshot the confirmation screen.`,
+
+    KSA:`
+      <strong>🏦 Bank Transfer — ${(t*3.8).toFixed(2)} SAR</strong><br>
+      Bank: <strong>Ahli Bank</strong><br>
+      Name: <strong>Jamil Hajji</strong><br>
+      IBAN (option 1): <span class="mono">SA8710000006857309000101</span><br>
+      IBAN (option 2): <span class="mono">SA0510000062300187719603</span><br><br>
+      Amount: <strong>${(t*3.8).toFixed(2)} SAR</strong><br>
+      ⚠️ Transfer purpose must be: <strong>Friends &amp; family / Personal</strong><br>
+      NOT educational or commercial. Screenshot the receipt.`,
+
+    Russia:`
+      <strong>🏦 Sberbank International Transfer — ${Math.round(t*85.5).toLocaleString()} RUB</strong><br>
+      1. Open Sberbank → Transfers → International<br>
+      2. Country: <strong>Tajikistan</strong><br>
+      3. Bank: <strong>Alif Bank</strong><br>
+      4. Recipient phone: <span class="mono">+992002373232</span><br>
+      5. Name: <strong>Alijon Karimov</strong><br>
+      6. Amount: <strong>${Math.round(t*85.5).toLocaleString()} RUB</strong><br>
+      Screenshot the confirmation.`,
   };
   return m[c]||`Amount: <strong>$${t.toFixed(2)}</strong>`;
 }
 const USA_APPS={
-  'TapTap Send':`TapTap→Lebanon→Whish Money Wallet<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa·1994`,
-  'Ria':`App→Lebanon→Purpl<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa·Educational·17/09/1994`,
-  'Paysend':`App→Lebanon→Purpl<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa·Educational·17/09/1994`,
-  'Remitly':`App→Lebanon→Purpl<br>Phone: <span class="mono">0096181666579</span><br>Ahmad Safa·Educational·17/09/1994`,
-  'Revolut':`Card: <span class="mono">5413525250267271</span><br>Alijon Karimov·Tajikistan`,
+  'TapTap Send':`
+    <strong>📲 TapTap Send</strong><br>
+    1. Open TapTap Send app<br>
+    2. Select country: <strong>Lebanon</strong><br>
+    3. Choose delivery: <strong>Whish Money Wallet</strong><br>
+    4. Phone: <span class="mono">0096181666579</span><br>
+    5. Recipient: <strong>Ahmad Safa</strong> · Year of birth: <strong>1994</strong><br>
+    6. Send and screenshot`,
+  'Ria':`
+    <strong>📲 Ria Money Transfer</strong><br>
+    1. Open Ria app or <a href="https://riamoneytransfer.com" target="_blank" style="color:var(--teal2)">riamoneytransfer.com</a><br>
+    2. Send to: <strong>Lebanon</strong><br>
+    3. Delivery: <strong>Purpl wallet</strong><br>
+    4. Mobile: <span class="mono">0096181666579</span><br>
+    5. Name: <strong>Ahmad Safa</strong> · DOB: <strong>17/09/1994</strong><br>
+    6. Purpose: <strong>Educational / Personal</strong><br>
+    Screenshot the receipt`,
+  'Paysend':`
+    <strong>📲 Paysend</strong><br>
+    1. Open Paysend app or website<br>
+    2. Send to: <strong>Lebanon</strong><br>
+    3. Delivery method: <strong>Purpl wallet</strong><br>
+    4. Mobile: <span class="mono">0096181666579</span><br>
+    5. Name: <strong>Ahmad Safa</strong> · DOB: <strong>17/09/1994</strong><br>
+    6. Purpose: <strong>Educational / Personal</strong><br>
+    Screenshot the receipt`,
+  'Remitly':`
+    <strong>📲 Remitly</strong><br>
+    1. Open Remitly app or <a href="https://remitly.com" target="_blank" style="color:var(--teal2)">remitly.com</a><br>
+    2. Send to: <strong>Lebanon</strong><br>
+    3. Delivery: <strong>Purpl mobile wallet</strong><br>
+    4. Mobile: <span class="mono">0096181666579</span><br>
+    5. Name: <strong>Ahmad Safa</strong> · DOB: <strong>17/09/1994</strong><br>
+    6. Purpose: <strong>Educational / Personal</strong><br>
+    Screenshot the receipt`,
+  'Revolut':`
+    <strong>💳 Revolut Card Transfer</strong><br>
+    1. Revolut → Payments → Send → By card<br>
+    2. Card number: <span class="mono">5413525250267271</span><br>
+    3. Name: <strong>Alijon Karimov</strong> (Tajikistan)<br>
+    4. Purpose: <strong>Personal</strong><br>
+    Screenshot the confirmation`,
 };
 
 // ── Cart ──────────────────────────────────────────────────────────────
@@ -376,7 +482,7 @@ const cartSize =()=>Object.values(cart).reduce((s,i)=>s+i.qty,0);
 
 function addItem(id){
   const itm=IMAP[id]; if(!itm) return;
-  cart[id]=cart[id]?{...cart[id],qty:cart[id].qty+1}:{name:itm.name,price:itm.price,qty:1};
+  cart[id]=cart[id]?{...cart[id],qty:cart[id].qty+1}:{name:itm.fullname||itm.name,price:itm.price,qty:1};
   const btn=document.getElementById('ab-'+id);
   if(btn){btn.textContent='✓';btn.classList.add('in');}
   syncBasket(); showToast('Added · $'+itm.price);
@@ -707,11 +813,10 @@ if (SUBS_DATA && SUBS_DATA.c && SUBS_DATA.c.length) {
     const lbl = document.createElement('div');
     lbl.className = 'sl'; lbl.textContent = 'Additional Subscriptions';
     moreSec.appendChild(lbl);
-    SUBS_DATA.c.forEach(([name, price]) => {
-      const fakeId = 'custom_' + name.replace(/\W+/g,'_').toLowerCase();
-      // Register in IMAP so addItem can find it
-      IMAP[fakeId] = {id: fakeId, name, price, sub: ''};
-      const row = makeRow({id: fakeId, name, price, sub: '', e: '📦'}, true);
+    SUBS_DATA.c.forEach(([itemId, name, price]) => {
+      // Register in IMAP with the actual bot item_id so orders work correctly
+      IMAP[itemId] = {id: itemId, name, price, sub: '', fullname: name};
+      const row = makeRow({id: itemId, name, price, sub: '', e: '📦'}, true);
       moreSec.appendChild(row);
     });
   }

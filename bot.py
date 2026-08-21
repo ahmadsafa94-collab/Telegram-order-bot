@@ -1833,50 +1833,64 @@ def _badge(label: str, count: int) -> str:
 def _shop_url(user_id: int = 0) -> str:
     """Builds the Mini App URL. When user_id is known, subscription data and
     custom admin-added items are encoded as a base64 query param (?subs=...)
-    so the Mini App can display them without any HTTP API call.
-
-    Three fixes vs. the previous version:
-    1. Uses ?subs= (query param) instead of #fragment — some Telegram clients
-       strip URL fragments before passing the URL to the WebApp.
-    2. Encodes data as arrays [[name,date]] not objects {"n":...} so the Mini
-       App's array-destructuring works correctly.
-    3. Includes custom admin-added subscriptions so the Mini App catalog stays
-       in sync with whatever the admin has added via ➕ Add New Subscription."""
+    so the Mini App can display them without any HTTP API call."""
     if not MINI_APP_URL:
         return ""
-    if not user_id:
-        # Still try to include custom items even for unknown user
-        try:
-            import base64
-            custom = [[name, price] for _, name, price in db_load_custom_items()]
-            if custom:
-                encoded = base64.urlsafe_b64encode(
-                    json.dumps({"d": [], "p": [], "c": custom}, separators=(",", ":")).encode()
-                ).decode().rstrip("=")
-                return f"{MINI_APP_URL}?subs={encoded}"
-        except Exception:
-            pass
-        return MINI_APP_URL
-    try:
-        import base64
-        delivered = db_user_delivered_units(user_id)
-        pending   = db_user_pending_items(user_id)
-        custom    = [[name, price] for _, name, price in db_load_custom_items()]
-        data = {
-            # Arrays (not objects) so the HTML can use [name, date] destructuring
-            "d": [[MENU.get(iid, (iid,))[0], dat[:10] if dat else ""]
-                  for _, iid, dat in delivered],
-            "p": [[MENU.get(iid, (iid,))[0], state]
-                  for fid, oid, iid, unit_no, state in pending],
-            # Custom admin-added subscriptions for the catalog
-            "c": custom,
-        }
-        encoded = base64.urlsafe_b64encode(
+
+    def _encode(data: dict) -> str:
+        import base64 as _b64
+        return _b64.urlsafe_b64encode(
             json.dumps(data, separators=(",", ":")).encode()
         ).decode().rstrip("=")
-        return f"{MINI_APP_URL}?subs={encoded}"
+
+    # Always include custom catalog items so the Mini App catalog stays in sync
+    try:
+        custom = [[item_id, name, float(price)] for item_id, name, price in db_load_custom_items()]
     except Exception:
-        logger.exception("Failed to encode subscription data in Mini App URL")
+        custom = []
+
+    if not user_id:
+        if custom:
+            try:
+                return f"{MINI_APP_URL}?subs={_encode({'d':[],'p':[],'c':custom})}"
+            except Exception:
+                pass
+        return MINI_APP_URL
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        # Use the deliveries table — has item_id + delivered_at as a 3-tuple
+        del_rows = conn.execute(
+            "SELECT id, item_id, delivered_at FROM deliveries WHERE user_id = ? ORDER BY id DESC",
+            (user_id,),
+        ).fetchall()
+        # Pending: fulfilment rows not yet delivered
+        pend_rows = conn.execute(
+            "SELECT f.id, f.item_id, f.state FROM fulfilment f "
+            "JOIN orders o ON o.id = f.order_id "
+            "WHERE f.user_id = ? AND f.state != 'delivered' "
+            "AND o.status NOT IN ('cancelled','rejected')",
+            (user_id,),
+        ).fetchall()
+        conn.close()
+
+        delivered = [
+            [MENU.get(iid, (iid,))[0], dat[:10] if dat else ""]
+            for _, iid, dat in del_rows
+        ]
+        pending = [
+            [MENU.get(iid, (iid,))[0], state]
+            for _, iid, state in pend_rows
+        ]
+        data = {"d": delivered, "p": pending, "c": custom}
+        return f"{MINI_APP_URL}?subs={_encode(data)}"
+    except Exception:
+        logger.exception("_shop_url: failed to encode subscription data for user %s", user_id)
+        if custom:
+            try:
+                return f"{MINI_APP_URL}?subs={_encode({'d':[],'p':[],'c':custom})}"
+            except Exception:
+                pass
         return MINI_APP_URL
 
 
