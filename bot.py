@@ -4380,6 +4380,21 @@ async def extract_imd_catalog_playwright(username: str, password: str,
 
         await status_cb(f"✅ Logged in. Navigating to database list...")
 
+        # ── Dismiss any modal dialogs that appear post-login ──────────
+        # imdweb.org shows a User Agreement modal on first login —
+        # click Agree if it's there, otherwise just continue.
+        for agree_sel in [
+            'button:has-text("Agree")',
+            'button:has-text("Accept")',
+            'button:has-text("OK")',
+            '[class*="agree"]',
+        ]:
+            if await page.locator(agree_sel).count():
+                await page.locator(agree_sel).first.click()
+                await page.wait_for_timeout(2000)
+                logger.info("Dismissed post-login modal")
+                break
+
         # ── Navigate to Databases tab ─────────────────────────────────
         nav_selectors = [
             'a:has-text("Databases")', 'button:has-text("Databases")',
