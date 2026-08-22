@@ -4884,72 +4884,153 @@ async def imd_session_token_reply(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def extract_imd_with_token(token_raw: str, status_cb) -> list:
-    """Calls imdweb.org's internal API using the session token the admin
-    extracted manually from their browser. Tries common auth header patterns
-    and API endpoint patterns."""
+    """Calls imdweb.org's internal API using the session data the admin
+    extracted from their browser's localStorage."""
     import aiohttp
+    import json as _json
 
-    # Build auth headers from whatever the user pasted
-    # Token could be a bare JWT, "Bearer <jwt>", a cookie string, or JSON
-    token_raw = token_raw.strip().strip('"').strip("'")
+    token_raw = token_raw.strip()
+    resume_token = None
+    device_id = ""
 
-    # Detect if it looks like a cookie string
-    if "=" in token_raw and not token_raw.startswith("ey"):
-        headers = {"Cookie": token_raw}
-    elif token_raw.startswith("Bearer "):
-        headers = {"Authorization": token_raw}
-    else:
-        # Assume bare JWT token
-        headers = {
-            "Authorization": f"Bearer {token_raw}",
-            "Cookie": f"token={token_raw}",
-        }
+    # Parse JSON localStorage dump — the expected format is:
+    # {"imd_web_resume":"<token>","imd_web_device_id":"<device_id>",...}
+    try:
+        parsed = _json.loads(token_raw)
+        if isinstance(parsed, dict):
+            resume_token = (
+                parsed.get("imd_web_resume")
+                or parsed.get("token")
+                or parsed.get("auth")
+                or parsed.get("authToken")
+            )
+            device_id = parsed.get("imd_web_device_id", "")
+        elif isinstance(parsed, list):
+            # Object.entries() format: [["key","val"],...]
+            for pair in parsed:
+                if isinstance(pair, list) and len(pair) == 2:
+                    if "resume" in str(pair[0]).lower():
+                        resume_token = pair[1]
+                    if "device_id" in str(pair[0]).lower():
+                        device_id = pair[1]
+    except (_json.JSONDecodeError, TypeError):
+        # Raw token string pasted directly
+        resume_token = token_raw.strip('"\'')
 
-    headers.update({
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36",
-        "Accept": "application/json",
+    if not resume_token:
+        raise ValueError(
+            "Could not find the auth token in what you sent.\n"
+            "Please send the full text from the popup as-is."
+        )
+
+    await status_cb(f"🔑 Token found: {resume_token[:20]}...")
+
+    # The imd_web_resume token is stored in localStorage and sent to the
+    # server via Cookie header. The device_id cookie may also be needed.
+    cookie_str = f"imd_web_resume={resume_token}"
+    if device_id:
+        cookie_str += f"; imd_web_device_id={device_id}"
+
+    base_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://imdweb.org/",
         "Origin": "https://imdweb.org",
-    })
+        "Cookie": cookie_str,
+        # Also try the token as a Bearer token and custom header
+        "Authorization": f"Bearer {resume_token}",
+        "X-Resume-Token": resume_token,
+    }
 
     databases = []
 
-    # Common API endpoint patterns for iMD
-    candidate_endpoints = [
-        "https://imdweb.org/api/databases",
-        "https://imdweb.org/api/dbs",
-        "https://imdweb.org/api/library",
-        "https://imdweb.org/api/books",
-        "https://imdweb.org/api/catalog",
-        "https://imdweb.org/api/resources",
-        "https://imdweb.org/api/v1/databases",
-        "https://imdweb.org/api/v1/library",
-    ]
-
-    await status_cb("🔍 Probing iMD API endpoints...")
+    # First: try to resume the session (the app likely calls an auth/resume
+    # endpoint to exchange imd_web_resume for a full session token)
+    await status_cb("🔄 Resuming iMD session...")
+    session_token = None
 
     async with aiohttp.ClientSession() as session:
-        working_endpoint = None
-        sample_response = None
+        # Try common session resume endpoints
+        for resume_url in [
+            "https://imdweb.org/api/auth/resume",
+            "https://imdweb.org/api/session",
+            "https://imdweb.org/api/user/session",
+            "https://imdweb.org/api/v1/auth/resume",
+            "https://imdweb.org/api/auth",
+        ]:
+            try:
+                async with session.post(
+                    resume_url,
+                    json={"token": resume_token, "device_id": device_id},
+                    headers=base_headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        new_token = (
+                            data.get("token") or data.get("access_token")
+                            or data.get("auth_token") or data.get("jwt")
+                        )
+                        if new_token:
+                            session_token = new_token
+                            base_headers["Authorization"] = f"Bearer {session_token}"
+                            await status_cb(f"✅ Session resumed. Searching for databases API...")
+                            break
+            except Exception:
+                pass
 
-        # Find which endpoint actually works
+        # Try all candidate database list endpoints
+        candidate_endpoints = [
+            "https://imdweb.org/api/databases",
+            "https://imdweb.org/api/downloads",
+            "https://imdweb.org/api/dbs",
+            "https://imdweb.org/api/library",
+            "https://imdweb.org/api/catalog",
+            "https://imdweb.org/api/books",
+            "https://imdweb.org/api/resources",
+            "https://imdweb.org/api/v1/databases",
+            "https://imdweb.org/api/v1/downloads",
+            "https://imdweb.org/api/v1/catalog",
+            "https://imdweb.org/api/v1/library",
+            "https://imdweb.org/api/v2/databases",
+            "https://imdweb.org/api/v2/downloads",
+        ]
+
+        working_endpoint = None
+        await status_cb("🔍 Probing iMD database API endpoints...")
+
         for url in candidate_endpoints:
-            for page in range(1, 3):
+            for param_set in [
+                {"page": 1, "limit": 50},
+                {"page": 1, "per_page": 50},
+                {"offset": 0, "limit": 50},
+                {"q": "", "page": 1, "limit": 50},
+                {},
+            ]:
                 try:
-                    params = {"page": page, "limit": 50, "offset": 0, "q": ""}
-                    async with session.get(url, headers=headers, params=params,
-                                           timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                        if resp.status == 200:
+                    async with session.get(
+                        url,
+                        params=param_set,
+                        headers=base_headers,
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as resp:
+                        if resp.status in (200, 206):
                             ct = resp.headers.get("content-type", "")
                             if "json" in ct:
                                 data = await resp.json(content_type=None)
                                 names = _extract_names_from_json(data)
                                 if names:
                                     working_endpoint = url
-                                    sample_response = data
+                                    working_params = param_set
                                     databases.extend(names)
-                                    logger.info("Found working endpoint: %s (page %s → %s items)",
-                                                url, page, len(names))
+                                    logger.info(
+                                        "Found iMD API: %s (%s items on first page)",
+                                        url, len(names),
+                                    )
                                     break
                 except Exception:
                     pass
@@ -4957,51 +5038,62 @@ async def extract_imd_with_token(token_raw: str, status_cb) -> list:
                 break
 
         if not working_endpoint:
-            # Token didn't work with any known endpoint pattern
             raise ValueError(
-                "Could not reach any iMD database API. "
-                "The token may be incorrect or expired — please try again."
+                "Could not reach the iMD database API with this token.\n\n"
+                "The token may have expired. Please:\n"
+                "1. Open imdweb.org in Firefox again\n"
+                "2. Log in fresh\n"
+                "3. Run the JavaScript again to get a fresh token\n"
+                "4. Send the new token here immediately (tokens expire quickly)"
             )
 
-        await status_cb(f"✅ API found! Downloading all databases (this may take a few minutes)...")
+        # Paginate through ALL databases
+        await status_cb(
+            f"✅ API found! Downloading all databases "
+            f"(found {len(databases):,} on first page, paginating...)..."
+        )
 
-        # Now paginate through ALL databases
         page_num = 2
         consecutive_empty = 0
         while consecutive_empty < 3:
+            fetched = False
             for params in [
-                {"page": page_num, "limit": 100},
-                {"page": page_num, "per_page": 100},
-                {"offset": (page_num - 1) * 100, "limit": 100},
+                {**working_params, "page": page_num},
+                {**working_params, "page": page_num, "offset": (page_num - 1) * 50},
+                {"offset": (page_num - 1) * 50, "limit": 100},
             ]:
                 try:
-                    async with session.get(working_endpoint, headers=headers,
-                                           params=params,
-                                           timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    async with session.get(
+                        working_endpoint,
+                        params=params,
+                        headers=base_headers,
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as resp:
                         if resp.status == 200:
                             data = await resp.json(content_type=None)
                             names = _extract_names_from_json(data)
                             if names:
                                 databases.extend(names)
                                 consecutive_empty = 0
+                                fetched = True
                                 if page_num % 10 == 0:
                                     await status_cb(
-                                        f"📥 Downloaded {len(databases):,} databases so far..."
+                                        f"📥 {len(databases):,} databases downloaded so far..."
                                     )
                                 break
-                            else:
-                                consecutive_empty += 1
                 except Exception:
-                    consecutive_empty += 1
+                    pass
+            if not fetched:
+                consecutive_empty += 1
             page_num += 1
-            if page_num > 1000:  # safety cap (100 items × 1000 pages = 100,000)
+            if page_num > 2000:
                 break
 
-    # De-duplicate
+    # De-duplicate by name
     seen = set()
     unique = []
     for entry in databases:
-        name = entry[0].strip() if entry else ""
+        name = entry[0].strip() if entry and entry[0] else ""
         if name and name not in seen and len(name) > 2:
             seen.add(name)
             unique.append(entry)
