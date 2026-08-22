@@ -3426,7 +3426,11 @@ async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "paid":
         # Don't notify the admin yet — first ask the customer for a receipt photo.
         db_update_status(order_id, "awaiting_receipt")
-        context.user_data["awaiting_receipt_for_order"] = order_id
+        # Use a list so multiple pending receipts don't overwrite each other
+        pending = context.user_data.setdefault("pending_receipt_orders", [])
+        if order_id not in pending:
+            pending.append(order_id)
+        context.user_data["awaiting_receipt_for_order"] = pending[0]  # always process oldest first
 
         if context.user_data.get("selected_country") == "India":
             await query.edit_message_text(
@@ -3463,7 +3467,9 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles a photo sent by the customer after tapping 'I've Paid'. Asks
     for the payer's full name next, rather than notifying the admin
     immediately — that name goes into the admin's review message."""
-    order_id = context.user_data.get("awaiting_receipt_for_order")
+    # Use the queue — always process the oldest pending receipt order
+    pending_orders = context.user_data.get("pending_receipt_orders", [])
+    order_id = pending_orders[0] if pending_orders else context.user_data.get("awaiting_receipt_for_order")
 
     if not order_id:
         # Not expecting a receipt right now — ignore stray photos.
@@ -3472,10 +3478,18 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order = db_get_order(order_id)
     if not order:
         await update.message.reply_text("Order not found — please start over with /start.")
-        context.user_data.pop("awaiting_receipt_for_order", None)
+        # Remove from queue
+        pending_orders = context.user_data.get("pending_receipt_orders", [])
+        if order_id in pending_orders:
+            pending_orders.remove(order_id)
+        context.user_data["awaiting_receipt_for_order"] = pending_orders[0] if pending_orders else None
         return
 
-    context.user_data.pop("awaiting_receipt_for_order", None)
+    # Remove processed order from queue; advance to next if any
+    pending_orders = context.user_data.get("pending_receipt_orders", [])
+    if order_id in pending_orders:
+        pending_orders.remove(order_id)
+    context.user_data["awaiting_receipt_for_order"] = pending_orders[0] if pending_orders else None
     context.user_data["awaiting_payer_name_for_order"] = order_id
     photo_file_id = update.message.photo[-1].file_id
     context.user_data["pending_receipt_photo"] = photo_file_id
@@ -4212,15 +4226,45 @@ def db_imd_catalog_count() -> int:
 
 
 def db_imd_search(query: str, limit: int = 10, offset: int = 0):
+    """Search the iMD catalog with progressive fallback:
+    1. Case-insensitive full-phrase match (LOWER LIKE)
+    2. All-words match (every word must appear, case-insensitive)
+    3. Any-word match (at least one word, for showing 'similars')
+    Results from earlier strategies always come first."""
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        "SELECT name, category FROM imd_catalog WHERE name LIKE ? ORDER BY name LIMIT ? OFFSET ?",
-        (f"%{query}%", limit, offset),
-    ).fetchall()
-    count = conn.execute(
-        "SELECT COUNT(*) FROM imd_catalog WHERE name LIKE ?",
-        (f"%{query}%",),
-    ).fetchone()[0]
+    q = query.strip().lower()
+
+    def run(where_clause, params):
+        rows  = conn.execute(
+            f"SELECT name, category FROM imd_catalog WHERE {where_clause} ORDER BY name LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ).fetchall()
+        count = conn.execute(
+            f"SELECT COUNT(*) FROM imd_catalog WHERE {where_clause}",
+            params,
+        ).fetchone()[0]
+        return rows, count
+
+    # Strategy 1: full phrase, case-insensitive
+    rows, count = run("LOWER(name) LIKE ?", [f"%{q}%"])
+    if rows:
+        conn.close()
+        return rows, count
+
+    # Strategy 2: ALL words must appear (order-independent)
+    words = [w for w in q.split() if len(w) > 1]
+    if len(words) > 1:
+        clause = " AND ".join(["LOWER(name) LIKE ?" for _ in words])
+        rows, count = run(clause, [f"%{w}%" for w in words])
+        if rows:
+            conn.close()
+            return rows, count
+
+    # Strategy 3: ANY word matches (similar / partial)
+    if words:
+        clause = " OR ".join(["LOWER(name) LIKE ?" for _ in words])
+        rows, count = run(clause, [f"%{w}%" for w in words])
+
     conn.close()
     return rows, count
 
@@ -4964,7 +5008,7 @@ async def imd_search_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text(
             f"No results found for '{query}'.\n\n"
-            "Try a shorter or different search term."
+            "Try fewer words or different spelling."
         )
         return
 
@@ -7017,7 +7061,10 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if not oid:
             await update.message.reply_text("Could not find that order. Please contact support.")
             return
-        context.user_data["awaiting_receipt_for_order"] = oid
+        pending = context.user_data.setdefault("pending_receipt_orders", [])
+        if oid not in pending:
+            pending.append(oid)
+        context.user_data["awaiting_receipt_for_order"] = pending[0]
         await update.message.reply_text(
             "Please send a photo of your payment receipt:",
             reply_markup=main_menu_keyboard(user_id),
@@ -7203,7 +7250,11 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     # Manual payment methods (local, card, crypto) — confirm the order and
     # ask for a receipt photo. Everything else is already stored.
     db_update_status(order_id, "awaiting_receipt")
-    context.user_data["awaiting_receipt_for_order"] = order_id
+    # Queue-based: don't overwrite existing pending receipt orders
+    _pending = context.user_data.setdefault("pending_receipt_orders", [])
+    if order_id not in _pending:
+        _pending.append(order_id)
+    context.user_data["awaiting_receipt_for_order"] = _pending[0]
 
     await update.message.reply_text(
         f"✅ Order #{order_id} confirmed!\n\n{summary}\n\nTotal: {CURRENCY}{total:.2f}\n"
