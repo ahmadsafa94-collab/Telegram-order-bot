@@ -5116,26 +5116,13 @@ async def extract_imd_with_token(token_raw: str, status_cb) -> list:
 
         # Try all candidate database list endpoints
         candidate_endpoints = [
-            # Direct page URL with JSON content negotiation
+            # CONFIRMED working endpoint discovered via fetch interceptor
+            "https://imdweb.org/api/labrange/downloads",
+            # Fallbacks in case the above changes
             "https://imdweb.org/downloads",
             "https://imdweb.org/databases",
-            # Common API patterns
             "https://imdweb.org/api/databases",
             "https://imdweb.org/api/downloads",
-            "https://imdweb.org/api/dbs",
-            "https://imdweb.org/api/library",
-            "https://imdweb.org/api/catalog",
-            "https://imdweb.org/api/books",
-            "https://imdweb.org/api/resources",
-            "https://imdweb.org/api/v1/databases",
-            "https://imdweb.org/api/v1/downloads",
-            "https://imdweb.org/api/v1/catalog",
-            "https://imdweb.org/api/v1/library",
-            "https://imdweb.org/api/v2/databases",
-            "https://imdweb.org/api/v2/downloads",
-            # Some SPAs use numbered API versions or different paths
-            "https://imdweb.org/v1/databases",
-            "https://imdweb.org/v1/downloads",
         ]
 
         working_endpoint = None
@@ -5143,10 +5130,12 @@ async def extract_imd_with_token(token_raw: str, status_cb) -> list:
 
         for url in candidate_endpoints:
             for param_set in [
-                {"page": 1, "limit": 50},
-                {"page": 1, "per_page": 50},
-                {"offset": 0, "limit": 50},
-                {"q": "", "page": 1, "limit": 50},
+                # Try without scope first to get ALL databases
+                {"limit": 100, "offset": 0},
+                {"limit": 100, "offset": 0, "scope": "all"},
+                {"limit": 40,  "offset": 0},
+                # Page-based fallback
+                {"page": 1, "limit": 100},
                 {},
             ]:
                 try:
@@ -5158,7 +5147,7 @@ async def extract_imd_with_token(token_raw: str, status_cb) -> list:
                     ) as resp:
                         if resp.status in (200, 206):
                             ct = resp.headers.get("content-type", "")
-                            if "json" in ct:
+                            if "json" in ct or "text" in ct:
                                 data = await resp.json(content_type=None)
                                 names = _extract_names_from_json(data)
                                 if names:
@@ -5166,8 +5155,8 @@ async def extract_imd_with_token(token_raw: str, status_cb) -> list:
                                     working_params = param_set
                                     databases.extend(names)
                                     logger.info(
-                                        "Found iMD API: %s (%s items on first page)",
-                                        url, len(names),
+                                        "Found iMD API: %s with params %s (%s items)",
+                                        url, param_set, len(names),
                                     )
                                     break
                 except Exception:
@@ -5189,20 +5178,25 @@ async def extract_imd_with_token(token_raw: str, status_cb) -> list:
                 "5️⃣ Send me just the URL part (starting with https://)"
             )
 
-        # Paginate through ALL databases
+        # Paginate using offset-based pattern confirmed from iMD API:
+        # /api/labrange/downloads?limit=40&offset=0 → offset=40 → offset=80 ...
         await status_cb(
             f"✅ API found! Downloading all databases "
             f"(found {len(databases):,} on first page, paginating...)..."
         )
 
-        page_num = 2
+        limit = working_params.get("limit", 100)
+        offset = limit  # first page already fetched at offset=0
         consecutive_empty = 0
+
         while consecutive_empty < 3:
             fetched = False
+            # Build next-page params — offset is primary, page is fallback
+            base = {k: v for k, v in working_params.items()
+                    if k not in ("offset", "page")}
             for params in [
-                {**working_params, "page": page_num},
-                {**working_params, "page": page_num, "offset": (page_num - 1) * 50},
-                {"offset": (page_num - 1) * 50, "limit": 100},
+                {**base, "offset": offset},
+                {**base, "page": (offset // limit) + 1},
             ]:
                 try:
                     async with session.get(
@@ -5218,17 +5212,17 @@ async def extract_imd_with_token(token_raw: str, status_cb) -> list:
                                 databases.extend(names)
                                 consecutive_empty = 0
                                 fetched = True
-                                if page_num % 10 == 0:
+                                if len(databases) % 1000 < limit:
                                     await status_cb(
-                                        f"📥 {len(databases):,} databases downloaded so far..."
+                                        f"📥 {len(databases):,} databases downloaded..."
                                     )
                                 break
                 except Exception:
                     pass
             if not fetched:
                 consecutive_empty += 1
-            page_num += 1
-            if page_num > 2000:
+            offset += limit
+            if offset > 200000:
                 break
 
     # De-duplicate by name
