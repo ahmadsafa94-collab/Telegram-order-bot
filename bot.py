@@ -1,4 +1,4 @@
-"""
+B """
 Telegram Order Bot — cart + checkout + manual payment confirmation
 with receipt photo upload.
 
