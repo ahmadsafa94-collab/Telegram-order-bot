@@ -4359,9 +4359,10 @@ async def extract_imd_catalog_playwright(username: str, password: str,
         await page.wait_for_timeout(2000)
 
         # ── Download ALL databases via in-browser fetch() ─────────────
-        # Using fetch() inside the browser means the existing auth session
-        # is used automatically — no token extraction, no new login.
         await status_cb("📥 Downloading database catalog (this takes a few minutes)...")
+
+        # Increase page timeout so the long-running JS doesn't get cut off
+        page.set_default_timeout(600000)  # 10 minutes
 
         raw = await page.evaluate("""async () => {
             const ENDPOINT = "/api/labrange/downloads";
@@ -4410,7 +4411,7 @@ async def extract_imd_catalog_playwright(username: str, password: str,
             }
 
             return all;
-        }""", timeout=600000)  # 10 minute timeout for 35,000+ items
+        }""")
 
         await browser.close()
 
