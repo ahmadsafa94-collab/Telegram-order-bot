@@ -4238,18 +4238,11 @@ def db_imd_save_catalog(names: list):
 
 async def extract_imd_catalog_playwright(username: str, password: str,
                                           status_cb, bot=None, admin_id=None) -> list:
-    """Logs into imdweb.org and captures the auth token + database API
-    endpoint from network traffic. Then uses aiohttp to page through every
-    database directly — no browser DOM interaction needed after login, so
-    modals like the User Agreement are completely irrelevant."""
+    """Logs into imdweb.org with Playwright, dismisses the User Agreement,
+    then calls the known API endpoint FROM INSIDE the browser using fetch().
+    Because we use the browser's own authenticated session, no tokens need
+    to be extracted and the 1-session limit is not triggered."""
     from playwright.async_api import async_playwright
-    import aiohttp as _aiohttp
-
-    auth_token  = None   # JWT/Bearer token captured from login response
-    auth_cookie = None   # Session cookie if token-based auth not used
-    db_api_url  = None   # API endpoint for the database list
-    db_api_hdrs = {}     # Request headers used for that call
-    api_responses = []
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -4265,58 +4258,21 @@ async def extract_imd_catalog_playwright(username: str, password: str,
         )
         page = await ctx.new_page()
 
-        # ── Intercept ALL JSON responses ──────────────────────────────
-        async def on_response(response):
-            nonlocal auth_token, db_api_url, db_api_hdrs
-            try:
-                if response.status not in (200, 201):
-                    return
-                ct = response.headers.get("content-type", "")
-                if "json" not in ct:
-                    return
-                url = response.url
-                data = await response.json()
-
-                # Capture auth token from login response
-                if not auth_token:
-                    tok = (data.get("token") or data.get("access_token")
-                           or data.get("jwt") or data.get("auth_token")
-                           or (data.get("data") or {}).get("token"))
-                    if tok:
-                        auth_token = tok
-                        logger.info("iMD: captured auth token")
-
-                # Capture any database-list API call
-                if any(k in url.lower() for k in ["db", "database", "library", "book", "list", "catalog"]):
-                    req_hdrs = dict(response.request.headers)
-                    api_responses.append({"url": url, "data": data, "headers": req_hdrs})
-                    if not db_api_url:
-                        db_api_url = url
-                        db_api_hdrs = req_hdrs
-                        logger.info("iMD: captured DB API endpoint: %s", url)
-            except Exception:
-                pass
-
-        page.on("response", on_response)
-
-        # ── Login — we only need the network call, not the UI result ──
+        # ── Login ─────────────────────────────────────────────────────
         await status_cb("🔑 Logging in to imdweb.org...")
         await page.goto("https://imdweb.org/login", wait_until="load", timeout=60000)
         await page.wait_for_timeout(4000)
 
-        # Fill fields by position (avoids generated class-name guessing)
+        # Fill by position — works regardless of generated class names
         text_inputs = await page.locator('input[type="text"], input[type="email"], input:not([type])').all()
         pwd_inputs  = await page.locator('input[type="password"]').all()
-
         if text_inputs:
             await text_inputs[0].fill(username)
         if pwd_inputs:
             await pwd_inputs[0].fill(password)
 
-        # Submit — prefer type=submit, fall back to Enter key
         clicked = False
-        for sel in ['button[type="submit"]', 'input[type="submit"]',
-                    'button:has-text("Login")', 'button:has-text("Sign in")']:
+        for sel in ['button[type="submit"]', 'button:has-text("Login")', 'button:has-text("Sign in")']:
             if await page.locator(sel).count():
                 await page.locator(sel).first.click()
                 clicked = True
@@ -4324,386 +4280,162 @@ async def extract_imd_catalog_playwright(username: str, password: str,
         if not clicked and pwd_inputs:
             await pwd_inputs[0].press("Enter")
 
-        # Wait just long enough for the login API call to complete.
-        # We don't care about the User Agreement modal — we only need
-        # the auth token that was returned by the server.
         await page.wait_for_timeout(6000)
 
-        # ── Capture session cookies as fallback auth ──────────────────
-        cookies = await ctx.cookies()
-        auth_cookie = "; ".join(f"{c['name']}={c['value']}" for c in cookies
-                                 if "imdweb.org" in c.get("domain", ""))
-
-        # ── Navigate to Databases tab to trigger the list API call ────
-        await status_cb("📂 Opening databases list to capture API endpoint...")
-
-        # Try to click the Databases nav link (modal may or may not be blocking)
-        for nav_js in [
-            # Try JS navigation first — bypasses any modal overlay
-            "history.pushState({}, '', '/databases'); window.dispatchEvent(new PopStateEvent('popstate'));",
-            "window.location.hash = '#/databases';",
-            "window.location.pathname = '/databases';",
-        ]:
-            await page.evaluate(nav_js)
-            await page.wait_for_timeout(2000)
-            if db_api_url:
-                break
-
-        if not db_api_url:
-            # Fall back: try clicking nav items
-            for sel in ['a:has-text("Databases")', '[href*="database"]', '[href*="db"]']:
+        if "login" in page.url.lower():
+            # Send screenshot if login failed
+            if bot and admin_id:
                 try:
-                    if await page.locator(sel).count():
-                        await page.locator(sel).first.click()
-                        await page.wait_for_timeout(3000)
-                        if db_api_url:
-                            break
+                    sc = "/tmp/imd_login_fail.png"
+                    await page.screenshot(path=sc)
+                    await bot.send_photo(chat_id=admin_id, photo=open(sc, "rb"),
+                                         caption=f"Login failed. URL: {page.url}")
                 except Exception:
                     pass
-
-        # Scroll to trigger any lazy-load API calls
-        if not db_api_url:
-            for _ in range(10):
-                await page.evaluate("window.scrollBy(0, 500)")
-                await page.wait_for_timeout(600)
-                if db_api_url:
-                    break
-
-        await page.wait_for_timeout(3000)
-        await browser.close()
-
-    # ── Use captured API endpoint to fetch ALL databases ─────────────
-    databases = []
-
-    if db_api_url and (auth_token or auth_cookie or db_api_hdrs):
-        await status_cb(f"🌐 Using API endpoint to fetch all databases...")
-
-        # Build headers: prefer captured headers, overlay our auth if found
-        headers = dict(db_api_hdrs)
-        if auth_token:
-            headers["Authorization"] = f"Bearer {auth_token}"
-        if auth_cookie:
-            headers["Cookie"] = auth_cookie
-        headers.pop("content-length", None)
-
-        # Try paginating the API — common patterns
-        base_url = db_api_url.split("?")[0]
-        qs_params = dict(p.split("=", 1) for p in
-                         (db_api_url.split("?")[1].split("&") if "?" in db_api_url else [])
-                         if "=" in p)
-
-        found_count = 0
-        async with _aiohttp.ClientSession() as session:
-            for page_n in range(1, 500):  # up to 500 pages
-                params = {**qs_params, "page": page_n, "limit": 100,
-                          "offset": (page_n - 1) * 100, "per_page": 100}
-                try:
-                    async with session.get(base_url, headers=headers,
-                                           params=params, timeout=_aiohttp.ClientTimeout(total=20)) as resp:
-                        if resp.status != 200:
-                            break
-                        data = await resp.json()
-                        batch = _extract_names_from_json(data)
-                        if not batch:
-                            break
-                        databases.extend(batch)
-                        found_count += len(batch)
-                        if page_n % 10 == 0:
-                            await status_cb(f"📥 Fetched {found_count:,} databases so far...")
-                        if len(batch) < 50:
-                            break  # last page
-                except Exception as e:
-                    logger.warning("iMD pagination stopped at page %s: %s", page_n, e)
-                    break
-
-    # Fall back to whatever we captured during browser scrolling
-    if not databases:
-        await status_cb("🔍 Using captured page data (no direct API access)...")
-        for resp in api_responses:
-            databases.extend(_extract_names_from_json(resp["data"]))
-
-    # De-duplicate
-    seen, unique = set(), []
-    for entry in databases:
-        name = (entry[0] if isinstance(entry, (list, tuple)) else entry).strip()
-        if name and name not in seen:
-            seen.add(name)
-            unique.append((name, entry[1] if isinstance(entry, (list, tuple)) and len(entry) > 1 else None))
-
-    return unique
-
-    databases = []
-    api_endpoint = None
-    auth_headers = {}
-    api_responses = []
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-        )
-        ctx = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 900},
-        )
-        page = await ctx.new_page()
-
-        # ── Intercept all JSON API responses ─────────────────────────
-        async def on_response(response):
-            nonlocal api_endpoint
-            try:
-                ct = response.headers.get("content-type", "")
-                if "json" not in ct or response.status != 200:
-                    return
-                url = response.url
-                # Look for calls that look like a database/library listing
-                if any(kw in url.lower() for kw in ["db", "database", "library", "book", "list", "catalog", "search"]):
-                    data = await response.json()
-                    req_headers = dict(response.request.headers)
-                    api_responses.append({"url": url, "data": data, "headers": req_headers})
-                    if not api_endpoint:
-                        api_endpoint = url
-                        auth_headers.update({
-                            k: v for k, v in req_headers.items()
-                            if k.lower() in ("authorization", "x-auth-token", "cookie", "token", "x-token")
-                        })
-            except Exception:
-                pass
-
-        page.on("response", on_response)
-
-        # ── Login ─────────────────────────────────────────────────────
-        await status_cb("🔑 Logging in to imdweb.org...")
-        await page.goto("https://imdweb.org/login", wait_until="load", timeout=60000)
-        await page.wait_for_timeout(4000)
-
-        # Take a screenshot of the login page to debug selector issues
-        login_screenshot = "/tmp/imd_login.png"
-        await page.screenshot(path=login_screenshot)
-
-        # Dump all inputs visible on the page so we know what we're dealing with
-        inputs = await page.evaluate("""() => {
-            return Array.from(document.querySelectorAll('input')).map(i => ({
-                type: i.type, name: i.name, id: i.id,
-                placeholder: i.placeholder, className: i.className
-            }));
-        }""")
-        logger.info("iMD login page inputs: %s", inputs)
-
-        # Fill by position — first text/email input = username, first password = password.
-        # This avoids selector guessing since SPAs often use generated class names.
-        text_inputs = await page.locator('input[type="text"], input[type="email"], input:not([type])').all()
-        pwd_inputs  = await page.locator('input[type="password"]').all()
-
-        if not text_inputs or not pwd_inputs:
-            # Send screenshot to admin so they can see what the page looks like
-            if bot and admin_id:
-                await bot.send_photo(
-                    chat_id=admin_id,
-                    photo=open(login_screenshot, "rb"),
-                    caption=f"⚠️ iMD login: could not find form fields.\n"
-                            f"Inputs found: {inputs}\nURL: {page.url}",
-                )
             await browser.close()
-            raise ValueError("Could not find the login form fields on imdweb.org. Screenshot sent.")
+            raise ValueError("Login failed — please check your iMD username and password.")
 
-        await text_inputs[0].click()
-        await text_inputs[0].fill(username)
-        await page.wait_for_timeout(500)
-        await pwd_inputs[0].click()
-        await pwd_inputs[0].fill(password)
-        await page.wait_for_timeout(500)
-
-        # Click the login/submit button
-        clicked = False
-        for sel in [
-            'button[type="submit"]', 'input[type="submit"]',
-            'button:has-text("Login")', 'button:has-text("Sign in")',
-            'button:has-text("Log in")',
-        ]:
-            if await page.locator(sel).count():
-                await page.locator(sel).first.click()
-                clicked = True
-                break
-        if not clicked:
-            # Last resort: press Enter in the password field
-            await pwd_inputs[0].press("Enter")
-
-        # Wait for SPA navigation — give it up to 10 seconds
-        await page.wait_for_timeout(8000)
-        try:
-            await page.wait_for_load_state("load", timeout=15000)
-        except Exception:
-            pass
-        await page.wait_for_timeout(2000)
-
-        current_url = page.url
-        page_text = await page.inner_text("body") if await page.locator("body").count() else ""
-
-        # Success = URL no longer contains "login" OR page shows post-login elements
-        # (some SPAs stay on the same URL and only swap content)
-        logged_in = (
-            "login" not in current_url.lower()
-            or any(kw in page_text for kw in ("Databases", "Favorites", "Home", "Account", "Search"))
-        )
-
-        if not logged_in:
-            # Send screenshot so admin can see the error message
-            post_screenshot = "/tmp/imd_after_login.png"
-            await page.screenshot(path=post_screenshot)
-            if bot and admin_id:
-                await bot.send_photo(
-                    chat_id=admin_id,
-                    photo=open(post_screenshot, "rb"),
-                    caption=f"⚠️ Login result — URL: {current_url}",
-                )
-            await browser.close()
-            raise ValueError(
-                f"Login did not succeed (URL: {current_url}). "
-                "Screenshot sent — please check the image."
-            )
-
-        await status_cb(f"✅ Logged in. Checking for post-login dialogs...")
+        await status_cb("✅ Logged in. Dismissing User Agreement...")
 
         # ── Dismiss User Agreement modal ──────────────────────────────
-        # imdweb.org shows a User Agreement modal after login.
-        # Standard DOM clicks don't work on React components — we need to
-        # trigger the React synthetic event system directly via the fiber tree.
-        await page.wait_for_timeout(4000)  # let modal fully render
-
-        dismissed = await page.evaluate("""() => {
-            function triggerReactClick(el) {
-                // Method 1: React fiber internal props (most reliable for React 16+)
-                const reactKey = Object.keys(el).find(k =>
-                    k.startsWith('__reactFiber') ||
-                    k.startsWith('__reactInternalInstance') ||
-                    k.startsWith('__reactEventHandlers') ||
-                    k.startsWith('__reactProps'));
-                if (reactKey) {
-                    const props = el[reactKey]?.memoizedProps || el[reactKey] || {};
-                    if (props.onClick) {
-                        props.onClick({type:'click', target:el, currentTarget:el,
-                            stopPropagation:()=>{}, preventDefault:()=>{}});
-                        return true;
+        # Try multiple times because the modal can take a moment to appear
+        for attempt in range(5):
+            dismissed = await page.evaluate("""() => {
+                function triggerClick(el) {
+                    // React fiber approach — most reliable for React SPAs
+                    const rk = Object.keys(el).find(k =>
+                        k.startsWith("__reactFiber") ||
+                        k.startsWith("__reactProps") ||
+                        k.startsWith("__reactInternalInstance"));
+                    if (rk) {
+                        const props = el[rk]?.memoizedProps || el[rk] || {};
+                        if (props.onClick) {
+                            props.onClick({type:"click",target:el,currentTarget:el,
+                                stopPropagation:()=>{},preventDefault:()=>{}});
+                            return true;
+                        }
+                        // Walk up the fiber tree
+                        let fiber = el[rk];
+                        for (let i = 0; i < 5; i++) {
+                            fiber = fiber?.return;
+                            if (fiber?.memoizedProps?.onClick) {
+                                fiber.memoizedProps.onClick({});
+                                return true;
+                            }
+                        }
                     }
-                    // Try parent fiber
-                    const parent = el[reactKey]?.return;
-                    if (parent?.memoizedProps?.onClick) {
-                        parent.memoizedProps.onClick({type:'click', target:el,
-                            currentTarget:el, stopPropagation:()=>{},
-                            preventDefault:()=>{}});
-                        return true;
+                    // Full mouse event sequence
+                    ["pointerover","mouseover","pointerenter","mouseenter",
+                     "pointermove","mousemove","pointerdown","mousedown",
+                     "pointerup","mouseup","click"].forEach(t =>
+                        el.dispatchEvent(new MouseEvent(t, {
+                            view:window, bubbles:true, cancelable:true, buttons:1}))
+                    );
+                    return true;
+                }
+
+                const candidates = Array.from(
+                    document.querySelectorAll("button, [role=button], a")
+                );
+                for (const el of candidates) {
+                    const txt = (el.innerText || el.textContent || "").trim();
+                    if (txt === "Agree" || txt === "I Agree" || txt === "Accept") {
+                        return triggerClick(el);
                     }
                 }
-                // Method 2: Full mouse event sequence
-                ['pointerover','mouseover','pointerenter','mouseenter',
-                 'pointermove','mousemove','pointerdown','mousedown',
-                 'pointerup','mouseup','click'].forEach(t => {
-                    el.dispatchEvent(new MouseEvent(t, {
-                        view:window, bubbles:true, cancelable:true,
-                        buttons:1, clientX:el.getBoundingClientRect().x + 5,
-                        clientY:el.getBoundingClientRect().y + 5,
-                    }));
-                });
-                return true;
-            }
-
-            // Find the Agree button
-            const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-            for (const btn of buttons) {
-                const txt = (btn.textContent || btn.innerText || '').trim();
-                if (txt === 'Agree' || txt === 'I Agree' || txt === 'Accept') {
-                    return triggerReactClick(btn);
-                }
-            }
-
-            // Also try any overlay/modal dismiss
-            const overlay = document.querySelector('[class*="modal"], [class*="overlay"], [role="dialog"]');
-            if (overlay) {
-                const btn = overlay.querySelector('button');
-                if (btn) return triggerReactClick(btn);
-            }
-
-            return false;
-        }""")
-
-        if dismissed:
-            logger.info("iMD: dismissed User Agreement modal via React fiber click")
-            await page.wait_for_timeout(2500)
-        else:
-            logger.warning("iMD: Agree button not found or could not be clicked")
-
-        await status_cb("📂 Navigating to database list...")
-
-        # ── Navigate to Databases tab ─────────────────────────────────
-        nav_selectors = [
-            'a:has-text("Databases")', 'button:has-text("Databases")',
-            '[href*="database"]', '[href*="databases"]', '[href*="db"]',
-            '[class*="database"]',
-        ]
-        for sel in nav_selectors:
-            if await page.locator(sel).first.count():
-                await page.locator(sel).first.click()
-                try:
-                    await page.wait_for_load_state("load", timeout=10000)
-                except Exception:
-                    pass
-                await page.wait_for_timeout(4000)
+                return false;
+            }""")
+            if dismissed:
                 break
+            await page.wait_for_timeout(1500)
 
-        # Scroll to trigger lazy-loaded items and more API calls
-        await status_cb("📜 Loading databases list (this may take 1-2 minutes)...")
-        for _ in range(30):
-            await page.evaluate("window.scrollBy(0, window.innerHeight * 5)")
-            await page.wait_for_timeout(800)
-            if api_responses:
-                break
+        await page.wait_for_timeout(2000)
 
-        # Wait for any remaining API calls to complete
+        # ── Navigate to databases page ────────────────────────────────
+        await status_cb("📂 Navigating to databases...")
+        # Direct URL — avoids triggering the modal again on the home page
+        await page.goto("https://imdweb.org/downloads", wait_until="load", timeout=30000)
         await page.wait_for_timeout(3000)
 
-        # ── Parse captured API responses ──────────────────────────────
-        for resp in api_responses:
-            data = resp["data"]
-            found = _extract_names_from_json(data)
-            databases.extend(found)
+        # Dismiss modal again if it reappears
+        await page.evaluate("""() => {
+            document.querySelectorAll("button").forEach(b => {
+                if ((b.innerText||"").trim()==="Agree") b.click();
+            });
+        }""")
+        await page.wait_for_timeout(2000)
 
-        # ── DOM fallback if API capture missed everything ─────────────
-        if not databases:
-            await status_cb("🔍 API capture empty — trying DOM scraping...")
-            # Scroll to load all items first
-            prev_count = 0
-            for _ in range(200):
-                await page.evaluate("window.scrollBy(0, window.innerHeight * 3)")
-                await page.wait_for_timeout(400)
-                rows = await page.locator("li, [class*='item'], [class*='db-item'], [class*='database']").all()
-                if len(rows) == prev_count:
-                    break
-                prev_count = len(rows)
+        # ── Download ALL databases via in-browser fetch() ─────────────
+        # Using fetch() inside the browser means the existing auth session
+        # is used automatically — no token extraction, no new login.
+        await status_cb("📥 Downloading database catalog (this takes a few minutes)...")
 
-            # Extract names from DOM
-            for el in await page.locator("li, [class*='item'], [class*='row']").all():
-                try:
-                    name = await el.inner_text()
-                    name = name.strip()
-                    if 5 < len(name) < 200 and not name.lower() in ("open", "activate", "download"):
-                        databases.append((name, None))
-                except Exception:
-                    pass
+        raw = await page.evaluate("""async () => {
+            const ENDPOINT = "/api/labrange/downloads";
+            const LIMIT    = 100;
+            const all      = [];
+            let   offset   = 0;
+            let   empty    = 0;
+
+            while (empty < 3 && all.length < 200000) {
+                let items = null;
+                // Try without scope first (all databases), then with scope=all
+                for (const scope of [null, "all", "recent", "top"]) {
+                    const params = new URLSearchParams({limit: LIMIT, offset});
+                    if (scope) params.set("scope", scope);
+                    try {
+                        const resp = await fetch(ENDPOINT + "?" + params);
+                        if (!resp.ok) continue;
+                        const data = await resp.json();
+                        // Extract the array — API may wrap it in a key
+                        if (Array.isArray(data)) {
+                            items = data;
+                        } else {
+                            for (const key of ["data","items","results","databases","books","list"]) {
+                                if (Array.isArray(data[key])) { items = data[key]; break; }
+                            }
+                        }
+                        if (items && items.length > 0) break;
+                    } catch(e) {}
+                }
+
+                if (!items || items.length === 0) {
+                    empty++;
+                    offset += LIMIT;
+                    continue;
+                }
+                empty = 0;
+
+                for (const item of items) {
+                    const name = item.name || item.title || item.db_name || item.label || "";
+                    const cat  = item.category || item.type || item.specialty || "";
+                    if (name.length > 2) all.push([name, cat]);
+                }
+
+                if (items.length < LIMIT) break;  // last page
+                offset += LIMIT;
+            }
+
+            return all;
+        }""", timeout=600000)  # 10 minute timeout for 35,000+ items
 
         await browser.close()
 
-    # De-duplicate
+    if not raw:
+        raise ValueError(
+            "No databases found.\n\n"
+            "The login may have succeeded but the API returned empty results. "
+            "This can happen if the User Agreement modal was not dismissed. "
+            "Try running again."
+        )
+
+    # De-duplicate by name
     seen = set()
     unique = []
-    for entry in databases:
-        name = entry[0].strip() if entry[0] else ""
+    for name, cat in raw:
         if name and name not in seen:
             seen.add(name)
-            unique.append(entry if len(entry) == 2 else (name, None))
+            unique.append((name, cat))
 
     return unique
 
@@ -4767,7 +4499,7 @@ async def imd_catalog_username_reply(update: Update, context: ContextTypes.DEFAU
 
 async def imd_catalog_password_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("awaiting_imd_catalog_password", None)
-    context.user_data.pop("imd_extract_username", None)
+    username = context.user_data.pop("imd_extract_username", "")
     password = update.message.text.strip()
 
     try:
@@ -4775,9 +4507,34 @@ async def imd_catalog_password_reply(update: Update, context: ContextTypes.DEFAU
     except Exception:
         pass
 
-    # Playwright consistently fails on the User Agreement modal.
-    # Go straight to the token method — faster and more reliable.
-    await _ask_for_session_token(context)
+    status_msg = await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text="🔄 Logging in and downloading the catalog from inside the browser..."
+    )
+
+    async def update_status(text: str):
+        try:
+            await status_msg.edit_text(text)
+        except Exception:
+            pass
+
+    try:
+        databases = await extract_imd_catalog_playwright(
+            username, password, update_status,
+            bot=context.bot, admin_id=ADMIN_CHAT_ID,
+        )
+        await update_status(f"💾 Saving {len(databases):,} databases...")
+        db_imd_save_catalog(databases)
+        await update_status(
+            f"✅ iMD Catalog updated!\n\n"
+            f"📚 {len(databases):,} databases saved.\n\n"
+            "Customers can now use 🔬 Search iMD Resources."
+        )
+    except ValueError as e:
+        await update_status(f"❌ {e}")
+    except Exception as e:
+        logger.exception("iMD catalog extraction failed")
+        await update_status(f"❌ Extraction failed: {e}")
 
 
 async def _ask_for_session_token(context):
