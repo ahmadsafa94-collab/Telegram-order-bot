@@ -1842,6 +1842,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_book_price_for",
     "awaiting_imd_catalog_username", "awaiting_imd_catalog_password",
     "awaiting_imd_session_token", "imd_extract_username",
+    "awaiting_imd_api_url", "imd_saved_token",
 ]
 
 def clear_admin_flow_state(user_data: dict):
@@ -4840,6 +4841,136 @@ async def _ask_for_session_token(context):
     )
 
 
+async def imd_api_url_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin sent the real API URL discovered via the fetch interceptor.
+    Use it directly with the previously saved token."""
+    context.user_data.pop("awaiting_imd_api_url", None)
+    api_url = update.message.text.strip()
+
+    saved_token = context.user_data.pop("imd_saved_token", "")
+    if not saved_token:
+        await update.message.reply_text(
+            "No saved token. Please run 🔬 Update iMD Catalog again from the start."
+        )
+        return
+
+    if not api_url.startswith("http"):
+        await update.message.reply_text("That doesn't look like a URL. Please send just the API URL starting with https://")
+        context.user_data["awaiting_imd_api_url"] = True
+        context.user_data["imd_saved_token"] = saved_token
+        return
+
+    # Strip any query parameters to get the base endpoint
+    base_url = api_url.split("?")[0]
+
+    status_msg = await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=f"🔄 Using discovered API: {base_url}\nExtracting databases..."
+    )
+
+    async def update_status(text: str):
+        try:
+            await status_msg.edit_text(text)
+        except Exception:
+            pass
+
+    # Inject the real URL into the extraction
+    import json as _json
+    import aiohttp
+
+    try:
+        parsed = _json.loads(saved_token)
+        resume_token = parsed.get("imd_web_resume", "")
+        device_id = parsed.get("imd_web_device_id", "")
+    except Exception:
+        resume_token = saved_token
+        device_id = ""
+
+    cookie_str = f"imd_web_resume={resume_token}"
+    if device_id:
+        cookie_str += f"; imd_web_device_id={device_id}"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36",
+        "Accept": "application/json, */*",
+        "Referer": "https://imdweb.org/",
+        "Origin": "https://imdweb.org",
+        "Cookie": cookie_str,
+        "Authorization": f"Bearer {resume_token}",
+    }
+
+    databases = []
+    try:
+        async with aiohttp.ClientSession() as session:
+            # First call to see what params work
+            for param_set in [
+                {"page": 1, "limit": 100},
+                {"page": 1, "per_page": 100},
+                {"offset": 0, "limit": 100},
+                {"q": "", "page": 1, "limit": 100},
+                {},
+            ]:
+                async with session.get(base_url, params=param_set, headers=headers,
+                                       timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                    if resp.status == 200:
+                        ct = resp.headers.get("content-type", "")
+                        if "json" in ct or resp.status == 200:
+                            data = await resp.json(content_type=None)
+                            names = _extract_names_from_json(data)
+                            if names:
+                                databases.extend(names)
+                                working_params = param_set
+                                await update_status(
+                                    f"✅ API works! Got {len(names)} on first page. Downloading all..."
+                                )
+                                break
+
+            if not databases:
+                await update_status(
+                    "❌ Could not get data from that URL.\n\n"
+                    "Please send the FULL URL shown in the popup including any ?parameters"
+                )
+                context.user_data["awaiting_imd_api_url"] = True
+                context.user_data["imd_saved_token"] = saved_token
+                return
+
+            # Paginate
+            page_num = 2
+            empty = 0
+            while empty < 3 and page_num < 2000:
+                params = {**working_params, "page": page_num}
+                try:
+                    async with session.get(base_url, params=params, headers=headers,
+                                           timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json(content_type=None)
+                            names = _extract_names_from_json(data)
+                            if names:
+                                databases.extend(names)
+                                empty = 0
+                                if page_num % 20 == 0:
+                                    await update_status(f"📥 {len(databases):,} databases so far...")
+                            else:
+                                empty += 1
+                except Exception:
+                    empty += 1
+                page_num += 1
+
+        # De-duplicate
+        seen = set()
+        unique = [(n, c) for n, c in databases if n.strip() and n.strip() not in seen and not seen.add(n.strip())]
+
+        db_imd_save_catalog(unique)
+        await update_status(
+            f"✅ iMD Catalog updated!\n\n"
+            f"📚 {len(unique):,} databases saved.\n"
+            "Customers can now use 🔬 Search iMD Resources."
+        )
+    except Exception as e:
+        logger.exception("iMD API URL extraction failed")
+        await update_status(f"❌ Failed: {e}")
+
+
 async def imd_session_token_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin pasted their session token — use it directly for API calls."""
     context.user_data.pop("awaiting_imd_session_token", None)
@@ -4985,6 +5116,10 @@ async def extract_imd_with_token(token_raw: str, status_cb) -> list:
 
         # Try all candidate database list endpoints
         candidate_endpoints = [
+            # Direct page URL with JSON content negotiation
+            "https://imdweb.org/downloads",
+            "https://imdweb.org/databases",
+            # Common API patterns
             "https://imdweb.org/api/databases",
             "https://imdweb.org/api/downloads",
             "https://imdweb.org/api/dbs",
@@ -4998,6 +5133,9 @@ async def extract_imd_with_token(token_raw: str, status_cb) -> list:
             "https://imdweb.org/api/v1/library",
             "https://imdweb.org/api/v2/databases",
             "https://imdweb.org/api/v2/downloads",
+            # Some SPAs use numbered API versions or different paths
+            "https://imdweb.org/v1/databases",
+            "https://imdweb.org/v1/downloads",
         ]
 
         working_endpoint = None
@@ -5038,13 +5176,17 @@ async def extract_imd_with_token(token_raw: str, status_cb) -> list:
                 break
 
         if not working_endpoint:
+            # Store the token so we can use it when the user sends us the real URL
+            context.user_data["imd_saved_token"] = token_raw
             raise ValueError(
-                "Could not reach the iMD database API with this token.\n\n"
-                "The token may have expired. Please:\n"
-                "1. Open imdweb.org in Firefox again\n"
-                "2. Log in fresh\n"
-                "3. Run the JavaScript again to get a fresh token\n"
-                "4. Send the new token here immediately (tokens expire quickly)"
+                "Could not find the API endpoint automatically.\n\n"
+                "Please do this in Firefox to find the real API URL:\n\n"
+                "1️⃣ Go to imdweb.org → Databases tab\n"
+                "2️⃣ Paste this in the Firefox address bar:\n\n"
+                "javascript:void((f=>{window.fetch=(u,o)=>f(u,o).then(r=>{let c=r.clone();c.text().then(t=>{if(t.length>100&&(t[0]=='['||t.includes('name')))alert('FOUND IT:\\n'+u+'\\n\\nFirst 200 chars:\\n'+t.slice(0,200))});return r})})(window.fetch))\n\n"
+                "3️⃣ Tap any tab (Recent, Top, Trending)\n"
+                "4️⃣ A popup appears showing the API URL\n"
+                "5️⃣ Send me just the URL part (starting with https://)"
             )
 
         # Paginate through ALL databases
@@ -5944,6 +6086,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if context.user_data.get("awaiting_imd_session_token"):
             await imd_session_token_reply(update, context)
+            return
+        if context.user_data.get("awaiting_imd_api_url"):
+            await imd_api_url_reply(update, context)
             return
         if context.user_data.get("awaiting_new_sub_field"):
             await new_subscription_field_reply(update, context)
