@@ -4766,35 +4766,78 @@ async def imd_catalog_username_reply(update: Update, context: ContextTypes.DEFAU
 
 async def imd_catalog_password_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("awaiting_imd_catalog_password", None)
+    username = context.user_data.pop("imd_extract_username", "")
     password = update.message.text.strip()
 
-    # Delete the message containing the password immediately
     try:
         await update.message.delete()
     except Exception:
         pass
 
-    # Instead of Playwright login (which gets stuck on the User Agreement modal),
-    # guide the admin to extract their own session token from their browser
-    # and paste it here. This is more reliable and doesn't count against the
-    # 4-browser limit on the iMD account.
-    context.user_data.pop("imd_extract_username", None)
+    status_msg = await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text="🔄 Logging in and extracting databases automatically..."
+    )
 
-    await update.message.reply_text(
-        "✅ Got it — but instead of automating the login (which gets blocked by "
-        "the User Agreement modal), please follow these steps to get your session "
-        "token directly from your browser:\n\n"
-        "1️⃣ Open imdweb.org in Chrome on your phone\n"
-        "2️⃣ Log in and click *Agree*\n"
-        "3️⃣ Once you see the Databases list, tap the Chrome address bar\n"
-        "4️⃣ Type this exactly and tap Go:\n\n"
-        "`javascript:alert(localStorage.getItem('token')||localStorage.getItem('auth')||localStorage.getItem('authToken')||document.cookie)`\n\n"
-        "5️⃣ A popup shows your token — copy the text and send it here\n\n"
-        "If the popup shows *null* or is empty, also try:\n"
-        "`javascript:alert(JSON.stringify(Object.entries(localStorage)))`",
+    async def update_status(text: str):
+        try:
+            await status_msg.edit_text(text)
+        except Exception:
+            pass
+
+    try:
+        databases = await extract_imd_catalog_playwright(
+            username, password, update_status,
+            bot=context.bot, admin_id=ADMIN_CHAT_ID,
+        )
+        if databases:
+            await update_status(f"💾 Saving {len(databases):,} databases...")
+            db_imd_save_catalog(databases)
+            await update_status(
+                f"✅ iMD Catalog updated!\n\n"
+                f"📚 {len(databases):,} databases extracted and saved.\n\n"
+                "Customers can now use 🔬 Search iMD Resources."
+            )
+        else:
+            await update_status(
+                "⚠️ Playwright found 0 databases — the page structure may have "
+                "changed or the modal is still blocking.\n\n"
+                "Falling back to manual token method..."
+            )
+            await _ask_for_session_token(context)
+    except ValueError as e:
+        await update_status(f"❌ {e}\n\nFalling back to manual token method...")
+        await _ask_for_session_token(context)
+    except Exception as e:
+        logger.exception("iMD Playwright extraction failed")
+        await update_status(
+            f"❌ Automatic extraction failed: {e}\n\n"
+            "Falling back to manual token method..."
+        )
+        await _ask_for_session_token(context)
+
+
+async def _ask_for_session_token(context):
+    """Sends the admin instructions to extract their session token manually
+    using Firefox for Android, which still allows javascript: execution."""
+    context.user_data["awaiting_imd_session_token"] = True
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=(
+            "📱 *Manual token extraction*\n\n"
+            "Chrome blocks JavaScript in the address bar on Android. "
+            "Use *Firefox* instead — it still allows it:\n\n"
+            "1️⃣ Install *Firefox for Android* from Play Store (free)\n"
+            "2️⃣ Open `imdweb.org` in Firefox\n"
+            "3️⃣ Log in and click *Agree*\n"
+            "4️⃣ Tap the address bar and type exactly:\n\n"
+            "`javascript:alert(document.cookie||JSON.stringify(localStorage))`\n\n"
+            "5️⃣ Press Enter — a popup shows your token\n"
+            "6️⃣ Copy the text and send it here\n\n"
+            "_(Firefox executes JavaScript in the address bar, Chrome does not)_"
+        ),
         parse_mode=ParseMode.MARKDOWN,
     )
-    context.user_data["awaiting_imd_session_token"] = True
 
 
 async def imd_session_token_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
