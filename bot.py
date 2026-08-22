@@ -4282,27 +4282,13 @@ async def extract_imd_catalog_playwright(username: str, password: str,
 
         await page.wait_for_timeout(6000)
 
-        if "login" in page.url.lower():
-            # Send screenshot if login failed
-            if bot and admin_id:
-                try:
-                    sc = "/tmp/imd_login_fail.png"
-                    await page.screenshot(path=sc)
-                    await bot.send_photo(chat_id=admin_id, photo=open(sc, "rb"),
-                                         caption=f"Login failed. URL: {page.url}")
-                except Exception:
-                    pass
-            await browser.close()
-            raise ValueError("Login failed — please check your iMD username and password.")
-
-        await status_cb("✅ Logged in. Dismissing User Agreement...")
-
-        # ── Dismiss User Agreement modal ──────────────────────────────
-        # Try multiple times because the modal can take a moment to appear
-        for attempt in range(5):
+        # ── Dismiss User Agreement (appears before the redirect completes) ──
+        # imdweb.org shows this modal WHILE the URL is still /login —
+        # we must click Agree before checking the URL, otherwise we
+        # incorrectly conclude that login failed.
+        for attempt in range(8):
             dismissed = await page.evaluate("""() => {
                 function triggerClick(el) {
-                    // React fiber approach — most reliable for React SPAs
                     const rk = Object.keys(el).find(k =>
                         k.startsWith("__reactFiber") ||
                         k.startsWith("__reactProps") ||
@@ -4314,7 +4300,6 @@ async def extract_imd_catalog_playwright(username: str, password: str,
                                 stopPropagation:()=>{},preventDefault:()=>{}});
                             return true;
                         }
-                        // Walk up the fiber tree
                         let fiber = el[rk];
                         for (let i = 0; i < 5; i++) {
                             fiber = fiber?.return;
@@ -4324,20 +4309,13 @@ async def extract_imd_catalog_playwright(username: str, password: str,
                             }
                         }
                     }
-                    // Full mouse event sequence
-                    ["pointerover","mouseover","pointerenter","mouseenter",
-                     "pointermove","mousemove","pointerdown","mousedown",
-                     "pointerup","mouseup","click"].forEach(t =>
+                    ["pointerdown","mousedown","pointerup","mouseup","click"].forEach(t =>
                         el.dispatchEvent(new MouseEvent(t, {
                             view:window, bubbles:true, cancelable:true, buttons:1}))
                     );
                     return true;
                 }
-
-                const candidates = Array.from(
-                    document.querySelectorAll("button, [role=button], a")
-                );
-                for (const el of candidates) {
+                for (const el of document.querySelectorAll("button,[role=button]")) {
                     const txt = (el.innerText || el.textContent || "").trim();
                     if (txt === "Agree" || txt === "I Agree" || txt === "Accept") {
                         return triggerClick(el);
@@ -4346,10 +4324,25 @@ async def extract_imd_catalog_playwright(username: str, password: str,
                 return false;
             }""")
             if dismissed:
+                logger.info("iMD: User Agreement dismissed (attempt %s)", attempt + 1)
+                await page.wait_for_timeout(3000)  # wait for redirect after agree
                 break
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(1000)
 
-        await page.wait_for_timeout(2000)
+        # Now check if we actually made it past the login page
+        if "login" in page.url.lower():
+            if bot and admin_id:
+                try:
+                    sc = "/tmp/imd_login_fail.png"
+                    await page.screenshot(path=sc)
+                    await bot.send_photo(chat_id=admin_id, photo=open(sc, "rb"),
+                                         caption=f"Login failed. URL: {page.url}")
+                except Exception:
+                    pass
+            await browser.close()
+            raise ValueError("Login failed — please check your iMD username and password.")
+
+        await status_cb("✅ Logged in and Agreement dismissed. Navigating to databases...")
 
         # ── Navigate to databases page ────────────────────────────────
         await status_cb("📂 Navigating to databases...")
