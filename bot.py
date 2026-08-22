@@ -4978,60 +4978,52 @@ async def extract_imd_with_token(token_raw: str, status_cb) -> list:
     import json as _json
 
     token_raw = token_raw.strip()
-    resume_token = None
-    device_id = ""
 
-    # Parse JSON localStorage dump — the expected format is:
-    # {"imd_web_resume":"<token>","imd_web_device_id":"<device_id>",...}
-    try:
-        parsed = _json.loads(token_raw)
-        if isinstance(parsed, dict):
-            resume_token = (
-                parsed.get("imd_web_resume")
-                or parsed.get("token")
-                or parsed.get("auth")
-                or parsed.get("authToken")
-            )
-            device_id = parsed.get("imd_web_device_id", "")
-        elif isinstance(parsed, list):
-            # Object.entries() format: [["key","val"],...]
-            for pair in parsed:
-                if isinstance(pair, list) and len(pair) == 2:
-                    if "resume" in str(pair[0]).lower():
-                        resume_token = pair[1]
-                    if "device_id" in str(pair[0]).lower():
-                        device_id = pair[1]
-    except (_json.JSONDecodeError, TypeError):
-        # Raw token string pasted directly
-        resume_token = token_raw.strip('"\'')
+    # Accept three formats:
+    # 1. "Bearer eyJ..." — the actual JWT from the fetch interceptor (best)
+    # 2. JSON localStorage dump — {"imd_web_resume":"...","imd_web_device_id":"..."}
+    # 3. Raw token string
+    bearer_token = None
+    if token_raw.startswith("Bearer "):
+        bearer_token = token_raw  # already complete
+    elif token_raw.startswith("eyJ"):
+        bearer_token = f"Bearer {token_raw}"
+    else:
+        # Parse localStorage JSON
+        try:
+            parsed = _json.loads(token_raw)
+            if isinstance(parsed, dict):
+                resume = (parsed.get("imd_web_resume") or
+                          parsed.get("token") or parsed.get("auth"))
+                if resume:
+                    bearer_token = f"Bearer {resume}"
+            elif isinstance(parsed, list):
+                for pair in parsed:
+                    if isinstance(pair, list) and len(pair) == 2:
+                        if "resume" in str(pair[0]).lower():
+                            bearer_token = f"Bearer {pair[1]}"
+                            break
+        except (_json.JSONDecodeError, TypeError):
+            bearer_token = f"Bearer {token_raw.strip(chr(34)+chr(39))}"
 
-    if not resume_token:
-        raise ValueError(
-            "Could not find the auth token in what you sent.\n"
-            "Please send the full text from the popup as-is."
-        )
+    if not bearer_token:
+        raise ValueError("Could not extract auth token. Send the full popup text.")
 
-    await status_cb(f"🔑 Token found: {resume_token[:20]}...")
+    await status_cb("🔑 Token ready. Calling iMD API...")
 
-    # The imd_web_resume token is stored in localStorage and sent to the
-    # server via Cookie header. The device_id cookie may also be needed.
-    cookie_str = f"imd_web_resume={resume_token}"
-    if device_id:
-        cookie_str += f"; imd_web_device_id={device_id}"
-
+    # Use Bearer auth only — no new login, no cookie session creation.
+    # iMD allows 1 login at a time; the Bearer JWT rides on the existing
+    # Firefox session without creating a second one.
     base_headers = {
         "User-Agent": (
             "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
         ),
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "application/json, */*",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://imdweb.org/",
         "Origin": "https://imdweb.org",
-        "Cookie": cookie_str,
-        # Also try the token as a Bearer token and custom header
-        "Authorization": f"Bearer {resume_token}",
-        "X-Resume-Token": resume_token,
+        "Authorization": bearer_token,
     }
 
     databases = []
@@ -6142,6 +6134,66 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
 
     item_name = MENU.get(item_id, (item_id, 0))[0]
     customer_data = context.application.user_data[user_id]
+
+    # Before asking the customer anything, check if credentials were already
+    # collected (Mini App Step 2 or any pre-payment collection). If info_json
+    # is already set, use it directly — never ask twice.
+    existing_row = db_get_fulfilment(fulfilment_id)
+    existing_info_json = existing_row[6] if existing_row else None
+    if existing_info_json:
+        existing_info = json.loads(existing_info_json)
+        # Credentials already stored — skip collection entirely
+        if item_id in IMD_TRIGGER_ITEMS:
+            # iMD: run Playwright automation with the pre-stored credentials
+            await start_imd_collection(context, order_id, user_id, item_id, fulfilment_id)
+        elif item_id.startswith("book_"):
+            db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
+            if ADMIN_CHAT_ID:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(
+                        f"📚 Book paid — Order #{order_id}\n{item_name}\n\n"
+                        "Deliver using the 📤 Send Book button on this order."
+                    ),
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("📤 Send Book", callback_data=f"deliver:{fulfilment_id}")]]
+                    ),
+                )
+        else:
+            # Non-iMD: credentials are already in info_json, notify admin
+            db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
+            atype = existing_info.get("account_type", "new")
+            if atype == "new":
+                cred_lines = (
+                    f"First name: {existing_info.get('first_name','')}\n"
+                    f"Last name: {existing_info.get('last_name','')}\n"
+                    f"Email: {existing_info.get('email','')}\n"
+                    f"Username: {existing_info.get('username','')}\n"
+                    f"Password: {existing_info.get('password','')}"
+                )
+                tag = "🆕 NEW"
+            else:
+                cred_lines = (
+                    f"Username/Email: {existing_info.get('login_username','')}\n"
+                    f"Password: {existing_info.get('login_password','')}"
+                )
+                tag = "🔄 RENEWAL"
+            if ADMIN_CHAT_ID:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(
+                        f"📝 Ready to deliver ({tag}) — Order #{order_id}\n"
+                        f"Product: {item_name}\n\n{cred_lines}\n\n"
+                        "Deliver using the 📤 Send Credentials button."
+                    ),
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("📤 Send Credentials",
+                                               callback_data=f"deliver:{fulfilment_id}")]]
+                    ),
+                )
+        # Move on to the next item if any
+        await process_next_in_queue(context, user_id, order_id)
+        return
 
     if item_id in IMD_TRIGGER_ITEMS:
         await start_imd_collection(context, order_id, user_id, item_id, fulfilment_id)
