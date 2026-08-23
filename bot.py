@@ -5144,10 +5144,16 @@ async def imd_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     context.user_data["awaiting_imd_search"] = True
+    live_search_button = InlineKeyboardMarkup([[
+        InlineKeyboardButton("⚡ Live Search", switch_inline_query_current_chat="")
+    ]])
     await update.message.reply_text(
         f"🔬 Search iMD Resources\n\n"
         f"Our catalog has {count:,} medical databases and textbooks.\n"
-        "Type the name of what you're looking for:"
+        "Type the name of what you're looking for below, "
+        "or tap ⚡ *Live Search* for results that update as you type:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=live_search_button,
     )
 
 
