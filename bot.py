@@ -5939,10 +5939,43 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
     existing_info_json = existing_row[6] if existing_row else None
     if existing_info_json:
         existing_info = json.loads(existing_info_json)
-        # Credentials already stored — skip collection entirely
+
         if item_id in IMD_TRIGGER_ITEMS:
-            # iMD: run Playwright automation with the pre-stored credentials
-            await start_imd_collection(context, order_id, user_id, item_id, fulfilment_id)
+            # iMD with pre-stored credentials: trigger the Playwright automation
+            # DIRECTLY using the stored data. Do NOT call start_imd_collection —
+            # that asks the customer for credentials interactively, causing the
+            # "33 messages" infinite-recursion bug seen in production.
+            #
+            # CRITICAL: change state BEFORE the recursive call below, otherwise
+            # the next call finds the same needs_info item and loops forever.
+            db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
+
+            is_renew  = item_id.startswith("imd_renew")
+            duration  = "6m" if "6m" in item_id else "1y"
+
+            reg_data = {
+                "duration":      duration,
+                "is_renew":      is_renew,
+                "order_id":      order_id,
+                "item_id":       item_id,
+                "fulfilment_id": fulfilment_id,
+                "user_id":       user_id,
+            }
+            if is_renew:
+                reg_data["prev_username"] = existing_info.get("prev_username", "")
+            else:
+                reg_data.update({
+                    "email":    existing_info.get("email", ""),
+                    "username": existing_info.get("username", ""),
+                    "password": existing_info.get("password", ""),
+                })
+
+            pending = context.application.bot_data.setdefault("pending_registrations", {})
+            pending[order_id] = reg_data
+
+            # Run automation in background so it doesn't block the queue loop
+            context.application.create_task(run_imd_registration(context, order_id))
+
         elif item_id.startswith("book_"):
             db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
             if ADMIN_CHAT_ID:
@@ -5957,7 +5990,7 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
                     ),
                 )
         else:
-            # Non-iMD: credentials are already in info_json, notify admin
+            # Non-iMD: state MUST be changed before the recursive call below
             db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
             atype = existing_info.get("account_type", "new")
             if atype == "new":
@@ -5988,7 +6021,9 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
                                                callback_data=f"deliver:{fulfilment_id}")]]
                     ),
                 )
-        # Move on to the next item if any
+
+        # Advance the queue — safe because state was already changed above
+        # so the next call won't re-process this item
         await process_next_in_queue(context, user_id, order_id)
         return
 
