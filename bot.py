@@ -6564,18 +6564,66 @@ async def reg_go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await run_imd_registration(context, order_id)
 
 
+def db_recover_imd_registration_data(order_id: int):
+    """Fallback for when the in-memory pending_registrations[order_id] entry
+    is missing or corrupted (lost across a restart, or left broken by a
+    past bug) — rebuilds the same shape from the fulfilment table, which
+    keeps its own persisted copy of info_json specifically so a bad
+    in-memory copy is always recoverable instead of stranding the order."""
+    conn = sqlite3.connect(DB_PATH)
+    placeholders = ",".join("?" for _ in IMD_TRIGGER_ITEMS)
+    row = conn.execute(
+        f"SELECT id, item_id, info_json FROM fulfilment "
+        f"WHERE order_id = ? AND item_id IN ({placeholders}) AND info_json IS NOT NULL "
+        f"ORDER BY id LIMIT 1",
+        (order_id, *IMD_TRIGGER_ITEMS),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    fulfilment_id, item_id, info_json = row
+    try:
+        info = json.loads(info_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return {
+        **info,
+        "is_renew": "renew" in item_id,
+        "duration": "1y" if item_id.endswith("1y") else "6m",
+        "item_id": item_id,
+        "fulfilment_id": fulfilment_id,
+    }
+
+
 async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int):
     """Pulls a serial from the pool matching this order's duration and
     performs the registration or renewal, then handles the outcome."""
     pending = context.application.bot_data.get("pending_registrations", {})
     data = pending.get(order_id)
 
-    if not data:
-        if ADMIN_CHAT_ID:
-            await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID, text=f"No pending registration data found for order #{order_id}."
+    if not isinstance(data, dict) or "duration" not in data:
+        # Missing entirely, or corrupted (e.g. left as a bare tuple by a
+        # past bug and persisted to disk before it was fixed) — recover
+        # from the fulfilment table's backup copy rather than failing.
+        recovered = db_recover_imd_registration_data(order_id)
+        if recovered:
+            data = recovered
+            pending[order_id] = data
+            logger.warning(
+                "pending_registrations[%s] was missing/corrupted — recovered from fulfilment table.",
+                order_id,
             )
-        return
+        else:
+            if ADMIN_CHAT_ID:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(
+                        f"⚠️ No registration data found for order #{order_id}, even after "
+                        "checking the fulfilment table backup. The customer's details may "
+                        "need to be re-collected — check 📋 Pending Orders."
+                    ),
+                )
+            return
 
     duration = data.get("duration")
     is_renew = data.get("is_renew")
@@ -7638,6 +7686,45 @@ def main():
         except Exception:
             logger.exception("Failed to reset menu button")
 
+    async def global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
+        """Without this, any unhandled exception in a handler is only
+        logged to stderr and otherwise disappears — a button click (or any
+        update) that hits a bug just does nothing visible, with no way to
+        tell whether it's still loading, was ignored, or crashed. This
+        makes failures visible: logs the full traceback, tells the admin
+        what broke and on what update, and — if it was a button tap —
+        answers the callback so Telegram's loading spinner clears instead
+        of hanging, and tells the person who clicked that something went
+        wrong instead of leaving them looking at an unresponsive button."""
+        logger.error("Unhandled exception while processing update: %s", update, exc_info=context.error)
+
+        if ADMIN_CHAT_ID:
+            try:
+                err_text = f"{type(context.error).__name__}: {context.error}"[:500]
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=f"🔴 Bot error\n{err_text}\n\nCheck logs for the full traceback.",
+                )
+            except Exception:
+                pass
+
+        if isinstance(update, Update) and update.callback_query:
+            try:
+                await update.callback_query.answer(
+                    "Something went wrong — please try again or contact support.",
+                    show_alert=True,
+                )
+            except Exception:
+                pass
+        elif isinstance(update, Update) and update.effective_message:
+            try:
+                await update.effective_message.reply_text(
+                    "Sorry, something went wrong on our end. Please try again, "
+                    "or contact support if it keeps happening."
+                )
+            except Exception:
+                pass
+
     if BOT_TOKEN == "PUT_YOUR_BOT_TOKEN_HERE":
         raise SystemExit("Set BOT_TOKEN (env var) before running.")
 
@@ -7750,6 +7837,7 @@ def main():
         app.add_handler(MessageHandler(filters.Regex(_customer_pat), main_menu_text))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_state_router))
     app.add_handler(CallbackQueryHandler(menu_button))  # catch-all for menu/cart callbacks
+    app.add_error_handler(global_error_handler)
 
     logger.info("Bot starting...")
     app.run_polling()
