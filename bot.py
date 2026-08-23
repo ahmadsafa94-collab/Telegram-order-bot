@@ -4500,7 +4500,7 @@ async def extract_imd_catalog_playwright(username: str, password: str,
                         || item.book_title || item.full_name || "";
                     const fallbackName = item.name || item.db_name || item.filename || "";
                     const name = (displayName && displayName.trim()) ? displayName : fallbackName;
-                    const cat  = item.category || item.type || item.specialty || "";
+                    const cat  = item.section || item.category || item.type || item.specialty || "";
                     if (name.length > 2) all.push([name, cat]);
                 }
 
