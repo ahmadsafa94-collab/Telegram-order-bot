@@ -6041,6 +6041,16 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # ── 3. Customer collection flows ─────────────────────────────────
+    # Receipt/payer-name comes first: once a photo has been uploaded, the
+    # very next text reply is unambiguously the answer to "what's the
+    # payer's name" — it must never be intercepted by an unrelated,
+    # left-over registration/generic field flow for a different item,
+    # which previously caused the receipt to silently never reach the
+    # admin while the customer got asked an out-of-context question.
+    if context.user_data.get("awaiting_payer_name_for_order"):
+        await payer_name_reply(update, context)
+        return
+
     if context.user_data.get("awaiting_ticket_field") == "message":
         await ticket_field_reply(update, context)
         return
@@ -6059,10 +6069,6 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get("awaiting_generic_field"):
         await generic_field_reply(update, context)
-        return
-
-    if context.user_data.get("awaiting_payer_name_for_order"):
-        await payer_name_reply(update, context)
         return
 
 
