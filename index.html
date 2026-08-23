@@ -769,7 +769,7 @@ function makeDetailBlock(id,name,price,idx){
   const isIN=id.startsWith('imd_new'), isIR=id.startsWith('imd_renew');
   const lbl=idx>0?` #${idx+1}`:'';
   let body='';
-  if(isIN) body=flds(id,idx,[['email','Email','email','Never used for iMD before'],['username','Username','text','≥6 chars'],['password','Password','password','8+ chars, 1 cap, 1 num, one of: - _ . # @']]);
+  if(isIN) body=flds(id,idx,[['email','Email','email','Never used for iMD before'],['username','Username','text','≥6 chars'],['password','Password','password','Any password you\'ll remember']]);
   else if(isIR) body=flds(id,idx,[['prev_username','Existing iMD Username','text','']]);
   else body=`<div class="toggle"><button class="tbtn active" onclick="setType(this,'new','${id}',${idx})">🆕 New</button><button class="tbtn" onclick="setType(this,'renew','${id}',${idx})">🔄 Renewal</button></div><div id="ff-${id}-${idx}">${newFlds(id,idx)}</div>`;
   w.innerHTML=`<div class="dheader"><div class="ri"><div class="rn">${name}${lbl}</div></div><div class="ptag">$${price}</div></div>${body}`;
@@ -798,7 +798,7 @@ function validateDetails(){
       if(!v){setErr(inp,'Required');ok=false;return;}
       if(n==='email'&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)){setErr(inp,'Enter a valid email');ok=false;return;}
       if(n==='username'&&v.length<6){setErr(inp,'At least 6 characters');ok=false;return;}
-      if((n==='password'||n==='login_password')&&type==='new'){
+      if((n==='password'||n==='login_password')&&type==='new'&&!isIN){
         if(v.length<8){setErr(inp,'At least 8 characters');ok=false;return;}
         if(!/[A-Z]/.test(v)){setErr(inp,'Need a capital letter');ok=false;return;}
         if(!/[0-9]/.test(v)){setErr(inp,'Need a number');ok=false;return;}
