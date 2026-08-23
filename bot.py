@@ -7368,28 +7368,41 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     # registration details the customer already filled in the Mini App.
     db_add_fulfilment_items(order_id, user_id, order_items)
 
-    # Store credentials from the Mini App directly into fulfilment rows —
-    # using a targeted query for THIS order so we get the exact rows we just
-    # inserted (db_all_pending_items queries for admin view and returns a
-    # different set of rows than what we need here).
-    detail_map = {}
+    # Store credentials from the Mini App directly into fulfilment rows.
+    # Matched by (order_id, item_id, unit_no) rather than by list position —
+    # a per-item counter is built here in the SAME left-to-right order the
+    # Mini App submitted items_raw, and db_add_fulfilment_items numbers its
+    # unit_no the same way (1..qty per item_id in first-seen order), so this
+    # always lands on the exact row that entry belongs to. The previous
+    # positional-list matching could silently miss a row in a multi-item
+    # cart, leaving it stuck on 'needs_info' and causing the customer to be
+    # asked for New/Renewal + credentials a second time after payment, even
+    # though they'd already filled it in — this ties the two together
+    # explicitly so that can't happen.
+    conn = sqlite3.connect(DB_PATH)
+    unit_counters = {}
+    matched = []  # (fulfilment_id, item_id, detail_entry)
     for entry in items_raw:
         iid = entry.get("id")
-        if iid and iid in order_items:
-            detail_map.setdefault(iid, []).append(entry)
-
-    conn = sqlite3.connect(DB_PATH)
-    order_fuls = conn.execute(
-        "SELECT id, item_id, unit_no FROM fulfilment WHERE order_id = ? ORDER BY id",
-        (order_id,),
-    ).fetchall()
+        if not iid or iid not in order_items:
+            continue
+        unit_counters[iid] = unit_counters.get(iid, 0) + 1
+        unit_no = unit_counters[iid]
+        row = conn.execute(
+            "SELECT id FROM fulfilment WHERE order_id = ? AND item_id = ? AND unit_no = ?",
+            (order_id, iid, unit_no),
+        ).fetchone()
+        if row:
+            matched.append((row[0], iid, entry))
+        else:
+            logger.error(
+                "No fulfilment row found for order #%s item %s unit %s — "
+                "details from the Mini App could not be attached.",
+                order_id, iid, unit_no,
+            )
     conn.close()
 
-    for fid, iid, unit_no in order_fuls:
-        details_list = detail_map.get(iid, [])
-        detail_entry = details_list[unit_no - 1] if unit_no - 1 < len(details_list) else {}
-        if not detail_entry:
-            continue
+    for fid, iid, detail_entry in matched:
         info = {k: v for k, v in detail_entry.items() if k not in ("id", "account_type")}
         info["account_type"] = detail_entry.get("account_type", "new")
         db_set_fulfilment_info(fid, info)
