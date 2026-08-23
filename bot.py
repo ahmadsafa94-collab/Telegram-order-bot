@@ -1843,6 +1843,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_imd_catalog_username", "awaiting_imd_catalog_password",
     "awaiting_imd_session_token", "imd_extract_username",
     "awaiting_imd_api_url", "imd_saved_token",
+    "awaiting_imd_diag_username", "awaiting_imd_diag_password", "imd_diag_username",
 ]
 
 def clear_admin_flow_state(user_data: dict):
@@ -4282,6 +4283,149 @@ def db_imd_save_catalog(names: list):
     conn.close()
 
 
+async def _imd_login(page, username: str, password: str, status_cb, bot=None, admin_id=None):
+    """Shared login flow: logs into imdweb.org, dismisses the User
+    Agreement, and lands on the downloads page. Raises ValueError on
+    failure. Used by both the full extraction and the raw-sample
+    diagnostic so the two never drift out of sync."""
+    await status_cb("🔑 Logging in to imdweb.org...")
+    await page.goto("https://imdweb.org/login", wait_until="load", timeout=60000)
+    await page.wait_for_timeout(4000)
+
+    # Fill by position — works regardless of generated class names
+    text_inputs = await page.locator('input[type="text"], input[type="email"], input:not([type])').all()
+    pwd_inputs  = await page.locator('input[type="password"]').all()
+    if text_inputs:
+        await text_inputs[0].fill(username)
+    if pwd_inputs:
+        await pwd_inputs[0].fill(password)
+
+    clicked = False
+    for sel in ['button[type="submit"]', 'button:has-text("Login")', 'button:has-text("Sign in")']:
+        if await page.locator(sel).count():
+            await page.locator(sel).first.click()
+            clicked = True
+            break
+    if not clicked and pwd_inputs:
+        await pwd_inputs[0].press("Enter")
+
+    await page.wait_for_timeout(6000)
+
+    # ── Dismiss User Agreement (appears before the redirect completes) ──
+    # imdweb.org shows this modal WHILE the URL is still /login —
+    # we must click Agree before checking the URL, otherwise we
+    # incorrectly conclude that login failed.
+    for attempt in range(8):
+        dismissed = await page.evaluate("""() => {
+            function triggerClick(el) {
+                const rk = Object.keys(el).find(k =>
+                    k.startsWith("__reactFiber") ||
+                    k.startsWith("__reactProps") ||
+                    k.startsWith("__reactInternalInstance"));
+                if (rk) {
+                    const props = el[rk]?.memoizedProps || el[rk] || {};
+                    if (props.onClick) {
+                        props.onClick({type:"click",target:el,currentTarget:el,
+                            stopPropagation:()=>{},preventDefault:()=>{}});
+                        return true;
+                    }
+                    let fiber = el[rk];
+                    for (let i = 0; i < 5; i++) {
+                        fiber = fiber?.return;
+                        if (fiber?.memoizedProps?.onClick) {
+                            fiber.memoizedProps.onClick({});
+                            return true;
+                        }
+                    }
+                }
+                ["pointerdown","mousedown","pointerup","mouseup","click"].forEach(t =>
+                    el.dispatchEvent(new MouseEvent(t, {
+                        view:window, bubbles:true, cancelable:true, buttons:1}))
+                );
+                return true;
+            }
+            for (const el of document.querySelectorAll("button,[role=button]")) {
+                const txt = (el.innerText || el.textContent || "").trim();
+                if (txt === "Agree" || txt === "I Agree" || txt === "Accept") {
+                    return triggerClick(el);
+                }
+            }
+            return false;
+        }""")
+        if dismissed:
+            logger.info("iMD: User Agreement dismissed (attempt %s)", attempt + 1)
+            await page.wait_for_timeout(3000)  # wait for redirect after agree
+            break
+        await page.wait_for_timeout(1000)
+
+    # Now check if we actually made it past the login page
+    if "login" in page.url.lower():
+        if bot and admin_id:
+            try:
+                sc = "/tmp/imd_login_fail.png"
+                await page.screenshot(path=sc)
+                await bot.send_photo(chat_id=admin_id, photo=open(sc, "rb"),
+                                     caption=f"Login failed. URL: {page.url}")
+            except Exception:
+                pass
+        raise ValueError("Login failed — please check your iMD username and password.")
+
+    await status_cb("✅ Logged in and Agreement dismissed. Navigating to databases...")
+
+    # ── Navigate to databases page ────────────────────────────────
+    await status_cb("📂 Navigating to databases...")
+    # Direct URL — avoids triggering the modal again on the home page
+    await page.goto("https://imdweb.org/downloads", wait_until="load", timeout=30000)
+    await page.wait_for_timeout(3000)
+
+    # Dismiss modal again if it reappears
+    await page.evaluate("""() => {
+        document.querySelectorAll("button").forEach(b => {
+            if ((b.innerText||"").trim()==="Agree") b.click();
+        });
+    }""")
+    await page.wait_for_timeout(2000)
+
+
+async def imd_raw_sample_playwright(username: str, password: str, status_cb,
+                                     bot=None, admin_id=None) -> str:
+    """Diagnostic only: logs in, fetches ONE page from the downloads API,
+    and returns the raw, unparsed JSON as a pretty-printed string. Use
+    this to see the actual field names the API returns (name/title/
+    display_name/etc.) before deciding how to parse them — no catalog
+    is touched."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+        )
+        ctx = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 900},
+        )
+        page = await ctx.new_page()
+        await _imd_login(page, username, password, status_cb, bot=bot, admin_id=admin_id)
+
+        await status_cb("📥 Fetching one raw page for inspection...")
+        raw_json = await page.evaluate("""async () => {
+            const resp = await fetch("/api/labrange/downloads?limit=5&offset=0");
+            const text = await resp.text();
+            return text;
+        }""")
+        await browser.close()
+
+    try:
+        parsed = json.loads(raw_json)
+        return json.dumps(parsed, indent=2)[:15000]
+    except (json.JSONDecodeError, TypeError):
+        return raw_json[:15000]
+
+
 async def extract_imd_catalog_playwright(username: str, password: str,
                                           status_cb, bot=None, admin_id=None) -> list:
     """Logs into imdweb.org with Playwright, dismisses the User Agreement,
@@ -4303,106 +4447,7 @@ async def extract_imd_catalog_playwright(username: str, password: str,
             viewport={"width": 1280, "height": 900},
         )
         page = await ctx.new_page()
-
-        # ── Login ─────────────────────────────────────────────────────
-        await status_cb("🔑 Logging in to imdweb.org...")
-        await page.goto("https://imdweb.org/login", wait_until="load", timeout=60000)
-        await page.wait_for_timeout(4000)
-
-        # Fill by position — works regardless of generated class names
-        text_inputs = await page.locator('input[type="text"], input[type="email"], input:not([type])').all()
-        pwd_inputs  = await page.locator('input[type="password"]').all()
-        if text_inputs:
-            await text_inputs[0].fill(username)
-        if pwd_inputs:
-            await pwd_inputs[0].fill(password)
-
-        clicked = False
-        for sel in ['button[type="submit"]', 'button:has-text("Login")', 'button:has-text("Sign in")']:
-            if await page.locator(sel).count():
-                await page.locator(sel).first.click()
-                clicked = True
-                break
-        if not clicked and pwd_inputs:
-            await pwd_inputs[0].press("Enter")
-
-        await page.wait_for_timeout(6000)
-
-        # ── Dismiss User Agreement (appears before the redirect completes) ──
-        # imdweb.org shows this modal WHILE the URL is still /login —
-        # we must click Agree before checking the URL, otherwise we
-        # incorrectly conclude that login failed.
-        for attempt in range(8):
-            dismissed = await page.evaluate("""() => {
-                function triggerClick(el) {
-                    const rk = Object.keys(el).find(k =>
-                        k.startsWith("__reactFiber") ||
-                        k.startsWith("__reactProps") ||
-                        k.startsWith("__reactInternalInstance"));
-                    if (rk) {
-                        const props = el[rk]?.memoizedProps || el[rk] || {};
-                        if (props.onClick) {
-                            props.onClick({type:"click",target:el,currentTarget:el,
-                                stopPropagation:()=>{},preventDefault:()=>{}});
-                            return true;
-                        }
-                        let fiber = el[rk];
-                        for (let i = 0; i < 5; i++) {
-                            fiber = fiber?.return;
-                            if (fiber?.memoizedProps?.onClick) {
-                                fiber.memoizedProps.onClick({});
-                                return true;
-                            }
-                        }
-                    }
-                    ["pointerdown","mousedown","pointerup","mouseup","click"].forEach(t =>
-                        el.dispatchEvent(new MouseEvent(t, {
-                            view:window, bubbles:true, cancelable:true, buttons:1}))
-                    );
-                    return true;
-                }
-                for (const el of document.querySelectorAll("button,[role=button]")) {
-                    const txt = (el.innerText || el.textContent || "").trim();
-                    if (txt === "Agree" || txt === "I Agree" || txt === "Accept") {
-                        return triggerClick(el);
-                    }
-                }
-                return false;
-            }""")
-            if dismissed:
-                logger.info("iMD: User Agreement dismissed (attempt %s)", attempt + 1)
-                await page.wait_for_timeout(3000)  # wait for redirect after agree
-                break
-            await page.wait_for_timeout(1000)
-
-        # Now check if we actually made it past the login page
-        if "login" in page.url.lower():
-            if bot and admin_id:
-                try:
-                    sc = "/tmp/imd_login_fail.png"
-                    await page.screenshot(path=sc)
-                    await bot.send_photo(chat_id=admin_id, photo=open(sc, "rb"),
-                                         caption=f"Login failed. URL: {page.url}")
-                except Exception:
-                    pass
-            await browser.close()
-            raise ValueError("Login failed — please check your iMD username and password.")
-
-        await status_cb("✅ Logged in and Agreement dismissed. Navigating to databases...")
-
-        # ── Navigate to databases page ────────────────────────────────
-        await status_cb("📂 Navigating to databases...")
-        # Direct URL — avoids triggering the modal again on the home page
-        await page.goto("https://imdweb.org/downloads", wait_until="load", timeout=30000)
-        await page.wait_for_timeout(3000)
-
-        # Dismiss modal again if it reappears
-        await page.evaluate("""() => {
-            document.querySelectorAll("button").forEach(b => {
-                if ((b.innerText||"").trim()==="Agree") b.click();
-            });
-        }""")
-        await page.wait_for_timeout(2000)
+        await _imd_login(page, username, password, status_cb, bot=bot, admin_id=admin_id)
 
         # ── Download ALL databases via in-browser fetch() ─────────────
         await status_cb("📥 Downloading database catalog (this takes a few minutes)...")
@@ -4447,7 +4492,14 @@ async def extract_imd_catalog_playwright(username: str, password: str,
                 empty = 0;
 
                 for (const item of items) {
-                    const name = item.name || item.title || item.db_name || item.label || "";
+                    // Prefer a human-readable display name over the raw
+                    // filename — some entries have BOTH (e.g. name:
+                    // "00134097.db", title: "Comprehensive Vision
+                    // Rehabilitation"), and the filename must not win.
+                    const displayName = item.title || item.display_name || item.label
+                        || item.book_title || item.full_name || "";
+                    const fallbackName = item.name || item.db_name || item.filename || "";
+                    const name = (displayName && displayName.trim()) ? displayName : fallbackName;
                     const cat  = item.category || item.type || item.specialty || "";
                     if (name.length > 2) all.push([name, cat]);
                 }
@@ -4525,6 +4577,74 @@ async def imd_catalog_extract_start(update: Update, context: ContextTypes.DEFAUL
         "so customers can search before having credentials.\n\n"
         "Send your iMD username:"
     )
+
+
+async def imd_diag_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only /imddiag: fetches ONE raw page from the downloads API
+    and sends it back unparsed, so we can see the real field names
+    (title vs. name vs. display_name etc.) before touching the catalog."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    clear_admin_flow_state(context.user_data)
+    context.user_data["awaiting_imd_diag_username"] = True
+    await update.message.reply_text(
+        "🔍 Diagnostic — fetches one raw page of the downloads API, no catalog changes.\n\n"
+        "Send your iMD username:"
+    )
+
+
+async def imd_diag_username_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("awaiting_imd_diag_username", None)
+    context.user_data["imd_diag_username"] = update.message.text.strip()
+    context.user_data["awaiting_imd_diag_password"] = True
+    await update.message.reply_text(
+        "Send your iMD password:\n_(it won't be stored — used once for this check)_",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def imd_diag_password_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("awaiting_imd_diag_password", None)
+    username = context.user_data.pop("imd_diag_username", "")
+    password = update.message.text.strip()
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    status_msg = await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text="🔄 Logging in and fetching one raw page..."
+    )
+
+    async def update_status(text: str):
+        try:
+            await status_msg.edit_text(text)
+        except Exception:
+            pass
+
+    try:
+        raw_text = await imd_raw_sample_playwright(
+            username, password, update_status,
+            bot=context.bot, admin_id=ADMIN_CHAT_ID,
+        )
+        out_path = os.path.join(os.path.dirname(DB_PATH) or ".", "imd_raw_sample.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(raw_text)
+        await update_status("✅ Got a raw sample page — sending it now.")
+        with open(out_path, "rb") as f:
+            await context.bot.send_document(
+                chat_id=ADMIN_CHAT_ID,
+                document=f,
+                filename="imd_raw_sample.json",
+                caption="Raw, unparsed API response — check the field names here.",
+            )
+    except ValueError as e:
+        await update_status(f"❌ {e}")
+    except Exception as e:
+        logger.exception("iMD diagnostic fetch failed")
+        await update_status(f"❌ Diagnostic failed: {e}")
 
 
 async def imd_catalog_username_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5819,6 +5939,12 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if context.user_data.get("awaiting_imd_catalog_password"):
             await imd_catalog_password_reply(update, context)
+            return
+        if context.user_data.get("awaiting_imd_diag_username"):
+            await imd_diag_username_reply(update, context)
+            return
+        if context.user_data.get("awaiting_imd_diag_password"):
+            await imd_diag_password_reply(update, context)
             return
         if context.user_data.get("awaiting_imd_session_token"):
             await imd_session_token_reply(update, context)
@@ -7421,6 +7547,7 @@ def main():
     app.add_handler(CommandHandler("myorders", my_orders))
     app.add_handler(CommandHandler("backupdb", backup_db))
     app.add_handler(CommandHandler("exportimd", export_imd_catalog))
+    app.add_handler(CommandHandler("imddiag", imd_diag_start))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler))
     app.add_handler(CommandHandler("customers", customer_history))
     app.add_handler(CommandHandler("customer", customer_lookup))
