@@ -40,6 +40,8 @@ from datetime import datetime, timedelta
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
     KeyboardButton,
     LabeledPrice,
     ReplyKeyboardMarkup,
@@ -52,6 +54,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    InlineQueryHandler,
     MessageHandler,
     PersistenceInput,
     PicklePersistence,
@@ -5101,6 +5104,37 @@ async def extract_imd_with_token(token_raw: str, status_cb) -> list:
 
 # ── Customer: search the local catalog ───────────────────────────────
 
+IMD_SEARCH_PAGE_SIZE = 20
+
+
+def render_imd_search_page(query: str, offset: int):
+    """Builds the text + pagination keyboard for one page of iMD search
+    results. Shared by the chat search flow so Prev/Next re-renders
+    consistently with the initial search."""
+    rows, total = db_imd_search(query, limit=IMD_SEARCH_PAGE_SIZE, offset=offset)
+    if not rows:
+        return None, None
+
+    start = offset + 1
+    end = offset + len(rows)
+    lines = [f"🔬 *iMD Search: '{md_escape(query)}'*\n{total:,} result{'s' if total != 1 else ''} found\n"]
+    for name, category in rows:
+        cat = f" · _{md_escape(category)}_" if category else ""
+        lines.append(f"📖 {md_escape(name)}{cat}")
+    lines.append(f"\n_Showing {start}-{end} of {total:,}._")
+    text = "\n".join(lines)
+
+    nav = []
+    if offset > 0:
+        prev_offset = max(0, offset - IMD_SEARCH_PAGE_SIZE)
+        nav.append(InlineKeyboardButton("◀️ Prev", callback_data=f"imdpage:{prev_offset}"))
+    if end < total:
+        nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"imdpage:{offset + IMD_SEARCH_PAGE_SIZE}"))
+    keyboard = InlineKeyboardMarkup([nav]) if nav else None
+
+    return text, keyboard
+
+
 async def imd_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     count = db_imd_catalog_count()
     if count == 0:
@@ -5124,24 +5158,59 @@ async def imd_search_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please send at least 2 characters to search.")
         return
 
-    rows, total = db_imd_search(query, limit=10, offset=0)
-    if not rows:
+    context.user_data["last_imd_search_query"] = query
+    text, keyboard = render_imd_search_page(query, offset=0)
+    if not text:
         await update.message.reply_text(
             f"No results found for '{query}'.\n\n"
             "Try fewer words or different spelling."
         )
         return
 
-    lines = [f"🔬 *iMD Search: '{query}'*\n{total:,} result{'s' if total != 1 else ''} found\n"]
-    for name, category in rows:
-        cat = f" · _{category}_" if category else ""
-        lines.append(f"📖 {name}{cat}")
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
-    if total > 10:
-        lines.append(f"\n_Showing first 10 of {total:,}. Narrow your search for more specific results._")
 
-    text = "\n".join(lines)
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+async def imd_search_page_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Prev/Next button on a search results page."""
+    query_cb = update.callback_query
+    await query_cb.answer()
+    offset = int(query_cb.data.split(":", 1)[1])
+    query = context.user_data.get("last_imd_search_query")
+    if not query:
+        await query_cb.edit_message_text("This search has expired — please search again.")
+        return
+    text, keyboard = render_imd_search_page(query, offset)
+    if not text:
+        await query_cb.edit_message_text(f"No results found for '{query}'.")
+        return
+    await query_cb.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+
+
+async def imd_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Live, as-you-type search via Telegram inline mode — the only
+    mechanism Telegram offers for showing results while the user is
+    still typing (regular messages only arrive after Send is pressed).
+    Triggered by typing '@<bot_username> query' in any chat, including
+    this bot's own chat."""
+    inline_query = update.inline_query
+    text = (inline_query.query or "").strip()
+    if len(text) < 2:
+        await inline_query.answer([], cache_time=1, is_personal=True)
+        return
+
+    rows, total = db_imd_search(text, limit=25, offset=0)
+    results = []
+    for i, (name, category) in enumerate(rows):
+        subtitle = category or ""
+        results.append(
+            InlineQueryResultArticle(
+                id=str(i),
+                title=name,
+                description=subtitle,
+                input_message_content=InputTextMessageContent(f"📖 {name}"),
+            )
+        )
+    await inline_query.answer(results, cache_time=1, is_personal=True)
 
 
 async def delivered_subscriptions_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7563,6 +7632,8 @@ def main():
     app.add_handler(CallbackQueryHandler(reg_go, pattern=r"^reg_go:"))
     app.add_handler(CallbackQueryHandler(add_serials_pick_duration, pattern=r"^addser:"))
     app.add_handler(CallbackQueryHandler(imd_menu_start, pattern=r"^imd_menu$"))
+    app.add_handler(CallbackQueryHandler(imd_search_page_nav, pattern=r"^imdpage:"))
+    app.add_handler(InlineQueryHandler(imd_inline_query))
     app.add_handler(CallbackQueryHandler(catalog_navigate, pattern=r"^cat:"))
     app.add_handler(CallbackQueryHandler(stock_toggle, pattern=r"^stocktoggle:"))
     app.add_handler(CallbackQueryHandler(getfree_proceed, pattern=r"^getfree_proceed$"))
