@@ -1746,6 +1746,18 @@ def db_user_orders(user_id: int, limit: int = 5):
 # HELPERS
 # ------------------------------------------------------------------
 
+async def safe_reply_markdown(message, text: str):
+    """Sends with Markdown parsing, but falls back to plain text if the
+    content (e.g. an admin-entered product name with a stray _ or *)
+    breaks Telegram's parser — a parse failure must never mean the whole
+    order confirmation silently fails to send."""
+    try:
+        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        logger.warning("Markdown parse failed on outgoing message — sending as plain text.")
+        await message.reply_text(text)
+
+
 def md_escape(text: str) -> str:
     """Escapes Telegram Markdown control characters. Product names or
     customer-supplied values containing _ * ` [ would otherwise make
@@ -8042,10 +8054,19 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     db_update_status(order_id, "awaiting_receipt")
     queue_receipt_request(context, order_id)
 
-    await update.message.reply_text(
+    receipt_prompt = "Please upload a screenshot of your payment receipt:"
+    if pay_method == "India":
+        receipt_prompt = (
+            "📸 *Send a screenshot of the receipt containing the UTR or "
+            "transaction ID.*\n"
+            "⚠️ *Receipts that don't show the transaction ID will be rejected.*"
+        )
+
+    await safe_reply_markdown(
+        update.message,
         f"✅ Order #{order_id} confirmed!\n\n{summary}\n\nTotal: {CURRENCY}{total:.2f}\n"
         f"Payment: {pay_method}\n\n"
-        "Please upload a screenshot of your payment receipt:"
+        f"{receipt_prompt}",
     )
 
     # Notify admin
