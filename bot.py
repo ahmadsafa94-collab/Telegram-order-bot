@@ -463,7 +463,9 @@ LOCAL_PAYMENT_INSTRUCTIONS = {
         "➖ STRICTLY don't mention anything regarding the subscription in the "
         "comments/remarks of the payment. Just leave it empty.\n\n"
         "➖ If you could not complete the payment in whole, do it in parts. "
-        "Eg. If the app didn't allow you to send 4000 Rupees, send 2000 rupees twice."
+        "Eg. If the app didn't allow you to send 4000 Rupees, send 2000 rupees twice.\n\n"
+        "📸 *Send a screenshot of the receipt containing the UTR or transaction ID.*\n"
+        "⚠️ *Receipts that don't show the transaction ID will be rejected.*"
     ),
     "Ghana": (
         "Tap on the number to copy:\n\n"
@@ -3898,6 +3900,23 @@ async def channel_post_detector(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
+async def _safe_edit_confirmation(query, text: str):
+    """Edits whichever kind of message this is — a photo's caption (the
+    normal receipt-review flow) or plain text (e.g. the Payment Pending
+    detail view, which has no photo at all). Without this fallback, the
+    caption-edit attempt fails silently on text messages and the admin
+    sees no visible change after tapping Confirm/Reject, even though the
+    action itself succeeded — looking exactly like the button "did
+    nothing"."""
+    try:
+        await query.edit_message_caption(caption=text)
+    except Exception:
+        try:
+            await query.edit_message_text(text)
+        except Exception:
+            logger.info("Could not edit admin message (neither caption nor text) for this action.")
+
+
 async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query.from_user.id != ADMIN_CHAT_ID:
@@ -3919,14 +3938,11 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db_update_status(order_id, "paid")
 
         # Cosmetic only — a failure here (double tap, "message is not
-        # modified", non-photo message) must never stop the order being
-        # fulfilled, so it's isolated.
-        try:
-            await query.edit_message_caption(
-                caption=f"✅ Order #{order_id} confirmed as paid."
-            )
-        except Exception:
-            logger.info("Could not edit confirmation caption for order #%s", order_id)
+        # modified") must never stop the order being fulfilled, so it's
+        # isolated. Falls back from caption to text since this button now
+        # appears on both photo (receipt review) and plain-text (Payment
+        # Pending) messages.
+        await _safe_edit_confirmation(query, f"✅ Order #{order_id} confirmed as paid.")
 
         await context.bot.send_message(
             chat_id=user_id,
@@ -3948,10 +3964,7 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # the customer can reply to this and the admin can reply back.
         clear_admin_flow_state(context.user_data)
         context.user_data["awaiting_reject_comment_for_order"] = order_id
-        try:
-            await query.edit_message_caption(caption=f"⏳ Rejecting order #{order_id} — waiting for reason...")
-        except Exception:
-            pass
+        await _safe_edit_confirmation(query, f"⏳ Rejecting order #{order_id} — waiting for reason...")
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
             text=(
