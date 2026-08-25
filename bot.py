@@ -158,6 +158,11 @@ SINGLE_MAIN_ITEMS = [
     "statdx", "nejm", "jama_evidence", "scopus", "springerlink",
 ]
 
+# Admin edits from 📦 Manage Stock → Edit, layered on top of MENU at
+# startup (see main()). {item_id: (name_or_None, price_or_None,
+# duration_label_or_None, removed_bool)}
+ITEM_OVERRIDES = {}
+
 # Navigation-only tree for the two multi-level products (Uptodate, Amboss).
 # Prices/names for the actual leaves live in MENU (single source of truth);
 # this only describes how to browse down to them. A node is a category if
@@ -676,6 +681,17 @@ def db_init():
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS item_overrides (
+            item_id TEXT PRIMARY KEY,
+            name TEXT,
+            price REAL,
+            duration_label TEXT,
+            removed INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS custom_items (
             item_id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -986,6 +1002,20 @@ def db_user_pending_items(user_id: int):
     return rows
 
 
+def db_rejected_orders():
+    """Orders whose receipt was rejected — surfaced separately in Pending
+    Orders as 'Payment Pending' so they don't just disappear from view
+    once rejected. The customer may resubmit a corrected receipt, and
+    without this the admin has no easy way to notice or follow up."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, user_id, username, total, created_at FROM orders "
+        "WHERE status = 'rejected' ORDER BY id DESC"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
 def db_all_pending_items():
     """Every undelivered unit across all customers, for the admin view.
     Returns (fulfilment_id, order_id, user_id, username, item_id, unit_no, state)."""
@@ -1266,6 +1296,51 @@ def db_add_custom_item(item_id: str, name: str, price: float):
     )
     conn.commit()
     conn.close()
+
+
+def db_set_item_override(item_id: str, name: str = None, price: float = None, duration_label: str = None):
+    """Upserts an edit for any item (built-in catalog or custom) — only
+    the fields passed are changed, others keep their existing override
+    (or None if never overridden). Applied on top of MENU at startup and
+    immediately after saving, so it survives restarts."""
+    conn = sqlite3.connect(DB_PATH)
+    existing = conn.execute(
+        "SELECT name, price, duration_label, removed FROM item_overrides WHERE item_id = ?", (item_id,)
+    ).fetchone()
+    cur_name, cur_price, cur_duration, cur_removed = existing if existing else (None, None, None, 0)
+    conn.execute(
+        "INSERT INTO item_overrides (item_id, name, price, duration_label, removed) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(item_id) DO UPDATE SET name=excluded.name, price=excluded.price, "
+        "duration_label=excluded.duration_label",
+        (
+            item_id,
+            name if name is not None else cur_name,
+            price if price is not None else cur_price,
+            duration_label if duration_label is not None else cur_duration,
+            cur_removed,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_set_item_removed(item_id: str, removed: bool):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO item_overrides (item_id, removed) VALUES (?, ?) "
+        "ON CONFLICT(item_id) DO UPDATE SET removed=excluded.removed",
+        (item_id, int(removed)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_load_item_overrides():
+    """Returns {item_id: (name_or_None, price_or_None, duration_label_or_None, removed_bool)}."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT item_id, name, price, duration_label, removed FROM item_overrides").fetchall()
+    conn.close()
+    return {r[0]: (r[1], r[2], r[3], bool(r[4])) for r in rows}
 
 
 def db_load_custom_items():
@@ -1862,11 +1937,13 @@ ADMIN_LABELS = [
 ADMIN_FLOW_KEYS = [
     "awaiting_admin_input",
     "awaiting_comment_for_order",
+    "awaiting_reject_comment_for_order",
     "awaiting_ticket_resolution",
     "awaiting_credentials_fulfilment",
     "awaiting_admin_message_for_order",
     "awaiting_new_sub_field", "new_sub_data",
     "awaiting_book_price_for",
+    "awaiting_stock_edit_field", "stock_edit_item_id", "stock_edit_name", "stock_edit_duration",
     "awaiting_imd_catalog_username", "awaiting_imd_catalog_password",
     "awaiting_imd_session_token", "imd_extract_username",
     "awaiting_imd_api_url", "imd_saved_token",
@@ -2523,6 +2600,7 @@ async def show_ticket_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         label = name + (f" ({delivered_at[:10]})" if delivered_at else "")
         buttons.append([InlineKeyboardButton(label[:60], callback_data=f"ticketsub:{delivery_id}")])
 
+    buttons.append([InlineKeyboardButton("🔄 My Uptodate needs renewal", callback_data="uptodate_renewal_menu")])
     buttons.append([InlineKeyboardButton("💳 My payment has not been approved yet", callback_data="ticketgen:payment_not_approved")])
     buttons.append([InlineKeyboardButton("📦 My subscription has not been delivered yet", callback_data="ticketgen:not_delivered")])
     buttons.append([InlineKeyboardButton("❓ Other", callback_data="ticketgen:other")])
@@ -2530,6 +2608,74 @@ async def show_ticket_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎫 What's this about?", reply_markup=InlineKeyboardMarkup(buttons)
     )
+
+
+async def uptodate_renewal_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'My Uptodate needs renewal' — jumps straight to the customer's
+    Uptodate subscriptions only (skipping the generic subscription list
+    and the 'what's the issue' step, since we already know it's a
+    renewal). If they have more than one Uptodate subscription, they
+    pick which one; if exactly one, it's used directly."""
+    query = update.callback_query
+    await query.answer()
+
+    conn = sqlite3.connect(DB_PATH)
+    placeholders = ",".join("?" for _ in UPTODATE_TICKET_ITEMS)
+    rows = conn.execute(
+        f"SELECT id, item_id, delivered_at FROM deliveries "
+        f"WHERE user_id = ? AND item_id IN ({placeholders}) ORDER BY id DESC",
+        (query.from_user.id, *UPTODATE_TICKET_ITEMS),
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        await query.edit_message_text(
+            "We don't see an Uptodate subscription on file for you. "
+            "If you believe this is a mistake, please use 🎫 Send a Ticket → ❓ Other."
+        )
+        return
+
+    if len(rows) == 1:
+        delivery_id, item_id, _ = rows[0]
+        await _start_uptodate_renewal_ticket(context, query, delivery_id, item_id)
+        return
+
+    buttons = []
+    for delivery_id, item_id, delivered_at in rows:
+        name = MENU.get(item_id, (item_id,))[0]
+        label = name + (f" ({delivered_at[:10]})" if delivered_at else "")
+        buttons.append([InlineKeyboardButton(label[:60], callback_data=f"uptodate_renew_pick:{delivery_id}")])
+
+    await query.edit_message_text(
+        "🔄 Which Uptodate subscription needs renewal?",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def uptodate_renewal_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer picked one of several Uptodate subscriptions to renew."""
+    query = update.callback_query
+    await query.answer()
+    delivery_id = int(query.data.split(":", 1)[1])
+
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT item_id FROM deliveries WHERE id = ?", (delivery_id,)).fetchone()
+    conn.close()
+    item_id = row[0] if row else None
+
+    await _start_uptodate_renewal_ticket(context, query, delivery_id, item_id)
+
+
+async def _start_uptodate_renewal_ticket(context, query, delivery_id: int, item_id: str):
+    """Shared by both the single-subscription and multi-choice paths:
+    creates the renewal ticket and starts message collection."""
+    label = MENU.get(item_id, (item_id or "Uptodate",))[0]
+    ticket_id = db_create_ticket(
+        query.from_user.id, query.from_user.username, "uptodate_renewal",
+        subscription_item_id=item_id, subscription_label=label,
+    )
+    await query.edit_message_text(f"🎫 My Account needs Renewal — {label}")
+    await start_ticket_message_collection(context, query.from_user.id, ticket_id, query.message.chat_id)
 
 
 async def ticket_generic_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3458,10 +3604,9 @@ async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if context.user_data.get("selected_country") == "India":
             await query.edit_message_text(
-                "Please send the full receipt showing clearly the amount paid and "
-                "transaction ID or UTR.\n\n"
-                "*Receipts that are missing the paid amount or the transaction ID "
-                "won't be approved.*",
+                "📸 *Send a screenshot of the receipt containing the UTR or "
+                "transaction ID.*\n\n"
+                "⚠️ *Receipts that don't show the transaction ID will be rejected.*",
                 parse_mode=ParseMode.MARKDOWN,
             )
         else:
@@ -3797,14 +3942,21 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await post_receipt_to_payments_channel(context, order_id)
 
     elif action == "admin_reject":
-        db_update_status(order_id, "rejected")
-        await query.edit_message_caption(caption=f"❌ Order #{order_id} rejected.")
+        # Don't reject immediately — ask whether to include a reason first,
+        # since a bare "rejected" with no explanation is a dead end for the
+        # customer. Reuses the existing comment/reply-thread machinery so
+        # the customer can reply to this and the admin can reply back.
+        clear_admin_flow_state(context.user_data)
+        context.user_data["awaiting_reject_comment_for_order"] = order_id
+        try:
+            await query.edit_message_caption(caption=f"⏳ Rejecting order #{order_id} — waiting for reason...")
+        except Exception:
+            pass
         await context.bot.send_message(
-            chat_id=user_id,
+            chat_id=ADMIN_CHAT_ID,
             text=(
-                f"We couldn't verify the receipt for order #{order_id}. "
-                "Please double check and send a clearer screenshot, "
-                "or contact us directly."
+                f"❌ Rejecting order #{order_id}.\n\n"
+                "Type a reason to send the customer, or send /skip for a generic message:"
             ),
         )
 
@@ -3990,6 +4142,49 @@ async def admin_sales_report(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text("\n".join(lines), reply_markup=back)
 
 
+async def reject_comment_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Finalizes an order rejection with the admin's typed reason (or the
+    generic default if they sent /skip). Includes a Reply button on the
+    customer's side, using the same reply-thread system as Send Comment,
+    so they can respond and the admin can reply back."""
+    order_id = context.user_data.pop("awaiting_reject_comment_for_order", None)
+    if not order_id:
+        return
+
+    order = db_get_order(order_id)
+    if not order:
+        await update.message.reply_text("Order not found.")
+        return
+    user_id = order[1]
+
+    db_update_status(order_id, "rejected")
+
+    body = update.message.text.strip()
+    if body == "/skip":
+        customer_text = (
+            f"❌ We couldn't verify the receipt for order #{order_id}. "
+            "Please double check and send a clearer screenshot, or contact us directly."
+        )
+    else:
+        customer_text = f"❌ Order #{order_id} rejected:\n\n{body}"
+        db_add_message(order_id, user_id, "to_customer", body, delivered=True)
+
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=customer_text,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ Reply", callback_data=f"cust_reply:{order_id}")]]
+            ),
+        )
+        await update.message.reply_text(f"✅ Order #{order_id} rejected — customer notified.")
+    except Exception:
+        logger.exception("Failed to notify customer of rejection for order #%s", order_id)
+        await update.message.reply_text(
+            f"⚠️ Order #{order_id} marked rejected, but couldn't reach the customer live."
+        )
+
+
 async def admin_comment_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin tapped 'Send Comment' on a receipt — wait for the message text
     and pass it on to the customer. Leaves the order's status untouched so
@@ -4035,7 +4230,8 @@ async def admin_comment_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 def all_toggleable_items() -> list:
     """Every product that can be individually marked out of stock: the
     catalog leaves (Uptodate/Amboss variants), the four iMD variants, and
-    the single-choice mains — in a sensible display order."""
+    the single-choice mains — in a sensible display order. Excludes
+    anything removed via 📦 Manage Stock → Remove."""
     items = []
 
     def walk(node):
@@ -4049,7 +4245,7 @@ def all_toggleable_items() -> list:
         walk(cat)
     items.extend(["imd_new_6m", "imd_new_1y", "imd_renew_6m", "imd_renew_1y"])
     items.extend(SINGLE_MAIN_ITEMS)
-    return items
+    return [i for i in items if not ITEM_OVERRIDES.get(i, (None, None, None, False))[3]]
 
 
 def stock_keyboard() -> InlineKeyboardMarkup:
@@ -4058,23 +4254,62 @@ def stock_keyboard() -> InlineKeyboardMarkup:
     for item_id in all_toggleable_items():
         name = MENU.get(item_id, (item_id,))[0]
         flag = "🚫" if item_id in out_of_stock else "✅"
-        buttons.append([InlineKeyboardButton(f"{flag} {name}", callback_data=f"stocktoggle:{item_id}")])
+        buttons.append([InlineKeyboardButton(f"{flag} {name}", callback_data=f"stockitem:{item_id}")])
     return InlineKeyboardMarkup(buttons)
 
 
 async def stock_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: lists every product with a one-tap available/out-of-stock
-    toggle."""
+    """Admin-only: lists every product — tap one to Edit, Remove, or
+    toggle Stock."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
     await update.message.reply_text(
-        "📦 Manage Stock — tap an item to toggle:\n✅ available · 🚫 out of stock",
+        "📦 Manage Stock — tap an item:\n✅ available · 🚫 out of stock",
+        reply_markup=stock_keyboard(),
+    )
+
+
+def _stock_item_detail_keyboard(item_id: str) -> InlineKeyboardMarkup:
+    out = db_is_out_of_stock(item_id)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Edit", callback_data=f"stockedit:{item_id}")],
+        [InlineKeyboardButton("🗑 Remove", callback_data=f"stockremove:{item_id}")],
+        [InlineKeyboardButton(
+            "🚫 Mark Out of Stock" if not out else "✅ Mark Available",
+            callback_data=f"stocktoggle:{item_id}",
+        )],
+        [InlineKeyboardButton("⬅️ Back", callback_data="stock_back")],
+    ])
+
+
+async def stock_item_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tapping a product in Manage Stock — shows Edit / Remove / Stock."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    item_id = query.data.split(":", 1)[1]
+    name, price = MENU.get(item_id, (item_id, 0))
+    await query.edit_message_text(
+        f"📦 {name}\nPrice: {CURRENCY}{price:.2f}\n\nWhat would you like to do?",
+        reply_markup=_stock_item_detail_keyboard(item_id),
+    )
+
+
+async def stock_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "📦 Manage Stock — tap an item:\n✅ available · 🚫 out of stock",
         reply_markup=stock_keyboard(),
     )
 
 
 async def stock_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Flips one item's stock status and refreshes the list in place."""
+    """Flips one item's stock status and shows the item detail view again
+    with the updated Stock button label."""
     query = update.callback_query
     if query.from_user.id != ADMIN_CHAT_ID:
         await query.answer("Not authorized.", show_alert=True)
@@ -4085,7 +4320,147 @@ async def stock_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_set_stock_status(item_id, out_of_stock=not currently_out)
 
     await query.answer("Marked out of stock" if not currently_out else "Marked available")
-    await query.edit_message_reply_markup(reply_markup=stock_keyboard())
+    name, price = MENU.get(item_id, (item_id, 0))
+    try:
+        await query.edit_message_text(
+            f"📦 {name}\nPrice: {CURRENCY}{price:.2f}\n\nWhat would you like to do?",
+            reply_markup=_stock_item_detail_keyboard(item_id),
+        )
+    except Exception:
+        # Came from the flat list view (legacy entry point) — just refresh it.
+        await query.edit_message_reply_markup(reply_markup=stock_keyboard())
+
+
+async def stock_remove_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Asks for confirmation before removing an item entirely — this is
+    destructive (hides it from the catalog and Manage Stock permanently,
+    though past orders referencing it are unaffected), so it gets a
+    confirm step rather than acting on the first tap."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    item_id = query.data.split(":", 1)[1]
+    name = MENU.get(item_id, (item_id,))[0]
+    await query.edit_message_text(
+        f"🗑 Remove *{md_escape(name)}* entirely?\n\n"
+        "This hides it from the customer catalog and Manage Stock. "
+        "Past orders that already reference it are unaffected.\n\n"
+        "⚠️ Remember: if this item also appears in the Mini App's own catalog "
+        "(index.html), it needs to be removed there too — they're two separate copies.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑 Yes, remove it", callback_data=f"stockremoveyes:{item_id}")],
+            [InlineKeyboardButton("⬅️ Cancel", callback_data=f"stockitem:{item_id}")],
+        ]),
+    )
+
+
+async def stock_remove_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    item_id = query.data.split(":", 1)[1]
+    name = MENU.get(item_id, (item_id,))[0]
+    db_set_item_removed(item_id, True)
+    ITEM_OVERRIDES[item_id] = (
+        ITEM_OVERRIDES.get(item_id, (None, None, None, False))[:3] + (True,)
+    )
+    await query.edit_message_text(
+        f"🗑 {name} removed from the catalog and Manage Stock.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Manage Stock", callback_data="stock_back")]]),
+    )
+
+
+async def stock_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Starts the 3-step Edit flow: title -> duration label -> price.
+    Any step can be skipped with /skip to leave that field unchanged."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    item_id = query.data.split(":", 1)[1]
+    clear_admin_flow_state(context.user_data)
+    context.user_data["stock_edit_item_id"] = item_id
+    context.user_data["awaiting_stock_edit_field"] = "name"
+    name, price = MENU.get(item_id, (item_id, 0))
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=(
+            f"✏️ Editing *{md_escape(name)}*\n\n"
+            f"Current title: {name}\nSend a new title, or /skip to keep it:"
+        ),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def stock_edit_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Walks title -> duration label -> price, one message at a time."""
+    field = context.user_data.get("awaiting_stock_edit_field")
+    item_id = context.user_data.get("stock_edit_item_id")
+    if not field or not item_id:
+        return
+
+    text = update.message.text.strip()
+    skip = text == "/skip"
+
+    if field == "name":
+        if not skip:
+            context.user_data["stock_edit_name"] = text
+        context.user_data["awaiting_stock_edit_field"] = "duration"
+        await update.message.reply_text(
+            "Send a new duration label (e.g. '1 Year', '6 Months'), or /skip to leave it as-is:"
+        )
+        return
+
+    if field == "duration":
+        if not skip:
+            context.user_data["stock_edit_duration"] = text
+        context.user_data["awaiting_stock_edit_field"] = "price"
+        _, current_price = MENU.get(item_id, (item_id, 0))
+        await update.message.reply_text(
+            f"Current price: {CURRENCY}{current_price:.2f}\nSend a new price (number only), or /skip to keep it:"
+        )
+        return
+
+    if field == "price":
+        new_price = None
+        if not skip:
+            try:
+                new_price = float(text)
+            except ValueError:
+                await update.message.reply_text("That doesn't look like a number. Send the price again, or /skip:")
+                return
+
+        new_name = context.user_data.pop("stock_edit_name", None)
+        new_duration = context.user_data.pop("stock_edit_duration", None)
+        context.user_data.pop("awaiting_stock_edit_field", None)
+        context.user_data.pop("stock_edit_item_id", None)
+
+        db_set_item_override(item_id, name=new_name, price=new_price, duration_label=new_duration)
+        old_name, old_price = MENU.get(item_id, (item_id, 0))
+        MENU[item_id] = (new_name if new_name else old_name, new_price if new_price is not None else old_price)
+        prev = ITEM_OVERRIDES.get(item_id, (None, None, None, False))
+        ITEM_OVERRIDES[item_id] = (
+            new_name if new_name else prev[0],
+            new_price if new_price is not None else prev[1],
+            new_duration if new_duration else prev[2],
+            prev[3],
+        )
+
+        await update.message.reply_text(
+            f"✅ Updated: {MENU[item_id][0]} — {CURRENCY}{MENU[item_id][1]:.2f}\n\n"
+            "⚠️ Remember: if this item also appears in the Mini App's own catalog "
+            "(index.html), update it there too — they're two separate copies.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Manage Stock", callback_data="stock_back")]]),
+        )
 
 
 async def new_subscription_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5459,12 +5834,16 @@ async def ticket_resolution_reply(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Every undelivered item across all customers, one button each."""
+    """Every undelivered item across all customers, one button each —
+    plus a separate 'Payment Pending' section for orders whose receipt
+    was rejected, so they stay visible instead of disappearing."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
     rows = db_all_pending_items()
-    if not rows:
+    rejected = db_rejected_orders()
+
+    if not rows and not rejected:
         await update.message.reply_text("No pending orders — everything is delivered.")
         return
 
@@ -5477,10 +5856,53 @@ async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
         label = f"{flag} {name}{suffix} — {who} (#{order_id})"
         buttons.append([InlineKeyboardButton(label[:60], callback_data=f"apend:{fid}")])
 
-    await update.message.reply_text(
-        "Pending orders:\n📝 = details ready to deliver   ⌛ = waiting on customer",
-        reply_markup=InlineKeyboardMarkup(buttons),
+    text = "Pending orders:\n📝 = details ready to deliver   ⌛ = waiting on customer"
+
+    if rejected:
+        text += "\n\n💳 Payment Pending (receipt rejected):"
+        for order_id, user_id, username, total, created_at in rejected:
+            who = f"@{username}" if username else str(user_id)
+            label = f"💳 {CURRENCY}{total:.2f} — {who} (#{order_id})"
+            buttons.append([InlineKeyboardButton(label[:60], callback_data=f"apend_rejected:{order_id}")])
+
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def admin_pending_rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Detail view for a 'Payment Pending' (rejected-receipt) order —
+    lets the admin confirm it after all if the customer resubmitted, or
+    message them directly."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    order_id = int(query.data.split(":", 1)[1])
+    order = db_get_order(order_id)
+    if not order:
+        await query.edit_message_text("Order not found.")
+        return
+
+    oid, user_id, username, items_json, total, status, created_at = order
+    items = json.loads(items_json)
+    item_names = ", ".join(MENU[i][0] for i in items if i in MENU)
+    who = f"@{username}" if username else str(user_id)
+
+    text = (
+        f"💳 Payment Pending — Order #{oid}\n"
+        f"Customer: {who}\n"
+        f"Items: {item_names}\n"
+        f"Total: {CURRENCY}{total:.2f}\n"
+        f"Status: {status}\n"
+        f"Created: {created_at[:19]}\n"
     )
+    buttons = [
+        [InlineKeyboardButton("✅ Confirm Payment", callback_data=f"admin_confirm:{order_id}")],
+        [InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{order_id}")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="apend_back")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 def _inbox_summary_keyboard() -> InlineKeyboardMarkup:
@@ -5861,7 +6283,8 @@ async def admin_pending_back(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     rows = db_all_pending_items()
-    if not rows:
+    rejected = db_rejected_orders()
+    if not rows and not rejected:
         await query.edit_message_text("No pending orders — everything is delivered.")
         return
 
@@ -5875,8 +6298,16 @@ async def admin_pending_back(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton(f"{flag} {name}{suffix} — {who} (#{order_id})"[:60], callback_data=f"apend:{fid}")]
         )
 
+    text = "Pending orders:\n📝 = details ready to deliver   ⌛ = waiting on customer"
+    if rejected:
+        text += "\n\n💳 Payment Pending (receipt rejected):"
+        for order_id, user_id, username, total, created_at in rejected:
+            who = f"@{username}" if username else str(user_id)
+            label = f"💳 {CURRENCY}{total:.2f} — {who} (#{order_id})"
+            buttons.append([InlineKeyboardButton(label[:60], callback_data=f"apend_rejected:{order_id}")])
+
     await query.edit_message_text(
-        "Pending orders:\n📝 = details ready to deliver   ⌛ = waiting on customer",
+        text,
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
@@ -6023,11 +6454,17 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get("awaiting_admin_message_for_order"):
             await admin_message_reply(update, context)
             return
+        if context.user_data.get("awaiting_reject_comment_for_order"):
+            await reject_comment_reply(update, context)
+            return
         if context.user_data.get("awaiting_comment_for_order"):
             await admin_comment_reply(update, context)
             return
         if context.user_data.get("awaiting_book_price_for"):
             await book_price_reply(update, context)
+            return
+        if context.user_data.get("awaiting_stock_edit_field"):
+            await stock_edit_field_reply(update, context)
             return
         if context.user_data.get("awaiting_imd_catalog_username"):
             await imd_catalog_username_reply(update, context)
@@ -7219,8 +7656,21 @@ async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts.append("(none)")
 
     text = "\n".join(parts)
+    conn = sqlite3.connect(DB_PATH)
+    latest_order = conn.execute(
+        "SELECT id FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,)
+    ).fetchone()
+    conn.close()
+    buttons = None
+    if latest_order:
+        buttons = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{latest_order[0]}")]]
+        )
     for i in range(0, len(text), 3500):
-        await update.message.reply_text(text[i:i + 3500])
+        chunk_end = i + 3500 >= len(text)
+        await update.message.reply_text(
+            text[i:i + 3500], reply_markup=buttons if chunk_end else None
+        )
 
 
 async def customer_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7298,7 +7748,12 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text += "\nNo credentials delivered yet."
 
-    await update.message.reply_text(text)
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{oid}")]]
+        ),
+    )
 
 
 # ------------------------------------------------------------------
@@ -7677,6 +8132,16 @@ def main():
     for item_id, name, price in db_load_book_menu_items():
         MENU[item_id] = (name, price)
 
+    # Apply any admin edits from 📦 Manage Stock → Edit — layered on top
+    # of the built-in catalog and custom items above, so edited titles/
+    # prices survive restarts without touching the hardcoded CATALOG tree.
+    ITEM_OVERRIDES.update(db_load_item_overrides())
+    for item_id, (ov_name, ov_price, ov_duration, ov_removed) in ITEM_OVERRIDES.items():
+        if item_id in MENU and (ov_name is not None or ov_price is not None):
+            base_name, base_price = MENU[item_id]
+            MENU[item_id] = (ov_name if ov_name is not None else base_name,
+                              ov_price if ov_price is not None else base_price)
+
     async def post_init(application):
         """Resets the bottom-left menu button so customers use the
         🏪 Shop keyboard button (the only one that supports sendData)."""
@@ -7762,10 +8227,17 @@ def main():
     app.add_handler(InlineQueryHandler(imd_inline_query))
     app.add_handler(CallbackQueryHandler(catalog_navigate, pattern=r"^cat:"))
     app.add_handler(CallbackQueryHandler(stock_toggle, pattern=r"^stocktoggle:"))
+    app.add_handler(CallbackQueryHandler(stock_item_detail, pattern=r"^stockitem:"))
+    app.add_handler(CallbackQueryHandler(stock_edit_start, pattern=r"^stockedit:"))
+    app.add_handler(CallbackQueryHandler(stock_remove_confirm, pattern=r"^stockremove:"))
+    app.add_handler(CallbackQueryHandler(stock_remove_do, pattern=r"^stockremoveyes:"))
+    app.add_handler(CallbackQueryHandler(stock_back, pattern=r"^stock_back$"))
     app.add_handler(CallbackQueryHandler(getfree_proceed, pattern=r"^getfree_proceed$"))
     app.add_handler(CallbackQueryHandler(goto_my_credits, pattern=r"^goto_my_credits$"))
     app.add_handler(CallbackQueryHandler(ticket_generic_start, pattern=r"^ticketgen:"))
     app.add_handler(CallbackQueryHandler(ticket_subscription_selected, pattern=r"^ticketsub:"))
+    app.add_handler(CallbackQueryHandler(uptodate_renewal_menu, pattern=r"^uptodate_renewal_menu$"))
+    app.add_handler(CallbackQueryHandler(uptodate_renewal_pick, pattern=r"^uptodate_renew_pick:"))
     app.add_handler(CallbackQueryHandler(ticket_uptodate_choice, pattern=r"^ticketup:"))
     app.add_handler(CallbackQueryHandler(ticket_other_choice, pattern=r"^ticketother:"))
     app.add_handler(CallbackQueryHandler(ticket_imd_choice, pattern=r"^ticketimd:"))
@@ -7797,6 +8269,7 @@ def main():
     app.add_handler(CallbackQueryHandler(subs_pending, pattern=r"^subs_pending$"))
     app.add_handler(CallbackQueryHandler(pending_detail, pattern=r"^pend:"))
     app.add_handler(CallbackQueryHandler(admin_pending_detail, pattern=r"^apend:"))
+    app.add_handler(CallbackQueryHandler(admin_pending_rejected_detail, pattern=r"^apend_rejected:"))
     app.add_handler(CallbackQueryHandler(pending_delete_confirm, pattern=r"^pdel:"))
     app.add_handler(CallbackQueryHandler(pending_delete_execute, pattern=r"^pdel_yes:"))
     app.add_handler(CallbackQueryHandler(admin_msg_start, pattern=r"^admin_msg:"))
