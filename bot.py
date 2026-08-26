@@ -43,6 +43,8 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InlineQueryResultArticle,
+    InputMediaDocument,
+    InputMediaPhoto,
     InputTextMessageContent,
     KeyboardButton,
     LabeledPrice,
@@ -437,6 +439,15 @@ CURRENCY_RATES = {
     "KSA": ("SAR", 3.8),
     "Russia": ("RUB", 85.5),
 }
+
+
+def expected_local_amount(total_usd: float, payment_method: str):
+    """The order total converted into whatever currency the receipt will
+    actually be denominated in — this MUST be what AI/amount-matching
+    compares against, never the raw USD total, or a perfectly correct
+    receipt in local currency gets rejected as a false mismatch."""
+    code, rate = CURRENCY_RATES.get(payment_method, ("USD", 1))
+    return round(total_usd * rate, 2), code
 
 
 def convert_for_country(total_usd: float, country: str) -> str:
@@ -1722,9 +1733,13 @@ def db_set_receipt_photo(order_id: int, photo_file_id: str):
     conn.close()
 
 
-def db_set_receipt_reference(order_id: int, reference: str):
+def db_set_receipt_references(order_id: int, references: list):
+    """Stores every unique reference found across this order's receipt(s)
+    as a JSON list — an order can have more than one now (split
+    payments)."""
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE orders SET receipt_reference = ? WHERE id = ?", (reference, order_id))
+    conn.execute("UPDATE orders SET receipt_reference = ? WHERE id = ?",
+                 (json.dumps(references), order_id))
     conn.commit()
     conn.close()
 
@@ -1739,13 +1754,22 @@ def db_reference_already_used(reference: str, exclude_order_id: int) -> bool:
     if not reference:
         return False
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute(
-        "SELECT id FROM orders WHERE receipt_reference = ? AND id != ? "
-        "AND status IN ('paid', 'awaiting_confirmation') LIMIT 1",
-        (reference, exclude_order_id),
-    ).fetchone()
+    rows = conn.execute(
+        "SELECT receipt_reference FROM orders WHERE id != ? "
+        "AND status IN ('paid', 'awaiting_confirmation') AND receipt_reference IS NOT NULL",
+        (exclude_order_id,),
+    ).fetchall()
     conn.close()
-    return row is not None
+    for (stored,) in rows:
+        try:
+            refs = json.loads(stored)
+            if not isinstance(refs, list):
+                refs = [stored]
+        except (json.JSONDecodeError, TypeError):
+            refs = [stored]  # backward compat with old single-string values
+        if reference in refs:
+            return True
+    return False
 
 
 def db_get_payment_record(order_id: int):
@@ -2916,7 +2940,8 @@ COLLECTION_STATE_KEYS = [
     "registration_fulfilment_id", "registration_retry_field",
     "awaiting_generic_field", "generic_data", "generic_order_id",
     "generic_item_id", "generic_fulfilment_id", "generic_account_type",
-    "awaiting_payer_name_for_order", "pending_receipt_photo", "awaiting_receipt_for_order",
+    "awaiting_payer_name_for_order", "pending_receipt_items", "awaiting_receipt_for_order",
+    "collecting_receipts_for_order",
     "awaiting_book_link",
 ]
 
@@ -3698,39 +3723,94 @@ async def photo_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles a photo sent by the customer after tapping 'I've Paid'. Asks
-    for the payer's full name next, rather than notifying the admin
-    immediately — that name goes into the admin's review message."""
+    """Handles a photo sent by the customer after tapping 'I've Paid'.
+    Accumulates it (a customer may need multiple receipts to cover one
+    order — e.g. split payments) and asks if there's more, rather than
+    immediately moving on after just one."""
+    photo_file_id = update.message.photo[-1].file_id
+    await _accumulate_receipt_item(update, context, "photo", photo_file_id)
+
+
+async def receipt_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Same as receipt_photo, but for a receipt sent as a PDF document
+    instead of a photo. Claude can read PDFs directly, no conversion
+    needed."""
+    doc = update.message.document
+    if not doc or doc.mime_type != "application/pdf":
+        return
+    await _accumulate_receipt_item(update, context, "pdf", doc.file_id)
+
+
+async def _accumulate_receipt_item(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                    item_type: str, file_id: str):
     # Use the queue — always process the oldest pending receipt order
     pending_orders = context.user_data.get("pending_receipt_orders", [])
     order_id = pending_orders[0] if pending_orders else context.user_data.get("awaiting_receipt_for_order")
 
+    # Already mid-collection for this order (this is at least the 2nd item)?
+    collecting_id = context.user_data.get("collecting_receipts_for_order")
+    if collecting_id:
+        order_id = collecting_id
+
     if not order_id:
-        # Not expecting a receipt right now — ignore stray photos.
+        # Not expecting a receipt right now — ignore stray uploads.
         return
 
     order = db_get_order(order_id)
     if not order:
         await update.message.reply_text("Order not found — please start over with /start.")
-        # Remove from queue
         pending_orders = context.user_data.get("pending_receipt_orders", [])
         if order_id in pending_orders:
             pending_orders.remove(order_id)
         context.user_data["awaiting_receipt_for_order"] = pending_orders[0] if pending_orders else None
+        context.user_data.pop("collecting_receipts_for_order", None)
         return
 
-    # Remove processed order from queue; advance to next if any
-    pending_orders = context.user_data.get("pending_receipt_orders", [])
-    if order_id in pending_orders:
-        pending_orders.remove(order_id)
-    context.user_data["awaiting_receipt_for_order"] = pending_orders[0] if pending_orders else None
-    context.user_data["awaiting_payer_name_for_order"] = order_id
-    photo_file_id = update.message.photo[-1].file_id
-    context.user_data["pending_receipt_photo"] = photo_file_id
-    db_set_receipt_photo(order_id, photo_file_id)
+    if not collecting_id:
+        # First item for this order — remove it from the "awaiting a
+        # receipt" queue now, but stay in a collecting state until the
+        # customer taps Done, so further uploads keep accumulating
+        # instead of each one restarting the flow.
+        pending_orders = context.user_data.get("pending_receipt_orders", [])
+        if order_id in pending_orders:
+            pending_orders.remove(order_id)
+        context.user_data["awaiting_receipt_for_order"] = pending_orders[0] if pending_orders else None
+        context.user_data["collecting_receipts_for_order"] = order_id
+        context.user_data["pending_receipt_items"] = []
+
+    context.user_data["pending_receipt_items"].append({"type": item_type, "file_id": file_id})
+    count = len(context.user_data["pending_receipt_items"])
 
     await update.message.reply_text(
-        "Please send the Full Name of the person who did the payment, as mentioned on the receipt:"
+        f"📎 Receipt {count} added.\n\n"
+        "Send another if you paid in multiple parts, or tap Done when finished:",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(f"✅ Done ({count} receipt{'s' if count != 1 else ''})",
+                                   callback_data=f"receipts_done:{order_id}")]]
+        ),
+    )
+
+
+async def receipts_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer tapped Done — moves on to asking for the payer's name,
+    same as the old single-photo flow did immediately after one upload."""
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+
+    if context.user_data.get("collecting_receipts_for_order") != order_id:
+        # Stale button (already finished via another tap, or session reset)
+        return
+    context.user_data.pop("collecting_receipts_for_order", None)
+    context.user_data["awaiting_payer_name_for_order"] = order_id
+
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text="Please send the Full Name of the person who did the payment, as mentioned on the receipt:",
     )
 
 
@@ -3749,14 +3829,14 @@ def _extract_numeric_amount(text: str):
 
 
 async def payer_name_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catches the payer's name after the receipt photo, then either
+    """Catches the payer's name after the receipt(s), then either
     auto-confirms via the AI + hard-gate checks, or falls back to the
     normal manual admin review — always with full visibility either way."""
     order_id = context.user_data.pop("awaiting_payer_name_for_order", None)
     if not order_id:
         return
 
-    photo_file_id = context.user_data.pop("pending_receipt_photo", None)
+    items = context.user_data.pop("pending_receipt_items", None) or []
     payer_name = update.message.text.strip()
 
     order = db_get_order(order_id)
@@ -3768,12 +3848,18 @@ async def payer_name_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_update_status(order_id, "awaiting_confirmation")
     db_set_payer_name(order_id, payer_name)
 
+    # Keep one representative photo for the Payments channel post (which
+    # only supports a single image) — the first photo item, if any.
+    first_photo = next((i["file_id"] for i in items if i["type"] == "photo"), None)
+    if first_photo:
+        db_set_receipt_photo(order_id, first_photo)
+
     await update.message.reply_text(
         f"Thanks! Receipt received for order #{order_id}. "
         "We're verifying it and will confirm shortly."
     )
 
-    if not photo_file_id:
+    if not items:
         return
 
     conn = sqlite3.connect(DB_PATH)
@@ -3781,115 +3867,137 @@ async def payer_name_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     payment_method = pm_row[0] if pm_row else None
 
-    verdict = await analyze_receipt_with_ai(context, photo_file_id, total, payment_method)
+    expected_amount, currency_code = expected_local_amount(total, payment_method)
+    verdict = await analyze_receipt_with_ai(context, items, expected_amount, currency_code, payment_method)
 
     auto_confirmed = False
     if verdict and verdict.get("verdict") == "looks_valid":
-        extracted_amount = _extract_numeric_amount(verdict.get("extracted_amount"))
-        reference = (verdict.get("extracted_reference") or "").strip()
+        extracted_amount = _extract_numeric_amount(verdict.get("total_amount"))
+        references = [r.strip() for r in (verdict.get("references") or []) if r and r.strip()]
 
-        amount_ok = extracted_amount is not None and abs(extracted_amount - total) < 0.01
-        # Reference/UTR/transaction ID required for auto-confirm on every
-        # payment method now, not just India — same fraud logic applies
-        # everywhere: no traceable reference means no reliable way to
-        # detect a reused receipt.
-        reference_ok = bool(reference)
-        duplicate = db_reference_already_used(reference, order_id) if reference else False
+        # A small tolerance (3%, floor 0.5) absorbs real-world FX-rate
+        # drift between our conversion rate and whatever rate the
+        # customer's bank/app actually used — an exact-match requirement
+        # would reject genuinely correct receipts constantly.
+        tolerance = max(0.5, expected_amount * 0.03)
+        amount_ok = extracted_amount is not None and abs(extracted_amount - expected_amount) <= tolerance
 
-        if reference:
-            db_set_receipt_reference(order_id, reference)
+        # Every item needs its own distinct reference — required on every
+        # payment method now, not just India, since no traceable
+        # reference means no reliable way to detect a reused receipt.
+        reference_ok = len(references) >= len(items) or (len(items) == 1 and len(references) >= 1)
+        duplicate_ref = next((r for r in references if db_reference_already_used(r, order_id)), None)
 
-        if amount_ok and reference_ok and not duplicate:
+        if references:
+            db_set_receipt_references(order_id, references)
+
+        if amount_ok and reference_ok and not duplicate_ref:
             auto_confirmed = True
             await finalize_order_confirmation(context, order_id, user_id, items_json)
-            if ADMIN_CHAT_ID:
-                try:
-                    await context.bot.send_photo(
-                        chat_id=ADMIN_CHAT_ID,
-                        photo=photo_file_id,
-                        caption=(
-                            f"🤖✅ Auto-confirmed — Order #{order_id}\n"
-                            f"From: {username or 'unknown'} (ID: {user_id})\n"
-                            f"Payer name on receipt: {payer_name}\n"
-                            f"Payment method: {payment_method}\n"
-                            f"Total: {CURRENCY}{total:.2f}\n\n"
-                            f"{_ai_verdict_label(verdict)}\n\n"
-                            "Delivered automatically. Review the receipt above — "
-                            "tap below only if something looks wrong."
-                        ),
-                        reply_markup=InlineKeyboardMarkup(
-                            [[InlineKeyboardButton("🚩 Flag as fraudulent / reverse", callback_data=f"admin_reject:{order_id}")]]
-                        ),
-                    )
-                except Exception:
-                    logger.exception("Failed to send auto-confirm audit notice for order #%s", order_id)
-        elif duplicate:
+            try:
+                await send_receipt_items_to_admin(
+                    context, items,
+                    caption=(
+                        f"🤖✅ Auto-confirmed — Order #{order_id}\n"
+                        f"From: {username or 'unknown'} (ID: {user_id})\n"
+                        f"Payer name on receipt: {payer_name}\n"
+                        f"Payment method: {payment_method}\n"
+                        f"Total: {CURRENCY}{total:.2f} ({expected_amount:.2f} {currency_code})\n"
+                        f"{len(items)} receipt{'s' if len(items) != 1 else ''} submitted\n\n"
+                        f"{_ai_verdict_label(verdict)}\n\n"
+                        "Delivered automatically. Review the receipt(s) above — "
+                        "tap below only if something looks wrong."
+                    ),
+                    keyboard=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("🚩 Flag as fraudulent / reverse", callback_data=f"admin_reject:{order_id}")]]
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to send auto-confirm audit notice for order #%s", order_id)
+        elif duplicate_ref:
             verdict["reason"] = (
-                f"⚠️ This UTR/reference has already been used on another order — "
+                f"⚠️ Reference '{duplicate_ref}' has already been used on another order — "
                 f"possible reused receipt. {verdict.get('reason', '')}"
             ).strip()
             verdict["verdict"] = "looks_off"
 
     if not auto_confirmed:
-        await notify_admin_receipt(context, order, photo_file_id, payer_name=payer_name, ai_verdict=verdict)
+        await notify_admin_receipt(context, order, items, payer_name=payer_name, ai_verdict=verdict)
 
 
-async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, photo_file_id: str,
-                                   expected_total: float, payment_method: str) -> dict | None:
-    """Pre-screens a receipt image with Claude's vision — reads the amount,
-    date, and (for India) UTR/transaction ID, and compares against what
-    this order actually needs. Returns None (and the admin sees no AI
-    label at all) if ANTHROPIC_API_KEY isn't set or the call fails for any
-    reason — this must never block the normal manual review flow, only
-    ever add a label on top of it. The admin always makes the final call;
-    this never confirms or rejects anything on its own."""
-    if not ANTHROPIC_API_KEY:
+async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: list,
+                                   expected_amount: float, currency_code: str,
+                                   payment_method: str) -> dict | None:
+    """Pre-screens one or more receipt images/PDFs with Claude's vision —
+    reads the amount(s) and transaction reference(s), and — if there's
+    more than one item (e.g. a split payment) — sums them and checks
+    whether the total adds up. expected_amount/currency_code MUST already
+    be in the receipt's actual local currency (see expected_local_amount)
+    — comparing against the raw USD total causes false rejections for
+    any country with currency conversion. Returns None (admin sees no AI
+    label) if ANTHROPIC_API_KEY isn't set or the call fails for any
+    reason — this must never block the manual review flow, only ever add
+    a label on top of it. The admin always makes the final call; this
+    never confirms or rejects anything on its own."""
+    if not ANTHROPIC_API_KEY or not items:
         return None
 
     try:
         import base64
         import anthropic
 
-        tg_file = await context.bot.get_file(photo_file_id)
-        image_bytes = await tg_file.download_as_bytearray()
-        image_b64 = base64.b64encode(bytes(image_bytes)).decode("utf-8")
+        content = []
+        for item in items:
+            tg_file = await context.bot.get_file(item["file_id"])
+            file_bytes = await tg_file.download_as_bytearray()
+            b64 = base64.b64encode(bytes(file_bytes)).decode("utf-8")
+            if item["type"] == "pdf":
+                content.append({"type": "document",
+                                 "source": {"type": "base64", "media_type": "application/pdf", "data": b64}})
+            else:
+                content.append({"type": "image",
+                                 "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
 
         india_note = (
             " This is an India/UPI payment specifically — the UTR is usually labeled "
             "\"UTR\" or \"UTR No.\" on the receipt."
             if payment_method == "India" else ""
         )
+        multi_note = (
+            f" There are {len(items)} separate receipt images/documents attached — this may be "
+            f"a single payment split across multiple transfers. SUM the amounts across all of "
+            f"them and compare that sum to the required total, rather than expecting any single "
+            f"one to match on its own. List every unique transaction reference you find across "
+            f"all of them."
+            if len(items) > 1 else ""
+        )
 
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        content.append({"type": "text", "text": (
+            f"This is {'a payment receipt' if len(items) == 1 else 'a set of payment receipts'} "
+            f"screenshot(s)/document(s). The order requires a payment totaling exactly "
+            f"{expected_amount:.2f} {currency_code}.{multi_note}{india_note} Every receipt MUST "
+            f"show some kind of unique transaction reference — a UTR, transaction ID, reference "
+            f"number, or confirmation code. If a receipt has no such reference visible anywhere, "
+            f"that alone makes it invalid, regardless of the amount.\n\n"
+            "Look at the image(s)/document(s) and respond with ONLY a JSON object, no other text:\n"
+            '{"verdict": "looks_valid" | "looks_off" | "unclear", '
+            '"total_amount": "<sum of all amounts as shown, or null>", '
+            '"references": ["<each unique transaction reference found>"], '
+            '"reason": "<one short sentence explaining the verdict>"}\n\n'
+            "Use \"looks_off\" if the total amount clearly doesn't match, any image doesn't look "
+            "like a real payment receipt, the same receipt appears to be submitted more than once "
+            "to inflate the total, or there's no transaction reference visible on one or more of them. "
+            "Use \"unclear\" if an image is blurry/cropped/ambiguous rather than confidently wrong. "
+            "Use \"looks_valid\" only if the total amount matches, every receipt shows a distinct "
+            "transaction reference, and everything looks legitimate."
+        )})
+
         response = await asyncio.to_thread(
             client.messages.create,
             model="claude-sonnet-4-6",
-            max_tokens=400,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
-                    {"type": "text", "text": (
-                        f"This is a payment receipt screenshot. The order requires a payment of "
-                        f"exactly {expected_total:.2f} (any currency shown should be treated as "
-                        f"equivalent — just check the numeric amount matches, since local currency "
-                        f"conversions are expected). The receipt MUST show some kind of unique "
-                        f"transaction reference — a UTR, transaction ID, reference number, or "
-                        f"confirmation code. If there is no such reference visible anywhere on the "
-                        f"receipt, that alone makes it invalid, regardless of the amount.{india_note}\n\n"
-                        "Look at the image and respond with ONLY a JSON object, no other text:\n"
-                        '{"verdict": "looks_valid" | "looks_off" | "unclear", '
-                        '"extracted_amount": "<amount as shown, or null>", '
-                        '"extracted_reference": "<UTR/transaction ID/reference number/confirmation code as shown, or null>", '
-                        '"reason": "<one short sentence explaining the verdict>"}\n\n'
-                        "Use \"looks_off\" if the amount clearly doesn't match, the image doesn't look "
-                        "like a real payment receipt, or there's no transaction reference visible. "
-                        "Use \"unclear\" if the image is blurry/cropped/ambiguous rather than confidently wrong. "
-                        "Use \"looks_valid\" only if the amount matches, a transaction reference is visible, "
-                        "and everything looks legitimate."
-                    )},
-                ],
-            }],
+            max_tokens=500,
+            messages=[{"role": "user", "content": content}],
         )
         raw = response.content[0].text.strip()
         raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
@@ -3902,22 +4010,54 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, photo_file
 def _ai_verdict_label(verdict: dict) -> str:
     icon = {"looks_valid": "✅", "looks_off": "⚠️", "unclear": "❓"}.get(verdict.get("verdict"), "❓")
     lines = [f"🤖 AI Check: {icon} {verdict.get('verdict', 'unclear').replace('_', ' ').title()}"]
-    if verdict.get("extracted_amount"):
-        lines.append(f"   Amount seen: {verdict['extracted_amount']}")
-    if verdict.get("extracted_reference"):
-        lines.append(f"   Reference/UTR: {verdict['extracted_reference']}")
+    if verdict.get("total_amount"):
+        lines.append(f"   Amount seen: {verdict['total_amount']}")
+    refs = verdict.get("references") or []
+    if refs:
+        lines.append(f"   Reference(s): {', '.join(refs)}")
     if verdict.get("reason"):
         lines.append(f"   {verdict['reason']}")
     return "\n".join(lines)
 
 
+async def send_receipt_items_to_admin(context: ContextTypes.DEFAULT_TYPE, items: list,
+                                       caption: str, keyboard=None):
+    """Sends one or more receipt photos/PDFs to the admin. A single item
+    keeps the caption+buttons directly on it (unchanged from before).
+    Multiple items go out as a media group first (Telegram doesn't support
+    captions or inline buttons on media groups), followed by a plain
+    message carrying the caption and buttons."""
+    if not ADMIN_CHAT_ID:
+        logger.warning("ADMIN_CHAT_ID not set — no admin notified.")
+        return
+
+    if len(items) == 1:
+        item = items[0]
+        if item["type"] == "pdf":
+            await context.bot.send_document(chat_id=ADMIN_CHAT_ID, document=item["file_id"],
+                                            caption=caption, reply_markup=keyboard)
+        else:
+            await context.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=item["file_id"],
+                                         caption=caption, reply_markup=keyboard)
+        return
+
+    media = []
+    for item in items:
+        if item["type"] == "pdf":
+            media.append(InputMediaDocument(media=item["file_id"]))
+        else:
+            media.append(InputMediaPhoto(media=item["file_id"]))
+    await context.bot.send_media_group(chat_id=ADMIN_CHAT_ID, media=media)
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=caption, reply_markup=keyboard)
+
+
 async def notify_admin_receipt(
-    context: ContextTypes.DEFAULT_TYPE, order_row, photo_file_id: str, payer_name: str = None,
+    context: ContextTypes.DEFAULT_TYPE, order_row, receipt_items: list, payer_name: str = None,
     ai_verdict: dict = None,
 ):
     order_id, user_id, username, items_json, total, status, created_at = order_row
-    items = json.loads(items_json)
-    lines = [f"{qty}x {MENU[i][0]}" for i, qty in items.items()]
+    purchased_items = json.loads(items_json)
+    lines = [f"{qty}x {MENU[i][0]}" for i, qty in purchased_items.items()]
     # Plain text on purpose — usernames or item names can contain characters
     # (like _ or *) that break Telegram's Markdown parser and silently fail
     # to send. No parse_mode here avoids that entirely.
@@ -3925,6 +4065,7 @@ async def notify_admin_receipt(
         f"🧾 Receipt received — Order #{order_id}\n"
         f"From: {username or 'unknown'} (ID: {user_id})\n"
         + (f"Payer name on receipt: {payer_name}\n" if payer_name else "")
+        + (f"{len(receipt_items)} receipt{'s' if len(receipt_items) != 1 else ''} submitted\n" if len(receipt_items) != 1 else "")
         + "\n"
         + "\n".join(lines)
         + f"\n\nTotal: {CURRENCY}{total:.2f}\n\n"
@@ -3933,11 +4074,8 @@ async def notify_admin_receipt(
     )
     if ADMIN_CHAT_ID:
         try:
-            await context.bot.send_photo(
-                chat_id=ADMIN_CHAT_ID,
-                photo=photo_file_id,
-                caption=caption,
-                reply_markup=admin_review_keyboard(order_id),
+            await send_receipt_items_to_admin(
+                context, receipt_items, caption=caption, keyboard=admin_review_keyboard(order_id)
             )
         except Exception:
             logger.exception("Failed to notify admin for order #%s", order_id)
@@ -8789,6 +8927,8 @@ def main():
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, photo_router))
+    app.add_handler(MessageHandler(filters.Document.PDF, receipt_pdf))
+    app.add_handler(CallbackQueryHandler(receipts_done, pattern=r"^receipts_done:"))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_post_detector))
     # Build regex patterns that match button labels with OR without a badge
     # suffix (e.g. "⏳ Pending Orders 🔴3") — filters.create had the wrong
