@@ -3959,8 +3959,12 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
                                  "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
 
         india_note = (
-            " This is an India/UPI payment specifically — the UTR is usually labeled "
-            "\"UTR\" or \"UTR No.\" on the receipt."
+            " This is an India/UPI payment specifically. Indian UPI apps (Google Pay, PhonePe, "
+            "etc.) commonly show TWO reference numbers on ONE receipt for a single transaction — "
+            "e.g. a \"UPI transaction ID\" (usually a 12-digit number) AND a separate \"Google "
+            "transaction ID\" (an alphanumeric string). This is normal, expected receipt "
+            "formatting, NOT a duplicate or a red flag — list both as references for that one "
+            "receipt, and do not treat having two ID numbers on a single receipt as suspicious."
             if payment_method == "India" else ""
         )
         multi_note = (
@@ -3968,7 +3972,9 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
             f"a single payment split across multiple transfers. SUM the amounts across all of "
             f"them and compare that sum to the required total, rather than expecting any single "
             f"one to match on its own. List every unique transaction reference you find across "
-            f"all of them."
+            f"all of them. It is completely normal for each separate receipt to have entirely "
+            f"different reference numbers from the others — they are different transactions — "
+            f"this is expected, not suspicious."
             if len(items) > 1 else ""
         )
 
@@ -3976,21 +3982,27 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
         content.append({"type": "text", "text": (
             f"This is {'a payment receipt' if len(items) == 1 else 'a set of payment receipts'} "
             f"screenshot(s)/document(s). The order requires a payment totaling exactly "
-            f"{expected_amount:.2f} {currency_code}.{multi_note}{india_note} Every receipt MUST "
-            f"show some kind of unique transaction reference — a UTR, transaction ID, reference "
+            f"{expected_amount:.2f} {currency_code}. Small rounding differences are completely "
+            f"normal and expected — e.g. a receipt showing a whole-number amount like 1893 when "
+            f"the exact target is 1893.33 is a NORMAL rounding display, not suspicious, not "
+            f"fabrication, and should NOT by itself cause a \"looks_off\" verdict. Only flag the "
+            f"amount as a problem if it's meaningfully different from the required total (more "
+            f"than a small rounding gap).{multi_note}{india_note} Every receipt MUST "
+            f"show at least one transaction reference — a UTR, transaction ID, reference "
             f"number, or confirmation code. If a receipt has no such reference visible anywhere, "
             f"that alone makes it invalid, regardless of the amount.\n\n"
             "Look at the image(s)/document(s) and respond with ONLY a JSON object, no other text:\n"
             '{"verdict": "looks_valid" | "looks_off" | "unclear", '
             '"total_amount": "<sum of all amounts as shown, or null>", '
-            '"references": ["<each unique transaction reference found>"], '
+            '"references": ["<each unique transaction reference found, across all receipts>"], '
             '"reason": "<one short sentence explaining the verdict>"}\n\n'
-            "Use \"looks_off\" if the total amount clearly doesn't match, any image doesn't look "
-            "like a real payment receipt, the same receipt appears to be submitted more than once "
-            "to inflate the total, or there's no transaction reference visible on one or more of them. "
+            "Use \"looks_off\" if the total amount is meaningfully off (not just a small rounding "
+            "gap), any image doesn't look like a real payment receipt, the exact same receipt "
+            "image appears to be submitted more than once to inflate the total, or there's no "
+            "transaction reference visible on one or more of the receipts. "
             "Use \"unclear\" if an image is blurry/cropped/ambiguous rather than confidently wrong. "
-            "Use \"looks_valid\" only if the total amount matches, every receipt shows a distinct "
-            "transaction reference, and everything looks legitimate."
+            "Use \"looks_valid\" if the total amount matches (allowing for normal rounding) and "
+            "every receipt shows at least one distinct transaction reference."
         )})
 
         response = await asyncio.to_thread(
