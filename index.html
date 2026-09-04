@@ -259,7 +259,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 <!-- Page 2: Details -->
 <div class="page" id="p2">
   <div class="sl">Account Details</div>
-  <div style="background:rgba(13,148,136,.12);border:1px solid rgba(13,148,136,.3);
+  <div id="detNotice" style="background:rgba(13,148,136,.12);border:1px solid rgba(13,148,136,.3);
     border-radius:12px;padding:11px 13px;margin-bottom:12px;font-size:12px;
     line-height:1.6;color:var(--text)">
     ℹ️ These credentials will be used to register your account after your payment is confirmed.
@@ -770,10 +770,32 @@ function switchCat(id){
 // ── Detail forms ──────────────────────────────────────────────────────
 function buildDetailForms(){
   const el=document.getElementById('detForms'); el.innerHTML='';
+  let anyDetailsNeeded=false;
   Object.entries(cart).forEach(([id,{name,price,qty}])=>{
-    if(NO_DETAILS_NEEDED.has(id)) return;
-    for(let q=0;q<qty;q++) el.appendChild(makeDetailBlock(id,name,price,q));
+    for(let q=0;q<qty;q++){
+      if(NO_DETAILS_NEEDED.has(id)){
+        // Still append a block — collectDetails() reads from these, and
+        // without one here the item silently drops out of the order
+        // entirely (empty cart submitted). It just has no input fields,
+        // so there's nothing to fill in or validate.
+        el.appendChild(makeNoDetailsBlock(id,name,price,q));
+      } else {
+        anyDetailsNeeded=true;
+        el.appendChild(makeDetailBlock(id,name,price,q));
+      }
+    }
   });
+  const notice=document.getElementById('detNotice');
+  if(notice) notice.style.display = anyDetailsNeeded ? '' : 'none';
+}
+function makeNoDetailsBlock(id,name,price,idx){
+  const w=document.createElement('div'); w.className='dblock'; w.dataset.id=id; w.dataset.idx=idx;
+  const lbl=idx>0?` #${idx+1}`:'';
+  w.innerHTML=`<div class="dheader"><div class="ri"><div class="rn">${name}${lbl}</div></div>`+
+    `<div class="ptag">$${price}</div></div>`+
+    `<div style="font-size:12px;color:var(--hint);padding:4px 2px 8px">`+
+    `✅ No account details needed — delivered automatically after payment.</div>`;
+  return w;
 }
 function makeDetailBlock(id,name,price,idx){
   const w=document.createElement('div'); w.className='dblock'; w.dataset.id=id; w.dataset.idx=idx;

@@ -7399,6 +7399,13 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
             # Run automation in background so it doesn't block the queue loop
             context.application.create_task(run_imd_registration(context, order_id))
 
+        elif item_id in UPTODATE_AI_TRIGGER_ITEMS:
+            # Nothing was actually collected for this one (empty info_json
+            # besides account_type — it needs no credentials at all), so
+            # just deliver the code directly, same timing as iMD.
+            db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
+            await deliver_uptodate_ai_code(context, order_id, user_id, fulfilment_id)
+
         elif item_id.startswith("book_"):
             db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
             if ADMIN_CHAT_ID:
@@ -8751,7 +8758,7 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         db_set_fulfilment_info(fid, info)
         # Mark awaiting_delivery so process_next_in_queue skips re-asking
         # for credentials — they've already been collected in the Mini App.
-        if iid not in IMD_TRIGGER_ITEMS:
+        if iid not in IMD_TRIGGER_ITEMS and iid not in UPTODATE_AI_TRIGGER_ITEMS:
             db_set_fulfilment_state(fid, "awaiting_delivery")
             # Notify admin immediately with the stored credentials so they
             # can register as soon as the payment is confirmed.
