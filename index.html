@@ -322,41 +322,13 @@ try {
 // ── Catalog data ──────────────────────────────────────────────────────
 const IMD = new Set(['imd_new_6m','imd_new_1y','imd_renew_6m','imd_renew_1y']);
 
+// Uptodate AI is a code-redemption product — no account/credentials are
+// needed at all, it's delivered automatically right after payment. Skip
+// generating a details form for it entirely.
+const NO_DETAILS_NEEDED = new Set(['uptodate_ai_2m']);
+
 const CATALOG = [
-  {id:'uptodate',name:'Uptodate',emoji:'📖',groups:[
-    {label:'Online Access',items:[
-      {id:'up_online_app',name:'Mobile App',sub:'Online · 1 Year',price:20},
-      {id:'up_online_web',name:'Mobile App + Browser',sub:'Online · 1 Year',price:35},
-    ]},
-    {label:'Online + Offline',items:[
-      {id:'up_offline_app',name:'Mobile App',sub:'Offline · 1 Year',price:30},
-      {id:'up_offline_web',name:'Mobile App + Browser',sub:'Offline · 1 Year',price:45},
-    ]},
-    {label:'Online + Pathways',items:[
-      {id:'up_pathways_app',name:'Mobile App',sub:'Pathways · 1 Year',price:30},
-      {id:'up_pathways_web',name:'Mobile App + Browser',sub:'Pathways · 1 Year',price:45},
-    ]},
-  ]},
-  {id:'amboss',name:'Amboss',emoji:'🧠',groups:[
-    {label:'Premium + Library',items:[
-      {id:'amboss_premium_1y',name:'1 Year',sub:'Unlimited Qbanks + Library',price:85},
-      {id:'amboss_premium_promo',name:'Until 18/9/2026',sub:'Limited offer',price:35},
-    ]},
-    {label:'Library Only',items:[
-      {id:'amboss_library',name:'1 Year',sub:'Limited Qbanks',price:65},
-    ]},
-  ]},
-  {id:'imd',name:'iMD VIP',emoji:'🎓',groups:[
-    {label:'New Account',items:[
-      {id:'imd_new_6m',name:'6 Months',sub:'New registration',price:50},
-      {id:'imd_new_1y',name:'1 Year',sub:'New registration',price:75},
-    ]},
-    {label:'Renewal',items:[
-      {id:'imd_renew_6m',name:'6 Months',sub:'Existing account',price:50},
-      {id:'imd_renew_1y',name:'1 Year',sub:'Existing account',price:75},
-    ]},
-  ]},
-  {id:'other',name:'More',emoji:'📚',single:[
+  {id:'other',name:'All Subscriptions',emoji:'📚',single:[
     {id:'dynamed',e:'💊',name:'Dynamed',price:20},
     {id:'dynamedex',e:'💊',name:'DynamedEx',price:30},
     {id:'bmj_best_practice',e:'📋',name:'BMJ Best Practice',price:20},
@@ -372,6 +344,42 @@ const CATALOG = [
     {id:'jama_evidence',e:'📰',name:'JAMA Evidence',price:20},
     {id:'scopus',e:'🌐',name:'Scopus',price:35},
     {id:'springerlink',e:'📗',name:'SpringerLink',price:35},
+  ]},
+  {id:'imd',name:'iMD',emoji:'🎓',groups:[
+    {label:'New Account',items:[
+      {id:'imd_new_6m',name:'6 Months',sub:'New registration',price:50},
+      {id:'imd_new_1y',name:'1 Year',sub:'New registration',price:75},
+    ]},
+    {label:'Renewal',items:[
+      {id:'imd_renew_6m',name:'6 Months',sub:'Existing account',price:50},
+      {id:'imd_renew_1y',name:'1 Year',sub:'Existing account',price:75},
+    ]},
+  ]},
+  {id:'uptodate',name:'Uptodate',emoji:'📖',groups:[
+    {label:'Online Access',items:[
+      {id:'up_online_app',name:'Mobile App',sub:'Online · 1 Year',price:20},
+      {id:'up_online_web',name:'Mobile App + Browser',sub:'Online · 1 Year',price:35},
+    ]},
+    {label:'Online + Offline',items:[
+      {id:'up_offline_app',name:'Mobile App',sub:'Offline · 1 Year',price:30},
+      {id:'up_offline_web',name:'Mobile App + Browser',sub:'Offline · 1 Year',price:45},
+    ]},
+    {label:'Online + Pathways',items:[
+      {id:'up_pathways_app',name:'Mobile App',sub:'Pathways · 1 Year',price:30},
+      {id:'up_pathways_web',name:'Mobile App + Browser',sub:'Pathways · 1 Year',price:45},
+    ]},
+    {label:'AI Assistant',items:[
+      {id:'uptodate_ai_2m',name:'Uptodate AI (Telegram Bot)',sub:'2 Months',price:10},
+    ]},
+  ]},
+  {id:'amboss',name:'Amboss',emoji:'🧠',groups:[
+    {label:'Premium + Library',items:[
+      {id:'amboss_premium_1y',name:'1 Year',sub:'Unlimited Qbanks + Library',price:85},
+      {id:'amboss_premium_promo',name:'Until 18/9/2026',sub:'Limited offer',price:35},
+    ]},
+    {label:'Library Only',items:[
+      {id:'amboss_library',name:'1 Year',sub:'Limited Qbanks',price:65},
+    ]},
   ]},
 ];
 
@@ -762,7 +770,10 @@ function switchCat(id){
 // ── Detail forms ──────────────────────────────────────────────────────
 function buildDetailForms(){
   const el=document.getElementById('detForms'); el.innerHTML='';
-  Object.entries(cart).forEach(([id,{name,price,qty}])=>{for(let q=0;q<qty;q++) el.appendChild(makeDetailBlock(id,name,price,q));});
+  Object.entries(cart).forEach(([id,{name,price,qty}])=>{
+    if(NO_DETAILS_NEEDED.has(id)) return;
+    for(let q=0;q<qty;q++) el.appendChild(makeDetailBlock(id,name,price,q));
+  });
 }
 function makeDetailBlock(id,name,price,idx){
   const w=document.createElement('div'); w.className='dblock'; w.dataset.id=id; w.dataset.idx=idx;

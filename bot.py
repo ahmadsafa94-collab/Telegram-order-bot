@@ -134,6 +134,7 @@ MENU = {
     "up_offline_web": ("Uptodate Online + Offline Access 1 Year - Mobile App + Browser", 45.00),
     "up_pathways_app": ("Uptodate Online + Pathways Access 1 Year - Mobile App", 30.00),
     "up_pathways_web": ("Uptodate Online + Pathways Access 1 Year - Mobile App + Browser", 45.00),
+    "uptodate_ai_2m": ("Uptodate AI (Telegram Bot) - 2 Months", 10.00),
 
     # Amboss — Premium+Library (1 year, or a fixed-date promo), or
     # Library-only.
@@ -201,6 +202,7 @@ CATALOG = {
                     "up_pathways_web": {"label": "Mobile App + Browser", "item": "up_pathways_web"},
                 },
             },
+            "uptodate_ai_2m": {"label": "Uptodate AI (Telegram Bot) - 2 Months", "item": "uptodate_ai_2m"},
         },
     },
     "amboss": {
@@ -224,6 +226,23 @@ CATALOG = {
 
 # All four iMD variants trigger the guided collection flow.
 IMD_TRIGGER_ITEMS = {"imd_new_6m", "imd_new_1y", "imd_renew_6m", "imd_renew_1y"}
+
+# Uptodate AI — a code-redemption product (no registration, no customer-
+# entered details at all). Reuses the same serials pool mechanism as
+# iMD/renewal serials, keyed by this item's own "duration" value so it's
+# fully separate from the 6m/1y iMD pools and manageable the same way
+# (📦 Manage Stock → this item → Stock, or the same add/remove flow).
+UPTODATE_AI_TRIGGER_ITEMS = {"uptodate_ai_2m"}
+UPTODATE_AI_CODES_DURATION = "uptodate_ai_2m"
+
+# Every code/serial pool the admin can manage via ➕ Add Serials, 📋 View
+# Serials, and /addserials — used to build those buttons/labels/parsing so
+# adding a new pool means editing this one dict, not five scattered places.
+SERIAL_POOL_LABELS = {
+    "6m": "iMD — 6 Months",
+    "1y": "iMD — 1 Year",
+    UPTODATE_AI_CODES_DURATION: "Uptodate AI (2 Months)",
+}
 IMD_NEW_ITEMS = {"imd_new_6m", "imd_new_1y"}
 IMD_RENEW_ITEMS = {"imd_renew_6m", "imd_renew_1y"}
 
@@ -2165,7 +2184,7 @@ def main_menu_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
     if shop_url:
         return ReplyKeyboardMarkup(
             [
-                [KeyboardButton("🏪 Shop", web_app=WebAppInfo(url=shop_url))],
+                [KeyboardButton("🟢 SHOP 🟢\n(Click here to buy)", web_app=WebAppInfo(url=shop_url))],
                 [MY_SUBS_LABEL],
                 [_badge(ANNOUNCEMENTS_LABEL, ann_count), JOIN_CHANNEL_LABEL],
                 [GET_FREE_LABEL, MY_CREDITS_LABEL],
@@ -4457,12 +4476,10 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == A_ADD_SERIALS:
         await update.message.reply_text(
-            "Which pool are these serials for?",
+            "Which pool are these serials/codes for?",
             reply_markup=InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton("6 Months", callback_data="addser:6m")],
-                    [InlineKeyboardButton("1 Year", callback_data="addser:1y")],
-                ]
+                [[InlineKeyboardButton(label, callback_data=f"addser:{dur}")]
+                 for dur, label in SERIAL_POOL_LABELS.items()]
             ),
         )
 
@@ -7049,19 +7066,19 @@ async def admin_pending_back(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def show_serials(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lists available serials and any not_working ones so the admin can
-    review and delete failed serials."""
+    """Lists available serials/codes and any not_working ones so the admin
+    can review and delete failed serials."""
     available = db_list_serials(status="available")
     not_working = db_list_serials(status="not_working")
 
     lines = []
 
-    grouped = {"6m": [], "1y": []}
+    grouped = {dur: [] for dur in SERIAL_POOL_LABELS}
     for duration, code, status, used_for_order in available:
         grouped.setdefault(duration, []).append(code)
 
-    lines.append("🔑 Available Serials")
-    for duration, label in (("6m", "6 Months"), ("1y", "1 Year")):
+    lines.append("🔑 Available Serials/Codes")
+    for duration, label in SERIAL_POOL_LABELS.items():
         codes = grouped.get(duration, [])
         lines.append(f"\n  {label} — {len(codes)} available")
         if codes:
@@ -7071,10 +7088,10 @@ async def show_serials(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not_working:
         lines.append("\n\n❌ Not Working Serials (rejected by iMD — review and delete)")
-        nw_grouped = {"6m": [], "1y": []}
+        nw_grouped = {dur: [] for dur in SERIAL_POOL_LABELS}
         for duration, code, status, used_for_order in not_working:
             nw_grouped.setdefault(duration, []).append(code)
-        for duration, label in (("6m", "6 Months"), ("1y", "1 Year")):
+        for duration, label in SERIAL_POOL_LABELS.items():
             codes = nw_grouped.get(duration, [])
             if codes:
                 lines.append(f"\n  {label}:")
@@ -7101,7 +7118,7 @@ async def add_serials_pick_duration(update: Update, context: ContextTypes.DEFAUL
     clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_admin_input"] = "add_serials"
     context.user_data["add_serials_duration"] = duration
-    label = "1 Year" if duration == "1y" else "6 Months"
+    label = SERIAL_POOL_LABELS.get(duration, duration)
     await query.edit_message_text(
         f"Send the {label} serial codes now — one per line, or separated by spaces. "
         "You can paste many at once."
@@ -7121,9 +7138,9 @@ async def admin_input_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         codes = text.split()
         added = db_add_serials(duration, codes)
         total = db_count_serials(duration)
-        label = "1 Year" if duration == "1y" else "6 Months"
+        label = SERIAL_POOL_LABELS.get(duration, duration)
         await update.message.reply_text(
-            f"Added {added} new {label} serial(s) (duplicates skipped).\nTotal available now: {total}"
+            f"Added {added} new {label} code(s) (duplicates skipped).\nTotal available now: {total}"
         )
 
     elif mode == "remove_serial":
@@ -7322,7 +7339,7 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
         conn.close()
         manual_items = [
             iid for (iid,) in waiting
-            if iid not in IMD_TRIGGER_ITEMS and not iid.startswith("book_")
+            if iid not in IMD_TRIGGER_ITEMS and iid not in UPTODATE_AI_TRIGGER_ITEMS and not iid.startswith("book_")
         ]
         if manual_items and user_id:
             try:
@@ -7435,6 +7452,8 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
 
     if item_id in IMD_TRIGGER_ITEMS:
         await start_imd_collection(context, order_id, user_id, item_id, fulfilment_id)
+    elif item_id in UPTODATE_AI_TRIGGER_ITEMS:
+        await deliver_uptodate_ai_code(context, order_id, user_id, fulfilment_id)
     elif item_id.startswith("book_"):
         # A book request already has everything it needs (the link was
         # collected up front, before payment) — skip straight to the
@@ -7604,6 +7623,61 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Move on to the next item in this order, if any.
     await process_next_in_queue(context, update.effective_user.id, order_id)
+
+
+async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id: int,
+                                    user_id: int, fulfilment_id: int):
+    """Pops one code from the Uptodate AI pool and delivers it instantly —
+    no customer details needed at all, this runs the moment payment is
+    confirmed, same timing as iMD's auto-registration."""
+    serial = db_pop_serial(UPTODATE_AI_CODES_DURATION)
+
+    if not serial:
+        # Pool is empty — fall back to normal manual delivery so the order
+        # isn't stuck silently. Admin adds more codes via 📦 Manage Stock.
+        db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
+        if ADMIN_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(
+                        f"⚠️ Order #{order_id} — Uptodate AI (Telegram Bot) sold but the codes "
+                        "pool is empty. Add more codes via 📦 Manage Stock → Uptodate AI → Stock, "
+                        "then deliver this one manually."
+                    ),
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("📤 Deliver Manually", callback_data=f"deliver:{fulfilment_id}")]]
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify admin of empty Uptodate AI codes pool")
+        return
+
+    serial_id, code = serial
+    db_finalize_serial(serial_id, order_id, success=True)
+    db_set_fulfilment_state(fulfilment_id, "delivered")
+    db_set_fulfilment_info(fulfilment_id, {"code": code})
+
+    message = (
+        "✅ Your Uptodate AI (Telegram Bot) subscription is ready!\n\n"
+        "1️⃣ Click on @Up2down_bot\n"
+        f"2️⃣ Type /Redeem {code}"
+    )
+    db_add_delivery(order_id, user_id, "uptodate_ai_2m", message)
+
+    try:
+        await context.bot.send_message(chat_id=user_id, text=message)
+    except Exception:
+        logger.exception("Failed to deliver Uptodate AI code to user %s", user_id)
+
+    if ADMIN_CHAT_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"✅ Delivered Uptodate AI code {code} — Order #{order_id}",
+            )
+        except Exception:
+            pass
 
 
 async def start_imd_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int, imd_item: str, fulfilment_id: int):
@@ -8267,15 +8341,15 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def add_serials_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: /addserials <6m|1y> <code1> <code2> ... — bulk-adds
-    serials to the auto-assignment pool. Codes can be separated by spaces
-    or pasted on separate lines in the same message."""
+    """Admin-only: /addserials <6m|1y|uptodateai> <code1> <code2> ... —
+    bulk-adds serials/codes to the auto-assignment pool. Codes can be
+    separated by spaces or pasted on separate lines in the same message."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
     if len(context.args) < 2:
         await update.message.reply_text(
-            "Usage: /addserials <6m|1y> <code1> <code2> ...\n"
+            "Usage: /addserials <6m|1y|uptodateai> <code1> <code2> ...\n"
             "You can paste many codes at once, one per line or space-separated."
         )
         return
@@ -8285,16 +8359,18 @@ async def add_serials_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         duration = "6m"
     elif duration_arg in ("1y", "1year", "12m"):
         duration = "1y"
+    elif duration_arg in ("uptodateai", "uptodate_ai", "uptodateaicode", "aicode"):
+        duration = UPTODATE_AI_CODES_DURATION
     else:
-        await update.message.reply_text("Duration must be '6m' or '1y'.")
+        await update.message.reply_text("Duration must be '6m', '1y', or 'uptodateai'.")
         return
 
     codes = context.args[1:]
     added = db_add_serials(duration, codes)
     total_available = db_count_serials(duration)
-    duration_label = "1 Year" if duration == "1y" else "6 Months"
+    duration_label = SERIAL_POOL_LABELS.get(duration, duration)
     await update.message.reply_text(
-        f"Added {added} new {duration_label} serial(s) (duplicates skipped).\n"
+        f"Added {added} new {duration_label} code(s) (duplicates skipped).\n"
         f"Total available now: {total_available}"
     )
 
@@ -8323,15 +8399,13 @@ async def remove_serial_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def serials_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: /serials — shows how many serials are left in each pool."""
+    """Admin-only: /serials — shows how many serials/codes are left in
+    each pool."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
-    six_month = db_count_serials("6m")
-    one_year = db_count_serials("1y")
-    await update.message.reply_text(
-        f"Available serials:\n6 Months: {six_month}\n1 Year: {one_year}"
-    )
+    lines = [f"{label}: {db_count_serials(dur)}" for dur, label in SERIAL_POOL_LABELS.items()]
+    await update.message.reply_text("Available serials/codes:\n" + "\n".join(lines))
 
 
 async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
