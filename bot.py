@@ -37,7 +37,7 @@ import os
 import math
 import re
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
 
 from telegram import (
     InlineKeyboardButton,
@@ -94,6 +94,15 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 SUBSCRIPTIONS_CHANNEL_ID_RAW = os.environ.get("SUBSCRIPTIONS_CHANNEL_ID", "-1004471406420")
 SUBSCRIPTIONS_CHANNEL_ID = int(SUBSCRIPTIONS_CHANNEL_ID_RAW) if SUBSCRIPTIONS_CHANNEL_ID_RAW.strip() else None
 
+# Private "Backup" channel — the nightly automatic database backup (and
+# manual 🗄 Backup button, if you'd rather push it there too) is sent
+# here. An invite link (t.me/+...) can't be resolved to a numeric ID
+# directly — leave this unset, post anything in the channel with the bot
+# already an admin there, and channel_post_detector below will DM you
+# the numeric ID to set here.
+BACKUP_CHANNEL_ID_RAW = os.environ.get("BACKUP_CHANNEL_ID", "")
+BACKUP_CHANNEL_ID = int(BACKUP_CHANNEL_ID_RAW) if BACKUP_CHANNEL_ID_RAW.strip() else None
+
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "orders.db"))
 
 # For AI receipt pre-screening (see analyze_receipt_with_ai). Get a key at
@@ -107,9 +116,12 @@ CURRENCY = "$"
 # than your local one. Set via the REPORT_UTC_OFFSET variable in Railway.
 REPORT_UTC_OFFSET = float(os.environ.get("REPORT_UTC_OFFSET", "3"))
 
-# Telegram Stars pricing: ~50 Stars per $1 (based on the in-app purchase
-# packages, e.g. 100 Stars = $2.00). Adjust if Telegram's pricing changes.
-STAR_RATE = 50
+# Telegram Stars pricing. 50/$1 (the in-app purchase rate, ~$0.02/Star)
+# overcharges Stars relative to their real value — Telegram's own direct
+# marketplace, Fragment, prices 1,000 Stars at $15.00 (~$0.015/Star),
+# which is the rate to use for pricing a fixed-USD product in Stars.
+# Adjust if Telegram's Fragment pricing changes (check fragment.com).
+STAR_RATE = 1000 / 15  # ≈ 66.67 Stars per $1
 
 # Your menu. Keys are short item IDs, values are (display name, price).
 MENU = {
@@ -2075,12 +2087,14 @@ A_BOOK_REQUESTS = "📚 Book Requests"
 A_DELIVERED = "📦 Delivered Subscriptions"
 A_IMD_CATALOG = "🔬 Update iMD Catalog"
 A_CUSTOMER_VIEW = "🛍 Customer Menu"
+A_BACKUP = "🗄 Backup"
 
 ADMIN_LABELS = [
     A_VIEW_SERIALS, A_ADD_SERIALS, A_REMOVE_SERIAL,
     A_RECENT_ORDERS, A_PENDING, A_INPUT, A_INBOX, A_BROADCAST,
     A_FIND_ORDER, A_FIND_CUSTOMER, A_STOCK, A_TICKETS, A_CREDITS,
     A_ADD_SUBSCRIPTION, A_BOOK_REQUESTS, A_DELIVERED, A_IMD_CATALOG, A_CUSTOMER_VIEW,
+    A_BACKUP,
 ]
 
 # Every key the admin's text_state_router uses. clear_admin_flow_state()
@@ -2101,6 +2115,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_imd_api_url", "imd_saved_token",
     "awaiting_imd_diag_username", "awaiting_imd_diag_password", "imd_diag_username",
     "awaiting_sync_serials_username", "awaiting_sync_serials_password", "sync_serials_username",
+    "awaiting_restore_file", "restore_staged_path",
 ]
 
 def clear_admin_flow_state(user_data: dict):
@@ -2260,7 +2275,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [A_BOOK_REQUESTS],
             [A_DELIVERED],
             [A_IMD_CATALOG],
-            [A_CUSTOMER_VIEW],
+            [A_CUSTOMER_VIEW, A_BACKUP],
         ],
         resize_keyboard=True,
     )
@@ -4469,20 +4484,28 @@ async def post_receipt_to_payments_channel(context: ContextTypes.DEFAULT_TYPE, o
 
 
 async def channel_post_detector(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """One-time helper: if PAYMENTS_CHANNEL_ID isn't configured yet, any
-    post in a channel the bot can see gets its chat_id reported to the
-    admin — the easiest way to discover a private channel's numeric ID
-    without a third-party tool."""
-    if PAYMENTS_CHANNEL_ID:
-        return  # already configured, nothing to do
+    """One-time helper: if any of our channel IDs aren't configured yet,
+    any post in a channel the bot can see gets its chat_id reported to
+    the admin — the easiest way to discover a private channel's numeric
+    ID without a third-party tool."""
+    if PAYMENTS_CHANNEL_ID and SUBSCRIPTIONS_CHANNEL_ID and BACKUP_CHANNEL_ID:
+        return  # everything already configured, nothing to do
     if not ADMIN_CHAT_ID:
         return
     chat = update.effective_chat
+    missing = []
+    if not PAYMENTS_CHANNEL_ID:
+        missing.append("PAYMENTS_CHANNEL_ID")
+    if not SUBSCRIPTIONS_CHANNEL_ID:
+        missing.append("SUBSCRIPTIONS_CHANNEL_ID")
+    if not BACKUP_CHANNEL_ID:
+        missing.append("BACKUP_CHANNEL_ID")
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
         text=(
             f"📡 Detected a post in \"{chat.title or 'a channel'}\" — its ID is:\n\n{chat.id}\n\n"
-            "Set PAYMENTS_CHANNEL_ID to this value in Railway's Variables tab, then redeploy."
+            f"If this is meant to be one of your channels, set it as one of: {', '.join(missing)} "
+            "in Railway's Variables tab, then redeploy."
         ),
     )
 
@@ -4654,6 +4677,9 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Switched to the customer menu. Send /start to return to the admin panel.",
             reply_markup=main_menu_keyboard(0),  # no user context, so no badge
         )
+
+    elif text == A_BACKUP:
+        await backup_db(update, context)
 
 
 def format_fulfilment_info(item_id: str, info_json: str) -> str:
@@ -9035,6 +9061,22 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             logger.exception("Failed to notify admin of Mini App order #%s", order_id)
 
 
+async def send_db_backup(bot, chat_id: int, caption_prefix: str = "Database backup"):
+    """Sends the raw SQLite database file to the given chat — shared by
+    the manual 🗄 Backup button (admin chat) and the nightly automatic
+    job (backup channel), so both send exactly the same file."""
+    if not os.path.exists(DB_PATH):
+        return False
+    with open(DB_PATH, "rb") as f:
+        await bot.send_document(
+            chat_id=chat_id,
+            document=f,
+            filename=f"orders_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+            caption=f"{caption_prefix} — {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}",
+        )
+    return True
+
+
 async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only: sends the raw SQLite database file as a Telegram document.
     Use this BEFORE a redeploy when no Railway Volume is mounted, to ensure
@@ -9049,12 +9091,148 @@ async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📦 Sending database backup from `{DB_PATH}` — save this file before redeploying.",
         parse_mode=ParseMode.MARKDOWN,
     )
-    with open(DB_PATH, "rb") as f:
-        await update.message.reply_document(
-            document=f,
-            filename="orders_backup.db",
-            caption=f"Database backup — {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}",
+    await send_db_backup(context.bot, ADMIN_CHAT_ID, caption_prefix="Manual database backup")
+
+
+async def restore_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only /restore: begins the restore flow. The actual file is
+    handled by restore_file_received once uploaded."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    clear_admin_flow_state(context.user_data)
+    context.user_data["awaiting_restore_file"] = True
+    await update.message.reply_text(
+        "🔄 Restore Database\n\n"
+        "Send the backup `.db` file to restore (from 🗄 Backup or the nightly channel post).\n\n"
+        "⚠️ This will REPLACE the live database. Your current database is saved as a "
+        "safety copy first, so this can be undone if something goes wrong.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def restore_file_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the .db file upload for /restore — downloads it to a temp
+    path and asks for explicit confirmation before touching the live
+    database at all."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    if not context.user_data.get("awaiting_restore_file"):
+        return  # not expecting a .db upload right now — ignore
+
+    doc = update.message.document
+    if not doc or not doc.file_name.endswith(".db"):
+        await update.message.reply_text("That doesn't look like a `.db` file — send the backup file itself.")
+        return
+
+    context.user_data.pop("awaiting_restore_file", None)
+    tg_file = await context.bot.get_file(doc.file_id)
+    temp_path = os.path.join(os.path.dirname(DB_PATH) or ".", "_restore_staged.db")
+    await tg_file.download_to_drive(temp_path)
+
+    # Sanity check: does this at least look like a real SQLite file with
+    # our expected schema, not a random or corrupt upload?
+    try:
+        test_conn = sqlite3.connect(temp_path)
+        tables = {row[0] for row in test_conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        test_conn.close()
+        if "orders" not in tables:
+            os.remove(temp_path)
+            await update.message.reply_text(
+                "❌ This file doesn't look like a valid backup (no 'orders' table found). "
+                "Restore cancelled — nothing was touched."
+            )
+            return
+    except Exception as e:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        await update.message.reply_text(f"❌ Couldn't read this file as a database: {e}\n\nRestore cancelled.")
+        return
+
+    context.user_data["restore_staged_path"] = temp_path
+    await update.message.reply_text(
+        "⚠️ *Confirm restore*\n\n"
+        "This will replace your live database with the uploaded file. "
+        "Your current database will be saved as a dated safety copy first.\n\n"
+        "This cannot be undone except by restoring that safety copy manually.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Yes, restore now", callback_data="restore_confirm")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="restore_cancel")],
+        ]),
+    )
+
+
+async def restore_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    staged_path = context.user_data.pop("restore_staged_path", None)
+    if not staged_path or not os.path.exists(staged_path):
+        await query.edit_message_text("❌ Staged file not found — please run /restore again.")
+        return
+
+    try:
+        # Safety copy of the CURRENT live database before it's replaced —
+        # this is what makes an accidental bad restore recoverable.
+        if os.path.exists(DB_PATH):
+            safety_path = os.path.join(
+                os.path.dirname(DB_PATH) or ".",
+                f"orders_pre_restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+            )
+            import shutil
+            shutil.copy2(DB_PATH, safety_path)
+
+        import shutil
+        shutil.move(staged_path, DB_PATH)
+
+        await query.edit_message_text(
+            "✅ Database restored.\n\n"
+            "Your previous database was saved alongside it as a dated safety copy "
+            "(same folder as orders.db) in case you need to undo this.\n\n"
+            "Restart the bot service from Railway now to make sure everything "
+            "picks up the restored data cleanly."
         )
+    except Exception as e:
+        logger.exception("Restore failed")
+        await query.edit_message_text(f"❌ Restore failed: {type(e).__name__}: {e}")
+
+
+async def restore_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    staged_path = context.user_data.pop("restore_staged_path", None)
+    if staged_path and os.path.exists(staged_path):
+        os.remove(staged_path)
+    await query.edit_message_text("Restore cancelled — nothing was changed.")
+
+
+async def nightly_backup_job(context: ContextTypes.DEFAULT_TYPE):
+    """Runs once a day (see main() — scheduled at 00:00) and pushes the
+    current database file to the backup channel. Never touches the admin
+    chat, so it doesn't clutter daily conversation — only the channel."""
+    if not BACKUP_CHANNEL_ID:
+        logger.warning("Nightly backup skipped — BACKUP_CHANNEL_ID not configured.")
+        return
+    try:
+        sent = await send_db_backup(context.bot, BACKUP_CHANNEL_ID, caption_prefix="🌙 Nightly automatic backup")
+        if not sent and ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text="⚠️ Nightly backup skipped — no database file found at the configured path.",
+            )
+    except Exception as e:
+        logger.exception("Nightly backup failed")
+        if ADMIN_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=f"⚠️ Nightly backup failed: {type(e).__name__}: {e}",
+                )
+            except Exception:
+                pass
 
 
 async def export_imd_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -9177,9 +9355,26 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).persistence(persistence).post_init(post_init).build()
 
+    # Nightly automatic backup at 00:00 local time (per REPORT_UTC_OFFSET —
+    # the same "local day" convention already used for sales reports).
+    # Requires the job-queue extra (APScheduler) — see requirements.txt.
+    if app.job_queue:
+        backup_hour_utc = int((24 - REPORT_UTC_OFFSET) % 24)
+        app.job_queue.run_daily(
+            nightly_backup_job,
+            time=dt_time(hour=backup_hour_utc, minute=0),
+            name="nightly_db_backup",
+        )
+    else:
+        logger.warning(
+            "JobQueue not available — nightly backup will NOT run. "
+            "Install the job-queue extra: pip install 'python-telegram-bot[job-queue]'"
+        )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myorders", my_orders))
     app.add_handler(CommandHandler("backupdb", backup_db))
+    app.add_handler(CommandHandler("restore", restore_start))
     app.add_handler(CommandHandler("exportimd", export_imd_catalog))
     app.add_handler(CommandHandler("imddiag", imd_diag_start))
     app.add_handler(CommandHandler("syncserials", sync_serials_start))
@@ -9261,6 +9456,9 @@ def main():
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, photo_router))
     app.add_handler(MessageHandler(filters.Document.PDF, receipt_pdf))
+    app.add_handler(MessageHandler(filters.Document.ALL, restore_file_received))
+    app.add_handler(CallbackQueryHandler(restore_confirm, pattern=r"^restore_confirm$"))
+    app.add_handler(CallbackQueryHandler(restore_cancel, pattern=r"^restore_cancel$"))
     app.add_handler(CallbackQueryHandler(receipts_done, pattern=r"^receipts_done:"))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_post_detector))
     # Build regex patterns that match button labels with OR without a badge
