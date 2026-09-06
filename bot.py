@@ -102,6 +102,20 @@ SUBSCRIPTIONS_CHANNEL_ID = int(SUBSCRIPTIONS_CHANNEL_ID_RAW) if SUBSCRIPTIONS_CH
 # the numeric ID to set here.
 BACKUP_CHANNEL_ID_RAW = os.environ.get("BACKUP_CHANNEL_ID", "")
 BACKUP_CHANNEL_ID = int(BACKUP_CHANNEL_ID_RAW) if BACKUP_CHANNEL_ID_RAW.strip() else None
+if BACKUP_CHANNEL_ID is not None and BACKUP_CHANNEL_ID > 0:
+    # A channel/supergroup ID is always negative (starts with -100) — a
+    # positive value here almost always means the minus sign got dropped
+    # during copy-paste into Railway. Correcting it here means that
+    # common mistake fails loudly and obviously at deploy time instead of
+    # silently causing every nightly backup to fail with a cryptic
+    # "Chat not found" that gives no hint what actually went wrong.
+    logger.warning(
+        "BACKUP_CHANNEL_ID (%s) is positive — channel IDs are always negative. "
+        "Assuming the minus sign was dropped and using -%s instead. "
+        "Fix the Railway variable to avoid this warning.",
+        BACKUP_CHANNEL_ID, BACKUP_CHANNEL_ID,
+    )
+    BACKUP_CHANNEL_ID = -BACKUP_CHANNEL_ID
 
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "orders.db"))
 
@@ -9107,10 +9121,11 @@ async def send_db_backup(bot, chat_id: int, caption_prefix: str = "Database back
 
 
 async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: sends the raw SQLite database file as a Telegram document.
-    Use this BEFORE a redeploy when no Railway Volume is mounted, to ensure
-    no data is lost. The file can be re-uploaded to /data/orders.db later
-    via the Railway shell."""
+    """Admin-only: sends the raw SQLite database file as a Telegram document,
+    both to the admin chat and the backup channel (if configured). Use this
+    BEFORE a redeploy when no Railway Volume is mounted, to ensure no data
+    is lost. The file can be re-uploaded to /data/orders.db later via the
+    Railway shell."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
     if not os.path.exists(DB_PATH):
@@ -9121,6 +9136,15 @@ async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
     await send_db_backup(context.bot, ADMIN_CHAT_ID, caption_prefix="Manual database backup")
+
+    if BACKUP_CHANNEL_ID:
+        try:
+            await send_db_backup(context.bot, BACKUP_CHANNEL_ID, caption_prefix="📦 Manual database backup")
+        except Exception as e:
+            logger.exception("Failed to forward manual backup to backup channel")
+            await update.message.reply_text(
+                f"⚠️ Sent to you, but forwarding to the backup channel failed: {type(e).__name__}: {e}"
+            )
 
 
 async def restore_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
