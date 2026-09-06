@@ -483,6 +483,12 @@ JORDAN_RECIPIENT_IDENTIFIERS = [
     "MOHAMMAD SHAMALTI", "MOHAMMAD ISMAIL ABEDELQADER SHAMALTY", "SHAMALTY", "SHAMALTI",
 ]
 
+# KSA (Al Rajhi) receipts DO normally show a reference number, so KSA
+# keeps the standard reference/amount checks — this is an ADDITIONAL
+# gate on top of those, not a replacement (unlike Jordan/CLIQ above).
+METHODS_REQUIRING_RECIPIENT_NAME = {"KSA"}
+KSA_RECIPIENT_IDENTIFIERS = ["JAMEEL HEJJI", "JAMEEL HEJJI ALMIZRAQ", "HEJJI"]
+
 # Card payments routinely show a slightly higher charge than the order
 # total due to the processor's transaction fee — treat anything from the
 # expected amount up to this much extra as normal, not a mismatch.
@@ -588,7 +594,7 @@ LOCAL_PAYMENT_INSTRUCTIONS = {
         "`SA8710000006857309000101`\n\n"
         "`SA0510000062300187719603`\n\n"
         "Bank: Ahli Bank\n"
-        "Name: Jamil Hajji\n\n"
+        "Name: JAMEEL HEJJI ALMIZRAQ\n\n"
         "*Please make sure the purpose of the payment be Friends and family or "
         "personal NOT goods or services.*"
     ),
@@ -4036,7 +4042,15 @@ async def payer_name_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if references:
                 db_set_receipt_references(order_id, references)
 
-        if amount_ok and reference_ok and wallet_ok and not duplicate_ref:
+        # KSA keeps the normal reference/amount checks above, but ALSO
+        # requires the recipient name to match — a right amount + right
+        # reference sent to the WRONG person is still not a valid payment
+        # to us.
+        recipient_name_ok = True
+        if payment_method in METHODS_REQUIRING_RECIPIENT_NAME:
+            recipient_name_ok = bool(verdict.get("recipient_ok"))
+
+        if amount_ok and reference_ok and wallet_ok and recipient_name_ok and not duplicate_ref:
             auto_confirmed = True
             await finalize_order_confirmation(context, order_id, user_id, items_json)
             try:
@@ -4049,7 +4063,7 @@ async def payer_name_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"Payment method: {payment_method}\n"
                         f"Total: {CURRENCY}{total:.2f} ({expected_amount:.2f} {currency_code})\n"
                         f"{len(items)} receipt{'s' if len(items) != 1 else ''} submitted\n\n"
-                        f"{_ai_verdict_label(verdict)}\n\n"
+                        f"{_ai_verdict_label(verdict, payment_method)}\n\n"
                         "Delivered automatically. Review the receipt(s) above — "
                         "tap below only if something looks wrong."
                     ),
@@ -4067,7 +4081,7 @@ async def payer_name_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             verdict["verdict"] = "looks_off"
 
     if not auto_confirmed:
-        await notify_admin_receipt(context, order, items, payer_name=payer_name, ai_verdict=verdict)
+        await notify_admin_receipt(context, order, items, payer_name=payer_name, ai_verdict=verdict, payment_method=payment_method)
 
 
 async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: list,
@@ -4124,6 +4138,18 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
             "vs \"SHAMALTI\" is the same match). Set \"recipient_ok\" to true if you can see the "
             "amount in JOD and any reasonable match to one of these identifiers, false otherwise."
             if payment_method == "Jordan" else ""
+        )
+        ksa_note = (
+            " This is a KSA (Al Rajhi Bank) payment. In ADDITION to the normal amount and "
+            "transaction reference checks, the receipt's recipient/beneficiary name MUST match "
+            f"one of these: {', '.join(KSA_RECIPIENT_IDENTIFIERS)}. Matching rules: "
+            "case-insensitive; a surname appearing anywhere in a longer full name is enough on "
+            "its own (e.g. \"JAMEEL HEJJI ALMIZRAQ\" matches \"HEJJI\"); minor spelling variants "
+            "are fine. Set \"recipient_ok\" to true only if the recipient name reasonably matches "
+            "one of these; false if it's a different name entirely or not visible. A receipt with "
+            "the right amount and reference but the WRONG recipient name must NOT be looks_valid — "
+            "that likely means the customer paid someone else by mistake."
+            if payment_method == "KSA" else ""
         )
         card_note = (
             f" This is a card payment. It's normal for the charged amount to be "
@@ -4187,7 +4213,7 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
             f"(e.g. 53.00 vs 52.99, or 1893 vs 1893.33) is ALWAYS a normal rounding/display "
             f"difference — treat it as a match immediately, do not deliberate about it, do not "
             f"mention it as a concern. Only a difference bigger than that actually matters.{multi_note}"
-            f"{india_note}{jordan_note}{card_note}{crypto_note} "
+            f"{india_note}{jordan_note}{ksa_note}{card_note}{crypto_note} "
             f"{reference_requirement}\n\n"
             "Look at the image(s)/document(s) and respond with ONLY a JSON object, no other text:\n"
             '{"verdict": "looks_valid" | "looks_off" | "unclear", '
@@ -4200,8 +4226,9 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
             "IMPORTANT: \"reason\" must be your final conclusion stated directly, in under 15 "
             "words. Do NOT show step-by-step reasoning, do NOT reconsider or second-guess "
             "yourself in the output — decide once, then state the conclusion.\n\n"
-            "recipient_ok only matters for Jordan/CLIQ (see the note above on what to check) — "
-            "for every other payment method just set it to false, it's ignored. Likewise, "
+            "recipient_ok matters for Jordan/CLIQ and KSA (see the notes above on what to check "
+            "for each) — for every other payment method just set it to false, it's ignored. "
+            "Likewise, "
             "wallet_ok and crypto_currency only matter for Cryptocurrency payments — set "
             "wallet_ok to false and crypto_currency to null for every other payment method.\n\n"
             "Use \"looks_off\" if the total amount is meaningfully off (more than 1 unit of "
@@ -4252,7 +4279,7 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
         return None
 
 
-def _ai_verdict_label(verdict: dict) -> str:
+def _ai_verdict_label(verdict: dict, payment_method: str = None) -> str:
     icon = {"looks_valid": "✅", "looks_off": "⚠️", "unclear": "❓"}.get(verdict.get("verdict"), "❓")
     lines = [f"🤖 AI Check: {icon} {verdict.get('verdict', 'unclear').replace('_', ' ').title()}"]
     if verdict.get("total_amount"):
@@ -4261,6 +4288,8 @@ def _ai_verdict_label(verdict: dict) -> str:
         lines.append(f"   Currency: {verdict['crypto_currency']}")
     if "wallet_ok" in verdict and verdict.get("crypto_currency"):
         lines.append(f"   Wallet match: {'✅ yes' if verdict.get('wallet_ok') else '❌ no'}")
+    if payment_method in (NO_REFERENCE_REQUIRED_METHODS | METHODS_REQUIRING_RECIPIENT_NAME):
+        lines.append(f"   Recipient match: {'✅ yes' if verdict.get('recipient_ok') else '❌ no'}")
     refs = verdict.get("references") or []
     if refs:
         lines.append(f"   Reference(s): {', '.join(refs)}")
@@ -4302,7 +4331,7 @@ async def send_receipt_items_to_admin(context: ContextTypes.DEFAULT_TYPE, items:
 
 async def notify_admin_receipt(
     context: ContextTypes.DEFAULT_TYPE, order_row, receipt_items: list, payer_name: str = None,
-    ai_verdict: dict = None,
+    ai_verdict: dict = None, payment_method: str = None,
 ):
     order_id, user_id, username, items_json, total, status, created_at = order_row
     purchased_items = json.loads(items_json)
@@ -4318,7 +4347,7 @@ async def notify_admin_receipt(
         + "\n"
         + "\n".join(lines)
         + f"\n\nTotal: {CURRENCY}{total:.2f}\n\n"
-        + (f"{_ai_verdict_label(ai_verdict)}\n\n" if ai_verdict else "")
+        + (f"{_ai_verdict_label(ai_verdict, payment_method)}\n\n" if ai_verdict else "")
         + "Check the receipt, then confirm or reject below."
     )
     if ADMIN_CHAT_ID:
