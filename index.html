@@ -664,6 +664,29 @@ function copyCreds(event, panelId){
     if(btn){const orig=btn.textContent;btn.textContent='✅ Copied!';setTimeout(()=>btn.textContent=orig,1500);}
   });
 }
+function copyToClipboard(el, text){
+  const done=()=>{
+    if(!el) return;
+    const orig=el.textContent;
+    el.textContent='✅ Copied!';
+    setTimeout(()=>{el.textContent=orig;},1200);
+  };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(done).catch(()=>{
+      const ta=document.createElement('textarea');
+      ta.value=text; ta.style.position='fixed'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta);
+      done();
+    });
+  }else{
+    const ta=document.createElement('textarea');
+    ta.value=text; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+    done();
+  }
+}
 
 function pendAction(action, fid, oid){
   tg.sendData(JSON.stringify({action, fulfilment_id: fid, order_id: oid}));
@@ -891,7 +914,7 @@ function selMethod(id,total){
     det.innerHTML=`<div class="sl" style="margin-top:0">Select your country</div><div class="cg">${countries.map(c=>`<div class="cb" data-c="${c}" onclick="selCountryFn('${c}',${total})">${FLAGS[c]} ${c}</div>`).join('')}</div><div id="lclDtl"></div>`;
     sub.style.display='none';
   }else if(id==='crypto'){
-    det.innerHTML=`<div class="pdtl on"><strong>USDT BEP20:</strong><br><span class="mono">0x4ccff0e89e4ee00e96ae6e15e3b5e12fa0c66b20</span><br><br><strong>USDT TRC20:</strong><br><span class="mono">TBdXHpNMWsGDUTeTCBQkbJzamxvgW2hHyj</span><br><br><strong>BTC:</strong><br><span class="mono">bc1q2ccf4yzptwtdmnfdwuphvefmksy4ry2lylfhrj</span><br><br><strong>Bybit/OKX/BingX UID:</strong> <span class="mono">306834837</span><br><br>Amount: <strong>$${total.toFixed(2)}</strong></div>`;
+    det.innerHTML=`<div class="pdtl on"><strong>USDT BEP20:</strong><br><span class="mono copyable" onclick="copyToClipboard(this,'0xefbab9265bb3a22492e4a100c27791da385eeb37')">0xefbab9265bb3a22492e4a100c27791da385eeb37</span><br><br><strong>USDT TRC20:</strong><br><span class="mono copyable" onclick="copyToClipboard(this,'TM8JhfHfaxNgBRs3benrTkWAz6Zprk9QmF')">TM8JhfHfaxNgBRs3benrTkWAz6Zprk9QmF</span><br><br><strong>BTC:</strong><br><span class="mono copyable" onclick="copyToClipboard(this,'18rALgWKZZPMgGjVBCDBPgnnpdaj8rEQ2x')">18rALgWKZZPMgGjVBCDBPgnnpdaj8rEQ2x</span><br><br><strong>Bybit UID:</strong> <span class="mono copyable" onclick="copyToClipboard(this,'65577310')">65577310</span><br><strong>OKX UID:</strong> <span class="mono copyable" onclick="copyToClipboard(this,'847060953866125494')">847060953866125494</span><br><strong>BingX UID:</strong> <span class="mono copyable" onclick="copyToClipboard(this,'10276647')">10276647</span><br><br>(Tap any address/UID to copy)<br><br>Amount: <strong>$${total.toFixed(2)}</strong></div>`;
     sub.textContent="I've Paid ✅"; sub.style.display='block';
   }
 }
