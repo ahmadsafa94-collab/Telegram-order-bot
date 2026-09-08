@@ -395,7 +395,7 @@ CATALOG.forEach(c=>{
 
 // ── Payment data ──────────────────────────────────────────────────────
 const FLAGS={Lebanon:'🇱🇧',Jordan:'🇯🇴',India:'🇮🇳',Ghana:'🇬🇭',
-  Pakistan:'🇵🇰',Europe:'🇪🇺',USA:'🇺🇸',KSA:'🇸🇦',Russia:'🇷🇺'};
+  Pakistan:'🇵🇰',Europe:'🇪🇺',USA:'🇺🇸',KSA:'🇸🇦',Russia:'🇷🇺',Ethiopia:'🇪🇹'};
 
 function payInstr(c,t){
   const m={
@@ -472,6 +472,14 @@ function payInstr(c,t){
       5. Name: <strong>Alijon Karimov</strong><br>
       6. Amount: <strong>${Math.round(t*85.5).toLocaleString()} RUB</strong><br>
       Screenshot the confirmation.`,
+
+    Ethiopia:`
+      <strong>🏦 Bank Transfer — ${Math.round(t*176).toLocaleString()} ETB</strong><br>
+      Bank: <strong>Dashen Bank</strong><br>
+      Account: <span class="mono">2901711380911</span><br>
+      Name: <strong>Seid Ahmed Seid</strong><br><br>
+      Amount: <strong>${Math.round(t*176).toLocaleString()} ETB</strong><br>
+      Screenshot the receipt showing the transaction ID, amount, and name.`,
   };
   return m[c]||`Amount: <strong>$${t.toFixed(2)}</strong>`;
 }

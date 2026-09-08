@@ -464,11 +464,12 @@ PAYMENT_INSTRUCTIONS = (
 PAYMENT_LINK_BASE_URL = "https://payments.suyool.com/pay/g401_MD"
 
 # Countries offered under "Pay using local payment methods."
-LOCAL_PAYMENT_COUNTRIES = ["Lebanon", "Jordan", "India", "Ghana", "Pakistan", "Europe", "USA", "KSA", "Russia"]
+LOCAL_PAYMENT_COUNTRIES = ["Lebanon", "Jordan", "India", "Ghana", "Pakistan", "Europe", "USA", "KSA", "Russia", "Ethiopia"]
 
 COUNTRY_FLAGS = {
     "Lebanon": "🇱🇧", "Jordan": "🇯🇴", "India": "🇮🇳", "Ghana": "🇬🇭",
     "Pakistan": "🇵🇰", "Europe": "🇪🇺", "USA": "🇺🇸", "KSA": "🇸🇦", "Russia": "🇷🇺",
+    "Ethiopia": "🇪🇹",
 }
 
 # 1 USD in the local currency, and the currency code to display it in.
@@ -483,6 +484,7 @@ CURRENCY_RATES = {
     "USA": ("USD", 1),
     "KSA": ("SAR", 3.8),
     "Russia": ("RUB", 85.5),
+    "Ethiopia": ("ETB", 176),
 }
 
 # Payment methods where a unique transaction reference isn't realistic to
@@ -500,8 +502,9 @@ JORDAN_RECIPIENT_IDENTIFIERS = [
 # KSA (Al Rajhi) receipts DO normally show a reference number, so KSA
 # keeps the standard reference/amount checks — this is an ADDITIONAL
 # gate on top of those, not a replacement (unlike Jordan/CLIQ above).
-METHODS_REQUIRING_RECIPIENT_NAME = {"KSA"}
+METHODS_REQUIRING_RECIPIENT_NAME = {"KSA", "Ethiopia"}
 KSA_RECIPIENT_IDENTIFIERS = ["JAMEEL HEJJI", "JAMEEL HEJJI ALMIZRAQ", "HEJJI"]
+ETHIOPIA_RECIPIENT_IDENTIFIERS = ["SEID AHMED SEID", "SEID AHMED", "AHMED SEID", "SEID"]
 
 # Card payments routinely show a slightly higher charge than the order
 # total due to the processor's transaction fee — treat anything from the
@@ -611,6 +614,12 @@ LOCAL_PAYMENT_INSTRUCTIONS = {
         "Name: JAMEEL HEJJI ALMIZRAQ\n\n"
         "*Please make sure the purpose of the payment be Friends and family or "
         "personal NOT goods or services.*"
+    ),
+    "Ethiopia": (
+        "(Tap to copy)\n\n"
+        "`2901711380911`\n\n"
+        "Bank: Dashen Bank\n"
+        "Name: Seid Ahmed Seid"
     ),
     "Russia": (
         "1- Open the Sberbank app/website.\n"
@@ -4165,6 +4174,18 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
             "that likely means the customer paid someone else by mistake."
             if payment_method == "KSA" else ""
         )
+        ethiopia_note = (
+            " This is an Ethiopia (Dashen Bank) payment. In ADDITION to the normal amount and "
+            "transaction reference checks, the receipt's recipient/beneficiary name MUST match "
+            f"one of these: {', '.join(ETHIOPIA_RECIPIENT_IDENTIFIERS)}. Matching rules: "
+            "case-insensitive; any part of the name appearing (e.g. \"Seid\" or \"Ahmed Seid\") "
+            "is enough on its own; minor spelling variants are fine. Set \"recipient_ok\" to true "
+            "only if the recipient name reasonably matches one of these; false if it's a different "
+            "name entirely or not visible. A receipt with the right amount and reference but the "
+            "WRONG recipient name must NOT be looks_valid — that likely means the customer paid "
+            "someone else by mistake."
+            if payment_method == "Ethiopia" else ""
+        )
         card_note = (
             f" This is a card payment. It's normal for the charged amount to be "
             f"${CARD_FEE_ALLOWANCE:.0f} or so HIGHER than the required total due to the "
@@ -4227,7 +4248,7 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
             f"(e.g. 53.00 vs 52.99, or 1893 vs 1893.33) is ALWAYS a normal rounding/display "
             f"difference — treat it as a match immediately, do not deliberate about it, do not "
             f"mention it as a concern. Only a difference bigger than that actually matters.{multi_note}"
-            f"{india_note}{jordan_note}{ksa_note}{card_note}{crypto_note} "
+            f"{india_note}{jordan_note}{ksa_note}{ethiopia_note}{card_note}{crypto_note} "
             f"{reference_requirement}\n\n"
             "Look at the image(s)/document(s) and respond with ONLY a JSON object, no other text:\n"
             '{"verdict": "looks_valid" | "looks_off" | "unclear", '
@@ -4240,9 +4261,9 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
             "IMPORTANT: \"reason\" must be your final conclusion stated directly, in under 15 "
             "words. Do NOT show step-by-step reasoning, do NOT reconsider or second-guess "
             "yourself in the output — decide once, then state the conclusion.\n\n"
-            "recipient_ok matters for Jordan/CLIQ and KSA (see the notes above on what to check "
-            "for each) — for every other payment method just set it to false, it's ignored. "
-            "Likewise, "
+            "recipient_ok matters for Jordan/CLIQ, KSA, and Ethiopia (see the notes above on what "
+            "to check for each) — for every other payment method just set it to false, it's "
+            "ignored. Likewise, "
             "wallet_ok and crypto_currency only matter for Cryptocurrency payments — set "
             "wallet_ok to false and crypto_currency to null for every other payment method.\n\n"
             "Use \"looks_off\" if the total amount is meaningfully off (more than 1 unit of "
