@@ -570,7 +570,9 @@ LOCAL_PAYMENT_INSTRUCTIONS = {
     ),
     "Jordan": (
         "Tap on one of the cliq IDs below to copy:\n\n"
-        "CLIQ ALIAS: `WKS777`\n(Orange Money)\nWALEED SHAQFEH\n\n"
+        # Orange Money (WKS777) temporarily removed — re-add this line
+        # when it's back:
+        # "CLIQ ALIAS: `WKS777`\n(Orange Money)\nWALEED SHAQFEH\n\n"
         "CLIQ ALIAS: `WKS999`\n(Etihad bank)\nWALEED SHAQFEH\n\n"
         "CLIQ ALIAS: `WKS555`\n(Zain Cash)\nMohammad shamalti"
     ),
