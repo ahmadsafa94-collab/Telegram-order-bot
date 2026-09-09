@@ -920,14 +920,21 @@ function applyDiscountCode(){
   const raw=(document.getElementById('discountInput').value||'').trim().toUpperCase();
   const msg=document.getElementById('discountMsg');
   if(!raw){ msg.textContent=''; return; }
+  // Always send the code the customer typed — the server does the real,
+  // authoritative check at submission time regardless. This local lookup
+  // is a snapshot from when the Mini App was last opened, so a code
+  // created *after* that (e.g. moments ago) wouldn't be in it yet even
+  // though it's genuinely valid — never let a stale local cache silently
+  // block a real code from ever reaching the server.
+  appliedDiscountCode=raw;
   if(DISCOUNT_CODES[raw]!=null){
-    appliedDiscountCode=raw; appliedDiscountPct=DISCOUNT_CODES[raw];
+    appliedDiscountPct=DISCOUNT_CODES[raw];
     msg.style.color='#4ade80';
     msg.textContent=`✅ ${appliedDiscountPct}% off applied!`;
   }else{
-    appliedDiscountCode=''; appliedDiscountPct=0;
-    msg.style.color='#f87171';
-    msg.textContent='❌ Invalid or expired code.';
+    appliedDiscountPct=0;
+    msg.style.color='#fbbf24';
+    msg.textContent="⏳ Code entered — we'll verify it when you place the order.";
   }
   buildPaymentPage();
 }
