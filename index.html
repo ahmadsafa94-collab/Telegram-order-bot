@@ -115,13 +115,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .ferr{font-size:11px;color:var(--red);margin-top:3px;display:none}
 
 /* ── Payment ─────────────────── */
-.pm-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.pm-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px}
 .pm{background:var(--bg2);border:2px solid rgba(255,255,255,.08);border-radius:var(--r);
-  padding:13px 9px;text-align:center;cursor:pointer;transition:all .15s}
+  padding:9px 7px;text-align:center;cursor:pointer;transition:all .15s}
 .pm.sel{border-color:var(--acc);background:rgba(59,130,246,.08)}
-.pm .ico{font-size:17px;margin-bottom:5px}
-.pm .lbl{font-size:11px;font-weight:600}
-.pm .sub{font-size:10px;color:var(--hint);margin-top:1px}
+.pm .ico{font-size:14px;margin-bottom:3px}
+.pm .lbl{font-size:10px;font-weight:600}
+.pm .sub{font-size:9px;color:var(--hint);margin-top:1px}
 .pdtl{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);
   padding:13px;margin-bottom:10px;line-height:1.8;font-size:12px;display:none}
 .pdtl.on{display:block}
@@ -281,10 +281,23 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     <div id="discountMsg" style="font-size:12px;margin-top:6px"></div>
   </div>
   <div class="pm-grid" id="pmGrid"></div>
-  <div id="pmDetail"></div>
   <div class="card" id="sumCard" style="margin-bottom:12px"></div>
-  <button class="btn" id="submitBtn" style="display:none" onclick="submitOrder()">Place Order</button>
   <button class="btn sec" onclick="goDetails()">← Back</button>
+</div>
+
+<!-- Payment method detail sheet — opens immediately on selecting a
+     method, so the instructions and Place Order button are always right
+     there regardless of where the grid was scrolled to. -->
+<div class="overlay" id="pmDetailOverlay" onclick="if(event.target===this)closePmDetail()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="pmDetailTitle">Payment Details</div>
+    <div style="padding:13px 15px 0" id="pmDetail"></div>
+    <div style="padding:13px 15px 0">
+      <button class="btn" id="submitBtn" style="display:none" onclick="submitOrder()">Place Order</button>
+      <button class="btn sec" onclick="closePmDetail()">← Choose a different method</button>
+    </div>
+  </div>
 </div>
 
 <!-- Basket sheet -->
@@ -953,6 +966,8 @@ function buildPaymentPage(){
   document.getElementById('pmDetail').innerHTML='';
   document.getElementById('sumCard').innerHTML='';
   document.getElementById('submitBtn').style.display='none';
+  const _ov=document.getElementById('pmDetailOverlay');
+  if(_ov) _ov.classList.remove('on');
   selPay=null; selCountry=null; selApp=null;
   const pmGrid=document.getElementById('pmGrid');
   const addSectionLabel=(text)=>{
@@ -1045,6 +1060,17 @@ function selMethod(id,total){
     det.innerHTML=`<div class="pdtl on">${USA_APPS[appName]||''}<br><br>Amount: <strong>$${total.toFixed(2)}</strong></div>`;
     sub.textContent="I've Paid ✅"; sub.style.display='block';
   }
+  const TITLES={stars:'⭐ Telegram Stars',credits:'🎁 My Credits',card:'💳 Visa/Mastercard',
+    crypto:'₿ Cryptocurrency',country_missing:'🌐 Select Your Country'};
+  const title=TITLES[id]||(id.startsWith('app:')?id.slice(4):id.startsWith('country:')?id.slice(8):'Payment Details');
+  openPmDetail(title);
+}
+function openPmDetail(title){
+  document.getElementById('pmDetailTitle').textContent=title;
+  document.getElementById('pmDetailOverlay').classList.add('on');
+}
+function closePmDetail(){
+  document.getElementById('pmDetailOverlay').classList.remove('on');
 }
 function selOtherCountry(c){
   document.querySelectorAll('[data-oc]').forEach(b=>b.classList.toggle('sel',b.dataset.oc===c));
@@ -1056,9 +1082,9 @@ const OTHER_COUNTRIES=[
   "Afghanistan","Algeria","Argentina","Armenia","Australia","Austria",
   "Azerbaijan","Bahrain","Bangladesh","Belgium","Brazil","Canada",
   "China","Colombia","Denmark","Egypt","Finland","France","Georgia",
-  "Germany","Greece","Indonesia","Iraq","Ireland","Israel","Italy",
+  "Germany","Greece","Indonesia","Iraq","Ireland","Italy",
   "Japan","Kazakhstan","Kenya","Kuwait","Libya","Malaysia","Mexico",
-  "Morocco","Netherlands","Nigeria","Norway","Oman","Philippines",
+  "Morocco","Netherlands","Nigeria","Norway","Oman","Palestine","Philippines",
   "Poland","Portugal","Qatar","Romania","Singapore","South Africa",
   "South Korea","Spain","Sri Lanka","Sudan","Sweden","Switzerland",
   "Syria","Thailand","Tunisia","Turkey","UAE","Uganda","Ukraine",
