@@ -395,7 +395,7 @@ CATALOG.forEach(c=>{
 
 // ── Payment data ──────────────────────────────────────────────────────
 const FLAGS={Lebanon:'🇱🇧',Jordan:'🇯🇴',India:'🇮🇳',Ghana:'🇬🇭',
-  Pakistan:'🇵🇰',Europe:'🇪🇺',USA:'🇺🇸',KSA:'🇸🇦',Russia:'🇷🇺',Ethiopia:'🇪🇹'};
+  Pakistan:'🇵🇰',Europe:'🇪🇺',KSA:'🇸🇦',Russia:'🇷🇺',Ethiopia:'🇪🇹'};
 
 function payInstr(c,t){
   const m={
@@ -605,9 +605,10 @@ function renderOrders(){
     });
   }
 
-  // ── Pending subscriptions ────────────────────────────────
+  // ── Pending subscriptions — split into "not paid yet" vs "paid,
+  // not delivered yet" (5th tuple element: unpaid boolean) since these
+  // need completely different next steps (pay vs. just wait). ─────────
   if(p.length){
-    html+=`<div class="sub-section-lbl">⏳ Pending (${p.length})</div>`;
     const stateInfo={
       needs_info: {
         icon:'⌛', label:'Action needed: fill in your details',
@@ -621,9 +622,9 @@ function renderOrders(){
         icon:'🔄', label:'Being prepared by our team', btn:null
       },
     };
-    p.forEach(([name,state,fid,oid])=>{
+    const renderPendRow=([name,state,fid,oid])=>{
       const info=stateInfo[state]||{icon:'⏳',label:'In progress',btn:null};
-      html+=`
+      return `
         <div class="sub-row no-tap" style="flex-direction:column;gap:0;padding:0">
           <div style="display:flex;align-items:flex-start;gap:10px;padding:11px 15px;width:100%">
             <div class="sub-icon">${info.icon}</div>
@@ -635,7 +636,20 @@ function renderOrders(){
           ${info.btn?`<button class="pend-action ${info.cls||''}"
             onclick="pendAction('${info.action}',${fid||0},${oid||0})">${info.btn}</button>`:''}
         </div>`;
-    });
+    };
+    const unpaidItems=p.filter(row=>row[4]);
+    const undeliveredItems=p.filter(row=>!row[4]);
+
+    if(unpaidItems.length){
+      html+=`<div class="sub-section-lbl">💳 Not Paid Yet (${unpaidItems.length})</div>`;
+      unpaidItems.forEach(row=>{ html+=renderPendRow(row); });
+      html+=`<button class="pend-action" style="background:#dc2626;margin:8px 15px 4px"
+        onclick="clearUnpaidOrders()">🗑 Clear Unpaid Pending Orders</button>`;
+    }
+    if(undeliveredItems.length){
+      html+=`<div class="sub-section-lbl">🔄 Paid — Not Delivered Yet (${undeliveredItems.length})</div>`;
+      undeliveredItems.forEach(row=>{ html+=renderPendRow(row); });
+    }
   }
 
   if(!html){
@@ -699,6 +713,10 @@ function copyToClipboard(el, text){
 
 function pendAction(action, fid, oid){
   tg.sendData(JSON.stringify({action, fulfilment_id: fid, order_id: oid}));
+}
+
+function clearUnpaidOrders(){
+  tg.sendData(JSON.stringify({action:'clear_unpaid'}));
 }
 
 function escHtml(str){
@@ -887,16 +905,36 @@ function buildPaymentPage(){
   document.getElementById('sumCard').innerHTML='';
   document.getElementById('submitBtn').style.display='none';
   selPay=null; selCountry=null; selApp=null;
+  const pmGrid=document.getElementById('pmGrid');
+  const addSectionLabel=(text)=>{
+    const lbl=document.createElement('div');
+    lbl.style.cssText='grid-column:1/-1;font-size:12px;font-weight:700;color:var(--hint);margin:8px 2px 2px;text-transform:uppercase;letter-spacing:.03em';
+    lbl.textContent=text;
+    pmGrid.appendChild(lbl);
+  };
+  addSectionLabel('🌍 Pay using international methods');
   [{id:'stars',ico:'⭐',lbl:'Telegram Stars',sub:'Pay with Stars'},
-   {id:'credits',ico:'🎁',lbl:'My Credits',sub:'Use earned credits'},
    {id:'card',ico:'💳',lbl:'Visa/Mastercard',sub:'Pay online'},
-   {id:'local',ico:'🌍',lbl:'Local Transfer',sub:'9 countries'},
    {id:'crypto',ico:'₿',lbl:'Cryptocurrency',sub:'USDT, BTC, more'},
+   {id:'app:Remitly',ico:'💸',lbl:'Remitly',sub:'Money transfer'},
+   {id:'app:Ria',ico:'🏦',lbl:'Ria',sub:'Money transfer'},
+   {id:'app:Paysend',ico:'📨',lbl:'Paysend',sub:'Money transfer'},
+   {id:'app:Revolut',ico:'🔄',lbl:'Revolut',sub:'Card transfer'},
+   {id:'app:TapTap Send',ico:'📲',lbl:'TapTap Send',sub:'Money transfer'},
   ].forEach(m=>{
     const d=document.createElement('div'); d.className='pm'; d.dataset.id=m.id;
     d.innerHTML=`<div class="ico">${m.ico}</div><div class="lbl">${m.lbl}</div><div class="sub">${m.sub}</div>`;
     d.onclick=()=>selMethod(m.id,total);
-    document.getElementById('pmGrid').appendChild(d);
+    pmGrid.appendChild(d);
+  });
+  addSectionLabel('💱 Pay in your own currency');
+  [{id:'local',ico:'🌍',lbl:'Local Transfer',sub:`${Object.keys(FLAGS).length} countries`},
+   {id:'credits',ico:'🎁',lbl:'My Credits',sub:'Use earned credits'},
+  ].forEach(m=>{
+    const d=document.createElement('div'); d.className='pm'; d.dataset.id=m.id;
+    d.innerHTML=`<div class="ico">${m.ico}</div><div class="lbl">${m.lbl}</div><div class="sub">${m.sub}</div>`;
+    d.onclick=()=>selMethod(m.id,total);
+    pmGrid.appendChild(d);
   });
   const sc=document.getElementById('sumCard');
   sc.innerHTML=Object.entries(cart).map(([id,{name,price,qty}])=>
@@ -920,32 +958,48 @@ function selMethod(id,total){
     sub.textContent="I've Paid ✅"; sub.style.display='block';
   }else if(id==='local'){
     const countries=Object.keys(FLAGS);
-    det.innerHTML=`<div class="sl" style="margin-top:0">Select your country</div><div class="cg">${countries.map(c=>`<div class="cb" data-c="${c}" onclick="selCountryFn('${c}',${total})">${FLAGS[c]} ${c}</div>`).join('')}</div><div id="lclDtl"></div>`;
+    det.innerHTML=`<div class="sl" style="margin-top:0">Select your country</div><div class="cg">${countries.map(c=>`<div class="cb" data-c="${c}" onclick="selCountryFn('${c}',${total})">${FLAGS[c]} ${c}</div>`).join('')}<div class="cb" onclick="selCountryMissing(${total})">🌐 My Country is not Mentioned</div></div><div id="lclDtl"></div>`;
     sub.style.display='none';
   }else if(id==='crypto'){
     det.innerHTML=`<div class="pdtl on"><strong>USDT BEP20:</strong><br><span class="mono copyable" onclick="copyToClipboard(this,'0xefbab9265bb3a22492e4a100c27791da385eeb37')">0xefbab9265bb3a22492e4a100c27791da385eeb37</span><br><br><strong>USDT TRC20:</strong><br><span class="mono copyable" onclick="copyToClipboard(this,'TM8JhfHfaxNgBRs3benrTkWAz6Zprk9QmF')">TM8JhfHfaxNgBRs3benrTkWAz6Zprk9QmF</span><br><br><strong>BTC:</strong><br><span class="mono copyable" onclick="copyToClipboard(this,'18rALgWKZZPMgGjVBCDBPgnnpdaj8rEQ2x')">18rALgWKZZPMgGjVBCDBPgnnpdaj8rEQ2x</span><br><br><strong>Bybit UID:</strong> <span class="mono copyable" onclick="copyToClipboard(this,'65577310')">65577310</span><br><strong>OKX UID:</strong> <span class="mono copyable" onclick="copyToClipboard(this,'847060953866125494')">847060953866125494</span><br><strong>BingX UID:</strong> <span class="mono copyable" onclick="copyToClipboard(this,'10276647')">10276647</span><br><br>(Tap any address/UID to copy)<br><br>Amount: <strong>$${total.toFixed(2)}</strong></div>`;
     sub.textContent="I've Paid ✅"; sub.style.display='block';
+  }else if(id.startsWith('app:')){
+    const appName=id.slice(4);
+    det.innerHTML=`<div class="pdtl on">${USA_APPS[appName]||''}<br><br>Amount: <strong>$${total.toFixed(2)}</strong></div>`;
+    sub.textContent="I've Paid ✅"; sub.style.display='block';
   }
+}
+function selCountryMissing(total){
+  document.querySelectorAll('.cb').forEach(b=>b.classList.remove('sel'));
+  const det=document.getElementById('lclDtl');
+  det.innerHTML=`<div class="sl">Select your country</div><div class="cg">${OTHER_COUNTRIES.map(c=>`<div class="cb" data-oc="${c}" onclick="selOtherCountry('${c}')">${c}</div>`).join('')}</div><div id="ocDtl"></div>`;
+  document.getElementById('submitBtn').style.display='none';
+}
+function selOtherCountry(c){
+  document.querySelectorAll('[data-oc]').forEach(b=>b.classList.toggle('sel',b.dataset.oc===c));
+  const msg=encodeURIComponent(`I am from ${c}, how can I pay?`);
+  document.getElementById('ocDtl').innerHTML=`<div class="pdtl on">We don't have automated payment instructions for ${c} yet — message the admin directly, your message is ready to send:<br><br><a href="https://t.me/uptodate_admin?text=${msg}" target="_blank" style="color:var(--teal2);font-weight:700">💬 Message Admin ↗</a></div>`;
+  document.getElementById('submitBtn').style.display='none';
 }
 function selCountryFn(c,total){
   selCountry=c; selApp=null;
   document.querySelectorAll('.cb').forEach(b=>b.classList.toggle('sel',b.dataset&&b.dataset.c===c));
   const det=document.getElementById('lclDtl');
-  if(c==='USA'){
-    det.innerHTML=`<div class="sl">Choose app</div><div class="cg">${Object.keys(USA_APPS).map(a=>`<div class="cb" data-a="${a}" onclick="selAppFn('${a}')">${a}</div>`).join('')}</div><div id="appDtl"></div>`;
-    document.getElementById('submitBtn').style.display='none';
-  }else{
-    det.innerHTML=`<div class="pdtl on">${payInstr(c,total)}</div>`;
-    const sub=document.getElementById('submitBtn'); sub.textContent="I've Paid ✅"; sub.style.display='block';
-  }
-}
-function selAppFn(a){
-  selApp=a;
-  document.querySelectorAll('[data-a]').forEach(b=>b.classList.toggle('sel',b.dataset.a===a));
-  const total=cartTotal();
-  document.getElementById('appDtl').innerHTML=`<div class="pdtl on">${USA_APPS[a]||''}<br><br>Amount: <strong>$${total.toFixed(2)}</strong></div>`;
+  det.innerHTML=`<div class="pdtl on">${payInstr(c,total)}</div>`;
   const sub=document.getElementById('submitBtn'); sub.textContent="I've Paid ✅"; sub.style.display='block';
 }
+const OTHER_COUNTRIES=[
+  "Afghanistan","Algeria","Argentina","Armenia","Australia","Austria",
+  "Azerbaijan","Bahrain","Bangladesh","Belgium","Brazil","Canada",
+  "China","Colombia","Denmark","Egypt","Finland","France","Georgia",
+  "Germany","Greece","Indonesia","Iraq","Ireland","Israel","Italy",
+  "Japan","Kazakhstan","Kenya","Kuwait","Libya","Malaysia","Mexico",
+  "Morocco","Netherlands","Nigeria","Norway","Oman","Philippines",
+  "Poland","Portugal","Qatar","Romania","Singapore","South Africa",
+  "South Korea","Spain","Sri Lanka","Sudan","Sweden","Switzerland",
+  "Syria","Thailand","Tunisia","Turkey","UAE","Uganda","Ukraine",
+  "United Kingdom","Uzbekistan","Vietnam","Yemen",
+];
 
 // ── Submit order ──────────────────────────────────────────────────────
 function collectDetails(){
@@ -963,9 +1017,9 @@ function collectDetails(){
 function submitOrder(){
   if(!selPay){showToast('Choose a payment method');return;}
   if(selPay==='local'&&!selCountry){showToast('Choose your country');return;}
-  if(selPay==='local'&&selCountry==='USA'&&!selApp){showToast('Choose a transfer app');return;}
   let pay=selPay;
-  if(selPay==='local') pay=selCountry+(selApp?' — '+selApp:'');
+  if(selPay==='local') pay=selCountry;
+  else if(selPay.startsWith('app:')) pay=selPay.slice(4);
   tg.sendData(JSON.stringify({action:'full_order',items:collectDetails(),payment_method:pay,total:cartTotal()}));
 }
 

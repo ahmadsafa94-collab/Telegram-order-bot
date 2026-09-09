@@ -464,7 +464,7 @@ PAYMENT_INSTRUCTIONS = (
 PAYMENT_LINK_BASE_URL = "https://payments.suyool.com/pay/g401_MD"
 
 # Countries offered under "Pay using local payment methods."
-LOCAL_PAYMENT_COUNTRIES = ["Lebanon", "Jordan", "India", "Ghana", "Pakistan", "Europe", "USA", "KSA", "Russia", "Ethiopia"]
+LOCAL_PAYMENT_COUNTRIES = ["Lebanon", "Jordan", "India", "Ghana", "Pakistan", "Europe", "KSA", "Russia", "Ethiopia"]
 
 COUNTRY_FLAGS = {
     "Lebanon": "🇱🇧", "Jordan": "🇯🇴", "India": "🇮🇳", "Ghana": "🇬🇭",
@@ -1115,11 +1115,13 @@ def db_order_undelivered_items(order_id: int):
 
 
 def db_user_pending_items(user_id: int):
-    """Units this customer has paid for that aren't delivered yet.
-    Returns (fulfilment_id, order_id, item_id, unit_no, state)."""
+    """Units this customer has an order for that aren't delivered yet.
+    Returns (fulfilment_id, order_id, item_id, unit_no, state, order_status)
+    — order_status lets callers split 'not paid yet' from 'paid, not
+    delivered yet' instead of lumping both under one vague 'pending'."""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state FROM fulfilment f "
+        "SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state, o.status FROM fulfilment f "
         "JOIN orders o ON o.id = f.order_id "
         "WHERE f.user_id = ? AND f.state != 'delivered' "
         "AND o.status NOT IN ('cancelled', 'rejected') "
@@ -1128,6 +1130,27 @@ def db_user_pending_items(user_id: int):
     ).fetchall()
     conn.close()
     return rows
+
+
+UNPAID_ORDER_STATUSES = {"awaiting_payment", "awaiting_receipt", "awaiting_confirmation"}
+
+
+def db_cancel_unpaid_orders(user_id: int) -> int:
+    """Cancels every one of this customer's orders that hasn't been paid
+    yet (still awaiting payment/receipt/confirmation) — used by the
+    'Clear unpaid pending orders' button. Returns how many were cancelled.
+    Never touches an order that's already paid, regardless of delivery
+    state — only the unpaid ones are safe to just wipe out."""
+    conn = sqlite3.connect(DB_PATH)
+    placeholders = ",".join("?" for _ in UNPAID_ORDER_STATUSES)
+    cur = conn.execute(
+        f"UPDATE orders SET status = 'cancelled' WHERE user_id = ? AND status IN ({placeholders})",
+        (user_id, *UNPAID_ORDER_STATUSES),
+    )
+    conn.commit()
+    count = cur.rowcount
+    conn.close()
+    return count
 
 
 def db_rejected_orders():
@@ -2093,38 +2116,40 @@ BASKET_LABEL = "🧺 Check the Basket and Pay"
 ANNOUNCEMENTS_LABEL = "📢 Announcements"
 JOIN_CHANNEL_LABEL = "📡 Join Channel"
 TICKET_LABEL = "🎫 Send a Ticket"
-IMD_SEARCH_LABEL = "🔬 Search iMD Resources"
+IMD_SEARCH_LABEL = "🔬 What does iMD include?"
 GET_FREE_LABEL = "🎁 Get Free Accounts"
 MY_CREDITS_LABEL = "💳 My Credits"
 BOOK_REQUEST_LABEL = "📚 Request a Book"
 SUPPORT_LABEL = "🆘 Support"
 
 # Admin-only panel labels.
-A_VIEW_SERIALS = "🔑 View Serials"
-A_ADD_SERIALS = "➕ Add Serials"
-A_REMOVE_SERIAL = "🗑 Remove Serial"
-A_RECENT_ORDERS = "📊 Recent Orders"
-A_PENDING = "⏳ Pending Orders"
+A_SERIALS = "🔑 Serials"
+A_ORDERS = "📦 Orders"
 A_INPUT = "📈 Input"
 A_INBOX = "📥 Inbox"
 A_BROADCAST = "📢 Broadcast"
-A_FIND_ORDER = "🔎 Find Order"
 A_FIND_CUSTOMER = "👤 Find Customer"
 A_STOCK = "📦 Manage Stock"
 A_TICKETS = "🎫 Tickets"
 A_CREDITS = "💳 Customer Credits"
 A_ADD_SUBSCRIPTION = "➕ Add New Subscription"
 A_BOOK_REQUESTS = "📚 Book Requests"
-A_DELIVERED = "📦 Delivered Subscriptions"
 A_IMD_CATALOG = "🔬 Update iMD Catalog"
 A_CUSTOMER_VIEW = "🛍 Customer Menu"
 A_BACKUP = "🗄 Backup"
 
+# Kept as internal labels for the Orders submenu buttons — no longer
+# top-level keyboard buttons, but still used as inline button text and
+# to route to their existing, unchanged handler functions.
+A_RECENT_ORDERS = "📊 Recent Orders"
+A_PENDING = "⏳ Pending Orders"
+A_FIND_ORDER = "🔎 Find Order"
+A_DELIVERED = "📦 Delivered Subscriptions"
+
 ADMIN_LABELS = [
-    A_VIEW_SERIALS, A_ADD_SERIALS, A_REMOVE_SERIAL,
-    A_RECENT_ORDERS, A_PENDING, A_INPUT, A_INBOX, A_BROADCAST,
-    A_FIND_ORDER, A_FIND_CUSTOMER, A_STOCK, A_TICKETS, A_CREDITS,
-    A_ADD_SUBSCRIPTION, A_BOOK_REQUESTS, A_DELIVERED, A_IMD_CATALOG, A_CUSTOMER_VIEW,
+    A_SERIALS, A_ORDERS, A_INPUT, A_INBOX, A_BROADCAST,
+    A_FIND_CUSTOMER, A_STOCK, A_TICKETS, A_CREDITS,
+    A_ADD_SUBSCRIPTION, A_BOOK_REQUESTS, A_IMD_CATALOG, A_CUSTOMER_VIEW,
     A_BACKUP,
 ]
 
@@ -2221,9 +2246,12 @@ def _shop_url(user_id: int = 0) -> str:
             # If the ORDER is awaiting a receipt, show that regardless of
             # what the fulfilment row says (Mini App pre-stores credentials
             # and sets awaiting_delivery, but receipt still hasn't arrived).
+            # 5th element: whether this order hasn't been paid yet at all —
+            # lets the Mini App split "not paid" from "paid, not delivered"
+            # instead of lumping both into one vague "pending" bucket.
             [MENU.get(iid, (iid,))[0],
              "awaiting_receipt" if ostatus == "awaiting_receipt" else fstate,
-             fid, oid]
+             fid, oid, ostatus in UNPAID_ORDER_STATUSES]
             for fid, oid, iid, fstate, ostatus in pend_rows
         ]
         # Custom items — exclude out-of-stock ones so the Mini App catalog
@@ -2288,23 +2316,20 @@ def main_menu_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
 
 
 def admin_menu_keyboard() -> ReplyKeyboardMarkup:
-    """The admin's persistent panel. Badges Pending Orders, Inbox, and
-    Tickets with live counts whenever there's something waiting — the
+    """The admin's persistent panel. Badges Orders (pending count), Inbox,
+    and Tickets with live counts whenever there's something waiting — the
     keyboard is rebuilt on demand so the count is always current."""
     pending = db_pending_order_count()
     inbox   = db_unread_inbox_count()
     tickets = db_unresolved_ticket_count()
     return ReplyKeyboardMarkup(
         [
-            [A_VIEW_SERIALS, A_ADD_SERIALS],
-            [A_REMOVE_SERIAL, A_RECENT_ORDERS],
-            [_badge(A_PENDING, pending), A_INPUT],
-            [_badge(A_INBOX, inbox), A_BROADCAST],
-            [A_FIND_ORDER, A_FIND_CUSTOMER],
+            [A_SERIALS, _badge(A_ORDERS, pending)],
+            [A_INPUT, _badge(A_INBOX, inbox)],
+            [A_BROADCAST, A_FIND_CUSTOMER],
             [A_STOCK, _badge(A_TICKETS, tickets)],
             [A_CREDITS, A_ADD_SUBSCRIPTION],
             [A_BOOK_REQUESTS],
-            [A_DELIVERED],
             [A_IMD_CATALOG],
             [A_CUSTOMER_VIEW, A_BACKUP],
         ],
@@ -2484,19 +2509,49 @@ def subscriptions_keyboard(user_id: int):
 
 
 def pending_keyboard(user_id: int):
-    """One button per ordered-but-undelivered item."""
+    """One button per ordered-but-undelivered item, split into two
+    sections: not paid yet vs. paid but not delivered yet — a bare
+    'pending' bucket that mixes both is confusing (very different next
+    steps: pay, or just wait)."""
     rows = db_user_pending_items(user_id)
     if not rows:
         return None
-    buttons = []
-    for fid, order_id, item_id, unit_no, state in rows:
+    unpaid_buttons, undelivered_buttons = [], []
+    for fid, order_id, item_id, unit_no, state, order_status in rows:
         name = MENU.get(item_id, (item_id,))[0]
         suffix = f" #{unit_no}" if unit_no > 1 else ""
-        buttons.append(
-            [InlineKeyboardButton(f"#{order_id} — {name}{suffix}"[:60], callback_data=f"pend:{fid}")]
-        )
+        btn = InlineKeyboardButton(f"#{order_id} — {name}{suffix}"[:60], callback_data=f"pend:{fid}")
+        if order_status in UNPAID_ORDER_STATUSES:
+            unpaid_buttons.append([btn])
+        else:
+            undelivered_buttons.append([btn])
+
+    buttons = []
+    if unpaid_buttons:
+        buttons.extend(unpaid_buttons)
+        buttons.append([InlineKeyboardButton("🗑 Clear unpaid pending orders", callback_data="clear_unpaid")])
+    if undelivered_buttons:
+        buttons.extend(undelivered_buttons)
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="subs_menu")])
     return InlineKeyboardMarkup(buttons)
+
+
+async def clear_unpaid_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'🗑 Clear unpaid pending orders' — cancels every order this customer
+    hasn't paid for yet, then refreshes the pending list in place."""
+    query = update.callback_query
+    await query.answer()
+    count = db_cancel_unpaid_orders(query.from_user.id)
+
+    keyboard = pending_keyboard(query.from_user.id)
+    text = (
+        f"🗑 Cleared {count} unpaid order{'s' if count != 1 else ''}."
+        if count else "You had no unpaid pending orders to clear."
+    )
+    if keyboard:
+        await query.edit_message_text(f"{text}\n\n⏳ Your remaining pending orders:", reply_markup=keyboard)
+    else:
+        await query.edit_message_text(f"{text}\n\nYou have no pending orders.")
 
 
 def announcements_keyboard():
@@ -3406,15 +3461,29 @@ def checkout_view(order_id: int):
     )
 
     buttons = [
+        [InlineKeyboardButton("── 🌍 Pay using international methods ──", callback_data="noop")],
         [InlineKeyboardButton("⭐ Pay with Telegram Stars", callback_data=f"pay_stars:{order_id}")],
         [InlineKeyboardButton("💳 Pay using Visa/Mastercard", callback_data=f"pay_card:{order_id}")],
-        [InlineKeyboardButton("🌍 Pay using local payment methods", callback_data=f"local_pay:{order_id}")],
         [InlineKeyboardButton("₿ Pay with Cryptocurrency", callback_data=f"pay_crypto:{order_id}")],
+        [InlineKeyboardButton("💸 Remitly", callback_data=f"usa_app:{order_id}:Remitly")],
+        [InlineKeyboardButton("🏦 Ria", callback_data=f"usa_app:{order_id}:Ria")],
+        [InlineKeyboardButton("📨 Paysend", callback_data=f"usa_app:{order_id}:Paysend")],
+        [InlineKeyboardButton("🔄 Revolut", callback_data=f"usa_app:{order_id}:Revolut")],
+        [InlineKeyboardButton("📲 TapTap Send", callback_data=f"usa_app:{order_id}:TapTap Send")],
+        [InlineKeyboardButton("── 💱 Pay in your own currency ──", callback_data="noop")],
+        [InlineKeyboardButton("🌍 Pay using local payment methods", callback_data=f"local_pay:{order_id}")],
         [InlineKeyboardButton("🎁 Pay using my own Credits", callback_data=f"pay_credits:{order_id}")],
         [InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")],
         [InlineKeyboardButton("✖️ Cancel order", callback_data=f"cancel:{order_id}")],
     ]
     return text, InlineKeyboardMarkup(buttons)
+
+
+async def noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pseudo section-header buttons in checkout_view — Telegram inline
+    keyboards have no real divider/label element, so a button with no
+    action is the standard workaround. Just clears the loading spinner."""
+    await update.callback_query.answer()
 
 
 async def start_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3452,11 +3521,74 @@ async def local_pay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             for country in pair
         ])
+    rows.append([InlineKeyboardButton("🌐 My Country is not Mentioned", callback_data=f"country_missing:{order_id}")])
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"back_to_checkout:{order_id}")])
 
     await query.edit_message_text(
         "Which country are you paying from?",
         reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+# A broad list for "My Country is not Mentioned" — deliberately much wider
+# than LOCAL_PAYMENT_COUNTRIES (which only has countries we have specific
+# payment instructions for). Picking one just opens a chat with admin with
+# a ready-made message, nothing automated happens after that.
+OTHER_COUNTRIES = [
+    "Afghanistan", "Algeria", "Argentina", "Armenia", "Australia", "Austria",
+    "Azerbaijan", "Bahrain", "Bangladesh", "Belgium", "Brazil", "Canada",
+    "China", "Colombia", "Denmark", "Egypt", "Finland", "France", "Georgia",
+    "Germany", "Greece", "Indonesia", "Iraq", "Ireland", "Israel", "Italy",
+    "Japan", "Kazakhstan", "Kenya", "Kuwait", "Libya", "Malaysia", "Mexico",
+    "Morocco", "Netherlands", "Nigeria", "Norway", "Oman", "Philippines",
+    "Poland", "Portugal", "Qatar", "Romania", "Singapore", "South Africa",
+    "South Korea", "Spain", "Sri Lanka", "Sudan", "Sweden", "Switzerland",
+    "Syria", "Thailand", "Tunisia", "Turkey", "UAE", "Uganda", "Ukraine",
+    "United Kingdom", "Uzbekistan", "Vietnam", "Yemen",
+]
+
+
+async def country_missing_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'My Country is not Mentioned' — shows the wider country list."""
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+
+    rows = []
+    for i in range(0, len(OTHER_COUNTRIES), 2):
+        pair = OTHER_COUNTRIES[i:i + 2]
+        rows.append([
+            InlineKeyboardButton(country, callback_data=f"country_missing_pick:{order_id}:{country}")
+            for country in pair
+        ])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"local_pay:{order_id}")])
+
+    await query.edit_message_text(
+        "Select your country:",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def country_missing_picked(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer picked their country from the extended list — gives them
+    a link that opens admin chat with a ready-made message, since there's
+    no automated payment instructions for this country yet."""
+    query = update.callback_query
+    await query.answer()
+    _, order_id_str, country = query.data.split(":", 2)
+    order_id = int(order_id_str)
+
+    prefill = f"I am from {country}, how can I pay?"
+    import urllib.parse
+    chat_url = f"https://t.me/uptodate_admin?text={urllib.parse.quote(prefill)}"
+
+    await query.edit_message_text(
+        f"For {country}, please message the admin directly to arrange payment "
+        f"for order #{order_id} — tap below, your message is ready to send:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Message Admin", url=chat_url)],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"country_missing:{order_id}")],
+        ]),
     )
 
 
@@ -3497,24 +3629,11 @@ def _country_instructions_view(order_id: int, country: str):
 
 
 async def local_country_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shows local payment instructions for the chosen country — or, for
-    the USA, a choice of remittance apps first."""
+    """Shows local payment instructions for the chosen country."""
     query = update.callback_query
     await query.answer()
     _, order_id_str, country = query.data.split(":", 2)
     order_id = int(order_id_str)
-
-    if country == "USA":
-        rows = [
-            [InlineKeyboardButton(app, callback_data=f"usa_app:{order_id}:{app}")]
-            for app in USA_PAYMENT_APPS
-        ]
-        rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"local_pay:{order_id}")])
-        await query.edit_message_text(
-            f"{COUNTRY_FLAGS['USA']} USA — choose how you'd like to pay:",
-            reply_markup=InlineKeyboardMarkup(rows),
-        )
-        return
 
     context.user_data["selected_country"] = country
     db_set_payment_method(order_id, country)
@@ -3531,28 +3650,30 @@ async def local_country_selected(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def usa_app_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shows instructions for the chosen USA remittance app."""
+    """Shows instructions for the chosen international remittance app —
+    these are now top-level options in checkout_view, not nested under a
+    'USA' country choice anymore."""
     query = update.callback_query
     await query.answer()
     _, order_id_str, app = query.data.split(":", 2)
     order_id = int(order_id_str)
 
     context.user_data["selected_country"] = "USA"
-    db_set_payment_method(order_id, f"USA — {app}")
+    db_set_payment_method(order_id, app)
 
     order = db_get_order(order_id)
     total = order[4] if order else 0
     instructions = USA_APP_INSTRUCTIONS.get(app, "Contact us directly for payment instructions.")
 
     text = (
-        f"*Payment instructions — {COUNTRY_FLAGS['USA']} USA ({app})*\n\n"
+        f"*Payment instructions — {app}*\n\n"
         f"*Amount to pay: {convert_for_country(total, 'USA')}*\n\n"
         f"{instructions}\n\n"
         "After paying, tap *I've Paid* below."
     )
     buttons = [
         [InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")],
-        [InlineKeyboardButton("⬅️ Back", callback_data=f"local_country:{order_id}:USA")],
+        [InlineKeyboardButton("⬅️ Back", callback_data=f"back_to_checkout:{order_id}")],
     ]
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -4667,28 +4788,11 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text or ""
     text = raw.split(" 🔴")[0].strip()
 
-    if text == A_VIEW_SERIALS:
-        await show_serials(update, context)
+    if text == A_SERIALS:
+        await serials_menu(update, context)
 
-    elif text == A_ADD_SERIALS:
-        await update.message.reply_text(
-            "Which pool are these serials/codes for?",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton(label, callback_data=f"addser:{dur}")]
-                 for dur, label in SERIAL_POOL_LABELS.items()]
-            ),
-        )
-
-    elif text == A_REMOVE_SERIAL:
-        clear_admin_flow_state(context.user_data)
-        context.user_data["awaiting_admin_input"] = "remove_serial"
-        await update.message.reply_text("Send the serial code to remove:")
-
-    elif text == A_RECENT_ORDERS:
-        await customer_history(update, context)
-
-    elif text == A_PENDING:
-        await admin_pending_list(update, context)
+    elif text == A_ORDERS:
+        await orders_menu(update, context)
 
     elif text == A_INPUT:
         await admin_input_menu(update, context)
@@ -4703,11 +4807,6 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"Type the announcement to send to all {recipient_count} customer(s):"
         )
-
-    elif text == A_FIND_ORDER:
-        clear_admin_flow_state(context.user_data)
-        context.user_data["awaiting_admin_input"] = "find_order"
-        await update.message.reply_text("Send the order number:")
 
     elif text == A_FIND_CUSTOMER:
         clear_admin_flow_state(context.user_data)
@@ -4731,9 +4830,6 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == A_BOOK_REQUESTS:
         await book_requests_menu(update, context)
-
-    elif text == A_DELIVERED:
-        await delivered_subscriptions_menu(update, context)
 
     elif text == A_IMD_CATALOG:
         await imd_catalog_extract_start(update, context)
@@ -6038,7 +6134,7 @@ async def imd_catalog_password_reply(update: Update, context: ContextTypes.DEFAU
         await update_status(
             f"✅ iMD Catalog updated!\n\n"
             f"📚 {len(databases):,} databases saved.\n\n"
-            "Customers can now use 🔬 Search iMD Resources."
+            "Customers can now use 🔬 What does iMD include?"
         )
     except ValueError as e:
         await update_status(f"❌ {e}")
@@ -6186,7 +6282,7 @@ async def imd_api_url_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_status(
             f"✅ iMD Catalog updated!\n\n"
             f"📚 {len(unique):,} databases saved.\n"
-            "Customers can now use 🔬 Search iMD Resources."
+            "Customers can now use 🔬 What does iMD include?"
         )
     except Exception as e:
         logger.exception("iMD API URL extraction failed")
@@ -6231,7 +6327,7 @@ async def imd_session_token_reply(update: Update, context: ContextTypes.DEFAULT_
         await update_status(
             f"✅ iMD Catalog updated!\n\n"
             f"📚 {len(databases):,} databases saved.\n\n"
-            f"Customers can now use 🔬 Search iMD Resources."
+            f"Customers can now use 🔬 What does iMD include?"
         )
     except Exception as e:
         logger.exception("iMD catalog extraction with token failed")
@@ -6495,7 +6591,7 @@ async def imd_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("⚡ Live Search", switch_inline_query_current_chat="")
     ]])
     await update.message.reply_text(
-        f"🔬 Search iMD Resources\n\n"
+        f"🔬 What does iMD include?\n\n"
         f"Our catalog has {count:,} medical databases and textbooks.\n"
         "Type the name of what you're looking for below, "
         "or tap ⚡ *Live Search* for results that update as you type:",
@@ -7266,7 +7362,8 @@ async def admin_pending_back(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def show_serials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists available serials/codes and any not_working ones so the admin
-    can review and delete failed serials."""
+    can review and delete failed serials. Codes are backtick-wrapped for
+    Telegram's tap-to-copy."""
     available = db_list_serials(status="available")
     not_working = db_list_serials(status="not_working")
 
@@ -7281,7 +7378,7 @@ async def show_serials(update: Update, context: ContextTypes.DEFAULT_TYPE):
         codes = grouped.get(duration, [])
         lines.append(f"\n  {label} — {len(codes)} available")
         if codes:
-            lines.extend(f"    {code}" for code in codes)
+            lines.extend(f"    `{code}`" for code in codes)
         else:
             lines.append("    (none)")
 
@@ -7294,15 +7391,210 @@ async def show_serials(update: Update, context: ContextTypes.DEFAULT_TYPE):
             codes = nw_grouped.get(duration, [])
             if codes:
                 lines.append(f"\n  {label}:")
-                lines.extend(f"    ✕ {code}" for code in codes)
+                lines.extend(f"    ✕ `{code}`" for code in codes)
 
     if not available and not not_working:
         await update.message.reply_text("No serials in either pool.")
         return
 
-    text = "\n".join(lines).strip()
-    for i in range(0, len(text), 3500):
-        await update.message.reply_text(text[i:i + 3500])
+    # Chunk by whole LINES rather than a raw character offset — splitting
+    # mid-line could cut a backtick-wrapped code in half, leaving an
+    # unbalanced backtick that breaks Markdown parsing for that message.
+    chunk, chunk_len = [], 0
+    for line in lines:
+        if chunk_len + len(line) + 1 > 3500 and chunk:
+            await safe_reply_markdown(update.message, "\n".join(chunk))
+            chunk, chunk_len = [], 0
+        chunk.append(line)
+        chunk_len += len(line) + 1
+    if chunk:
+        await safe_reply_markdown(update.message, "\n".join(chunk))
+
+
+async def serials_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🔑 Serials — shows the list, then the Add/Remove actions below it."""
+    await show_serials(update, context)
+    await update.message.reply_text(
+        "What would you like to do?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Add Serials", callback_data="serials_add_menu")],
+            [InlineKeyboardButton("🗑 Remove", callback_data="serials_remove_menu")],
+        ]),
+    )
+
+
+async def serials_add_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Same pool picker the old ➕ Add Serials button always used."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text="Which pool are these serials/codes for?",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(label, callback_data=f"addser:{dur}")]
+             for dur, label in SERIAL_POOL_LABELS.items()]
+        ),
+    )
+
+
+async def serials_remove_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🗑 Remove — choose a specific serial from the list, or wipe every
+    not-working one in one go."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    not_working_count = len(db_list_serials(status="not_working"))
+    buttons = [[InlineKeyboardButton("📋 Choose from list", callback_data="serials_remove_list:0")]]
+    if not_working_count:
+        buttons.append([InlineKeyboardButton(
+            f"🗑 Remove ALL {not_working_count} not-working serials", callback_data="serials_remove_allnw"
+        )])
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text="How would you like to remove serials?",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+SERIALS_REMOVE_PAGE_SIZE = 25
+
+
+async def _render_serials_remove_page(query, offset: int):
+    """Shared by serials_remove_list and serials_remove_one (after a
+    deletion, to refresh the same page) — takes the offset directly as
+    an argument rather than mutating query.data, since PTB's CallbackQuery
+    object isn't guaranteed to support reassigning that attribute."""
+    available = db_list_serials(status="available")
+    not_working = db_list_serials(status="not_working")
+    all_codes = [(dur, code, "❌" if status == "not_working" else "")
+                 for dur, code, status, _ in (available + not_working)]
+
+    if not all_codes:
+        await query.edit_message_text("No serials left to remove.")
+        return
+
+    offset = min(offset, max(0, len(all_codes) - 1))
+    page = all_codes[offset:offset + SERIALS_REMOVE_PAGE_SIZE]
+    buttons = [
+        [InlineKeyboardButton(f"{flag} {code}"[:60], callback_data=f"serials_remove_one:{code}:{offset}")]
+        for dur, code, flag in page
+    ]
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀️ Prev", callback_data=f"serials_remove_list:{max(0, offset - SERIALS_REMOVE_PAGE_SIZE)}"))
+    if offset + SERIALS_REMOVE_PAGE_SIZE < len(all_codes):
+        nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"serials_remove_list:{offset + SERIALS_REMOVE_PAGE_SIZE}"))
+    if nav:
+        buttons.append(nav)
+
+    await query.edit_message_text(
+        f"Tap a serial to remove it ({offset + 1}-{offset + len(page)} of {len(all_codes)}):",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def serials_remove_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Paginated button-per-code list — tap one to delete it immediately."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    offset = int(query.data.split(":", 1)[1])
+    await _render_serials_remove_page(query, offset)
+
+
+async def serials_remove_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+
+    _, code, offset_str = query.data.split(":", 2)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("DELETE FROM serials WHERE code = ?", (code,))
+    conn.commit()
+    conn.close()
+    await query.answer(f"Removed {code}" if cur.rowcount else "Not found")
+
+    # Refresh the same page in place
+    await _render_serials_remove_page(query, int(offset_str))
+
+
+async def serials_remove_all_notworking(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Confirms, then deletes every not_working serial at once."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("DELETE FROM serials WHERE status = 'not_working'")
+    conn.commit()
+    removed = cur.rowcount
+    conn.close()
+    await query.edit_message_text(f"🗑 Removed {removed} not-working serial(s).")
+
+
+ORDERS_MENU_KEYBOARD = InlineKeyboardMarkup([
+    [InlineKeyboardButton(A_RECENT_ORDERS, callback_data="orders_recent")],
+    [InlineKeyboardButton(A_PENDING, callback_data="orders_pending")],
+    [InlineKeyboardButton(A_FIND_ORDER, callback_data="orders_find")],
+    [InlineKeyboardButton(A_DELIVERED, callback_data="orders_delivered")],
+])
+
+
+async def orders_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """📦 Orders — one umbrella menu for the four order-related views."""
+    await update.message.reply_text("📦 Orders — what would you like to see?", reply_markup=ORDERS_MENU_KEYBOARD)
+
+
+async def orders_menu_route(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Routes an Orders submenu tap to its existing, unchanged handler."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    action = query.data.split(":", 1)[0]
+
+    # These handlers all expect update.message — build a lightweight
+    # stand-in that posts a new message via the callback's chat, since
+    # editing the submenu message in place doesn't fit views that send
+    # multiple messages (pending list, recent orders, etc.).
+    class _FauxMessage:
+        def __init__(self, bot, chat_id):
+            self._bot = bot
+            self._chat_id = chat_id
+        async def reply_text(self, text, **kwargs):
+            return await self._bot.send_message(chat_id=self._chat_id, text=text, **kwargs)
+        async def reply_photo(self, **kwargs):
+            return await self._bot.send_photo(chat_id=self._chat_id, **kwargs)
+        async def reply_document(self, **kwargs):
+            return await self._bot.send_document(chat_id=self._chat_id, **kwargs)
+
+    faux_update = type("FauxUpdate", (), {
+        "effective_user": query.from_user,
+        "message": _FauxMessage(context.bot, query.message.chat_id),
+    })()
+
+    if action == "orders_recent":
+        await customer_history(faux_update, context)
+    elif action == "orders_pending":
+        await admin_pending_list(faux_update, context)
+    elif action == "orders_find":
+        clear_admin_flow_state(context.user_data)
+        context.user_data["awaiting_admin_input"] = "find_order"
+        await context.bot.send_message(chat_id=query.message.chat_id, text="Send the order number:")
+    elif action == "orders_delivered":
+        await delivered_subscriptions_menu(faux_update, context)
 
 
 async def add_serials_pick_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8667,10 +8959,13 @@ async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     parts.append("\n⏳ PENDING")
     if pending:
-        for fid, order_id, item_id, unit_no, state in pending:
+        for fid, order_id, item_id, unit_no, state, order_status in pending:
             name = MENU.get(item_id, (item_id,))[0]
             suffix = f" #{unit_no}" if unit_no > 1 else ""
-            label = "details ready to deliver" if state == "awaiting_delivery" else "waiting on customer"
+            if order_status in UNPAID_ORDER_STATUSES:
+                label = "❌ not paid yet"
+            else:
+                label = "details ready to deliver" if state == "awaiting_delivery" else "waiting on customer"
             parts.append(f"\n• {name}{suffix} — Order #{order_id} ({label})")
             row = db_get_fulfilment(fid)
             parts.append(format_fulfilment_info(item_id, row[6] if row else None))
@@ -8857,6 +9152,15 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
+    if action == "clear_unpaid":
+        count = db_cancel_unpaid_orders(user_id)
+        await update.message.reply_text(
+            f"🗑 Cleared {count} unpaid order{'s' if count != 1 else ''}."
+            if count else "You had no unpaid pending orders to clear.",
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return
+
     if action == "view_pending":
         pending = db_user_pending_items(user_id)
         if not pending:
@@ -8865,18 +9169,37 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 reply_markup=main_menu_keyboard(user_id),
             )
             return
-        lines = []
-        for fid, oid, item_id, unit_no, state in pending:
+
+        unpaid_lines, undelivered_lines = [], []
+        for fid, oid, item_id, unit_no, state, order_status in pending:
             name = MENU.get(item_id, (item_id,))[0]
-            state_label = {
-                "needs_info": "⌛ Waiting for your details",
-                "awaiting_delivery": "🔄 Being prepared",
-            }.get(state, "⏳ In progress")
-            lines.append(f"{state_label}: {name}")
+            if order_status in UNPAID_ORDER_STATUSES:
+                unpaid_lines.append(f"❌ Not paid yet: {name} (Order #{oid})")
+            else:
+                state_label = {
+                    "needs_info": "⌛ Waiting for your details",
+                    "awaiting_delivery": "🔄 Being prepared",
+                }.get(state, "⏳ In progress")
+                undelivered_lines.append(f"{state_label}: {name} (Order #{oid})")
+
+        text_parts = []
+        keyboard = None
+        if unpaid_lines:
+            text_parts.append("💳 Not paid yet:\n" + "\n".join(unpaid_lines))
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🗑 Clear unpaid pending orders", callback_data="clear_unpaid")]]
+            )
+        if undelivered_lines:
+            text_parts.append("🔄 Paid, not delivered yet:\n" + "\n".join(undelivered_lines))
+
         await update.message.reply_text(
-            "⏳ Your pending orders:\n\n" + "\n".join(lines),
+            "⏳ Your pending orders:\n\n" + "\n\n".join(text_parts),
             reply_markup=main_menu_keyboard(user_id),
         )
+        if keyboard:
+            await update.message.reply_text(
+                "Want to clear the unpaid ones above?", reply_markup=keyboard
+            )
         return
 
     if action not in ("cart_checkout", "full_order"):
@@ -9468,6 +9791,12 @@ def main():
     app.add_handler(CallbackQueryHandler(deliver_start, pattern=r"^deliver:"))
     app.add_handler(CallbackQueryHandler(reg_go, pattern=r"^reg_go:"))
     app.add_handler(CallbackQueryHandler(add_serials_pick_duration, pattern=r"^addser:"))
+    app.add_handler(CallbackQueryHandler(serials_add_menu, pattern=r"^serials_add_menu$"))
+    app.add_handler(CallbackQueryHandler(serials_remove_menu, pattern=r"^serials_remove_menu$"))
+    app.add_handler(CallbackQueryHandler(serials_remove_list, pattern=r"^serials_remove_list:"))
+    app.add_handler(CallbackQueryHandler(serials_remove_one, pattern=r"^serials_remove_one:"))
+    app.add_handler(CallbackQueryHandler(serials_remove_all_notworking, pattern=r"^serials_remove_allnw$"))
+    app.add_handler(CallbackQueryHandler(orders_menu_route, pattern=r"^orders_(recent|pending|find|delivered)$"))
     app.add_handler(CallbackQueryHandler(imd_menu_start, pattern=r"^imd_menu$"))
     app.add_handler(CallbackQueryHandler(imd_search_page_nav, pattern=r"^imdpage:"))
     app.add_handler(InlineQueryHandler(imd_inline_query))
@@ -9495,8 +9824,11 @@ def main():
     app.add_handler(CallbackQueryHandler(imd_type_selected, pattern=r"^imd_type:"))
     app.add_handler(CallbackQueryHandler(pay_with_stars, pattern=r"^pay_stars:"))
     app.add_handler(CallbackQueryHandler(local_pay_start, pattern=r"^local_pay:"))
+    app.add_handler(CallbackQueryHandler(country_missing_start, pattern=r"^country_missing:"))
+    app.add_handler(CallbackQueryHandler(country_missing_picked, pattern=r"^country_missing_pick:"))
     app.add_handler(CallbackQueryHandler(local_country_selected, pattern=r"^local_country:"))
     app.add_handler(CallbackQueryHandler(usa_app_selected, pattern=r"^usa_app:"))
+    app.add_handler(CallbackQueryHandler(noop_callback, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(pay_card_start, pattern=r"^pay_card:"))
     app.add_handler(CallbackQueryHandler(pay_crypto, pattern=r"^pay_crypto:"))
     app.add_handler(CallbackQueryHandler(pay_credits_start, pattern=r"^pay_credits:"))
@@ -9515,6 +9847,7 @@ def main():
     app.add_handler(CallbackQueryHandler(subs_pending, pattern=r"^subs_pending$"))
     app.add_handler(CallbackQueryHandler(pending_detail, pattern=r"^pend:"))
     app.add_handler(CallbackQueryHandler(admin_pending_detail, pattern=r"^apend:"))
+    app.add_handler(CallbackQueryHandler(clear_unpaid_orders, pattern=r"^clear_unpaid$"))
     app.add_handler(CallbackQueryHandler(admin_pending_rejected_detail, pattern=r"^apend_rejected:"))
     app.add_handler(CallbackQueryHandler(pending_delete_confirm, pattern=r"^pdel:"))
     app.add_handler(CallbackQueryHandler(pending_delete_execute, pattern=r"^pdel_yes:"))
