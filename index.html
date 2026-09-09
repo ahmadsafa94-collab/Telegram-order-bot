@@ -119,7 +119,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .pm{background:var(--bg2);border:2px solid rgba(255,255,255,.08);border-radius:var(--r);
   padding:13px 9px;text-align:center;cursor:pointer;transition:all .15s}
 .pm.sel{border-color:var(--acc);background:rgba(59,130,246,.08)}
-.pm .ico{font-size:22px;margin-bottom:5px}
+.pm .ico{font-size:17px;margin-bottom:5px}
 .pm .lbl{font-size:11px;font-weight:600}
 .pm .sub{font-size:10px;color:var(--hint);margin-top:1px}
 .pdtl{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);
@@ -273,6 +273,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 <!-- Page 3: Payment -->
 <div class="page" id="p3">
   <div class="sl">Choose Payment Method</div>
+  <div id="discountBox" style="background:var(--bg2);border:1px solid rgba(255,255,255,.08);border-radius:var(--r);padding:10px 12px;margin-bottom:12px">
+    <div style="display:flex;gap:8px">
+      <input id="discountInput" type="text" placeholder="Discount code (optional)" style="flex:1;background:transparent;border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:8px 10px;color:var(--text);font-size:13px">
+      <button class="btn" style="width:auto;padding:8px 14px;font-size:13px" onclick="applyDiscountCode()">Apply</button>
+    </div>
+    <div id="discountMsg" style="font-size:12px;margin-top:6px"></div>
+  </div>
   <div class="pm-grid" id="pmGrid"></div>
   <div id="pmDetail"></div>
   <div class="card" id="sumCard" style="margin-bottom:12px"></div>
@@ -318,6 +325,17 @@ try {
     SUBS_DATA  = JSON.parse(atob(b64));
   }
 } catch(e) { /* ignore parse errors */ }
+
+// Credit balance and active discount codes — point-in-time snapshot from
+// page load, used only for display/estimation. The server re-verifies
+// everything for real at checkout, so a stale value here never lets
+// anyone actually get more discount than they should.
+const CREDITS_BALANCE = (SUBS_DATA && SUBS_DATA.cr) || 0;
+const DISCOUNT_CODES = (SUBS_DATA && SUBS_DATA.dc) || {};
+const CREDIT_VALUE_USD = 4;
+let appliedCreditsFlag = false;   // did the customer choose to use credits?
+let appliedDiscountCode = '';
+let appliedDiscountPct = 0;
 
 // ── Catalog data ──────────────────────────────────────────────────────
 const IMD = new Set(['imd_new_6m','imd_new_1y','imd_renew_6m','imd_renew_1y']);
@@ -895,8 +913,32 @@ function validateDetails(){
 function setErr(inp,msg){inp.classList.add('err');const el=document.getElementById('e-'+inp.id);if(el)el.textContent=msg;}
 
 // ── Payment page ──────────────────────────────────────────────────────
+function goGetFreeAccounts(){
+  tg.sendData(JSON.stringify({action:'goto_getfree'}));
+}
+function applyDiscountCode(){
+  const raw=(document.getElementById('discountInput').value||'').trim().toUpperCase();
+  const msg=document.getElementById('discountMsg');
+  if(!raw){ msg.textContent=''; return; }
+  if(DISCOUNT_CODES[raw]!=null){
+    appliedDiscountCode=raw; appliedDiscountPct=DISCOUNT_CODES[raw];
+    msg.style.color='#4ade80';
+    msg.textContent=`✅ ${appliedDiscountPct}% off applied!`;
+  }else{
+    appliedDiscountCode=''; appliedDiscountPct=0;
+    msg.style.color='#f87171';
+    msg.textContent='❌ Invalid or expired code.';
+  }
+  buildPaymentPage();
+}
+function effectiveTotal(){
+  let t = cartTotal();
+  if(appliedDiscountPct>0) t = t*(1-appliedDiscountPct/100);
+  if(appliedCreditsFlag) t = Math.max(0, t - CREDITS_BALANCE*CREDIT_VALUE_USD);
+  return Math.round(t*100)/100;
+}
 function buildPaymentPage(){
-  const total=cartTotal();
+  const total=effectiveTotal();
   // Clear previous payment method buttons — they capture `total` in their onclick
   // closure, so stale buttons from a previous buildPaymentPage call would fire
   // with the wrong amount if the user modified the basket and came back.
@@ -921,21 +963,28 @@ function buildPaymentPage(){
    {id:'app:Paysend',ico:'📨',lbl:'Paysend',sub:'Money transfer'},
    {id:'app:Revolut',ico:'🔄',lbl:'Revolut',sub:'Card transfer'},
    {id:'app:TapTap Send',ico:'📲',lbl:'TapTap Send',sub:'Money transfer'},
+   ...(appliedCreditsFlag?[]:[{id:'credits',ico:'🎁',lbl:'My Credits',sub:'Use earned credits'}]),
   ].forEach(m=>{
     const d=document.createElement('div'); d.className='pm'; d.dataset.id=m.id;
     d.innerHTML=`<div class="ico">${m.ico}</div><div class="lbl">${m.lbl}</div><div class="sub">${m.sub}</div>`;
     d.onclick=()=>selMethod(m.id,total);
     pmGrid.appendChild(d);
   });
+  if(appliedCreditsFlag){
+    const note=document.createElement('div');
+    note.style.cssText='grid-column:1/-1;font-size:12px;color:#4ade80;margin:0 2px 4px';
+    note.textContent=`🎁 ${CREDITS_BALANCE} credits applied — total reduced above.`;
+    pmGrid.appendChild(note);
+  }
   addSectionLabel('💱 Pay in your own currency');
-  [{id:'local',ico:'🌍',lbl:'Local Transfer',sub:`${Object.keys(FLAGS).length} countries`},
-   {id:'credits',ico:'🎁',lbl:'My Credits',sub:'Use earned credits'},
-  ].forEach(m=>{
-    const d=document.createElement('div'); d.className='pm'; d.dataset.id=m.id;
-    d.innerHTML=`<div class="ico">${m.ico}</div><div class="lbl">${m.lbl}</div><div class="sub">${m.sub}</div>`;
-    d.onclick=()=>selMethod(m.id,total);
-    pmGrid.appendChild(d);
-  });
+  Object.keys(FLAGS).map(c=>({id:`country:${c}`,ico:FLAGS[c],lbl:c,sub:'Local transfer'}))
+    .concat([{id:'country_missing',ico:'🌐',lbl:'Not Listed?',sub:'Other countries'}])
+    .forEach(m=>{
+      const d=document.createElement('div'); d.className='pm'; d.dataset.id=m.id;
+      d.innerHTML=`<div class="ico">${m.ico}</div><div class="lbl">${m.lbl}</div><div class="sub">${m.sub}</div>`;
+      d.onclick=()=>selMethod(m.id,total);
+      pmGrid.appendChild(d);
+    });
   const sc=document.getElementById('sumCard');
   sc.innerHTML=Object.entries(cart).map(([id,{name,price,qty}])=>
     `<div class="sumrow"><div>${name}${qty>1?` ×${qty}`:''}</div><div class="r">$${(price*qty).toFixed(2)}</div></div>`
@@ -951,14 +1000,35 @@ function selMethod(id,total){
     det.innerHTML=`<div class="pdtl on">⭐ You'll receive a Stars invoice after placing the order.</div>`;
     sub.textContent='Place Order → Pay with Stars ⭐'; sub.style.display='block';
   }else if(id==='credits'){
-    det.innerHTML=`<div class="pdtl on">🎁 ${Math.ceil(total/4)} credits needed ($4 each). If insufficient, the bot will let you know.</div>`;
-    sub.textContent='Pay with Credits 🎁'; sub.style.display='block';
+    if(CREDITS_BALANCE<=0){
+      det.innerHTML=`<div class="pdtl on">You don't have any credits yet.<br><br><a href="#" onclick="event.preventDefault();goGetFreeAccounts();" style="color:var(--teal2);font-weight:700">How to get credits?</a></div>`;
+      sub.style.display='none';
+    }else{
+      const creditValue=CREDITS_BALANCE*CREDIT_VALUE_USD;
+      if(creditValue>=total){
+        const creditsNeeded=total>0?Math.ceil(total/CREDIT_VALUE_USD):0;
+        det.innerHTML=`<div class="pdtl on">🎁 You have ${CREDITS_BALANCE} credits ($${creditValue.toFixed(2)}) — that fully covers this order.<br><br>Using ${creditsNeeded} credit(s) brings your total to $0.00. You'll have ${CREDITS_BALANCE-creditsNeeded} credit(s) left.</div>`;
+        sub.textContent='✅ Confirm & Complete Order (Credits)'; sub.style.display='block';
+        appliedCreditsFlag=true;
+      }else{
+        const newTotal=Math.max(0,total-creditValue);
+        det.innerHTML=`<div class="pdtl on">🎁 You have ${CREDITS_BALANCE} credits ($${creditValue.toFixed(2)}). This brings your total from $${total.toFixed(2)} down to $${newTotal.toFixed(2)}.<br><br>Choose another method below to pay the remaining amount — your credits are only deducted once that payment is confirmed.</div>`;
+        appliedCreditsFlag=true;
+        sub.style.display='none';
+        buildPaymentPage();
+        return;
+      }
+    }
   }else if(id==='card'){
     det.innerHTML=`<div class="pdtl on">1. <a href="https://payments.suyool.com/pay/g401_MD" target="_blank" style="color:var(--teal2)">Open Payment Link ↗</a><br>2. "Pay online with your card"<br>3. From: your name · Amount: <strong>$${total.toFixed(2)}</strong> · Message: empty<br>4. Enter card details and complete</div>`;
     sub.textContent="I've Paid ✅"; sub.style.display='block';
-  }else if(id==='local'){
-    const countries=Object.keys(FLAGS);
-    det.innerHTML=`<div class="sl" style="margin-top:0">Select your country</div><div class="cg">${countries.map(c=>`<div class="cb" data-c="${c}" onclick="selCountryFn('${c}',${total})">${FLAGS[c]} ${c}</div>`).join('')}<div class="cb" onclick="selCountryMissing(${total})">🌐 My Country is not Mentioned</div></div><div id="lclDtl"></div>`;
+  }else if(id.startsWith('country:')){
+    const c=id.slice(8);
+    selCountry=c;
+    det.innerHTML=`<div class="pdtl on">${payInstr(c,total)}</div>`;
+    sub.textContent="I've Paid ✅"; sub.style.display='block';
+  }else if(id==='country_missing'){
+    det.innerHTML=`<div class="sl" style="margin-top:0">Select your country</div><div class="cg">${OTHER_COUNTRIES.map(c=>`<div class="cb" data-oc="${c}" onclick="selOtherCountry('${c}')">${c}</div>`).join('')}</div><div id="ocDtl"></div>`;
     sub.style.display='none';
   }else if(id==='crypto'){
     det.innerHTML=`<div class="pdtl on"><strong>USDT BEP20:</strong><br><span class="mono copyable" onclick="copyToClipboard(this,'0xefbab9265bb3a22492e4a100c27791da385eeb37')">0xefbab9265bb3a22492e4a100c27791da385eeb37</span><br><br><strong>USDT TRC20:</strong><br><span class="mono copyable" onclick="copyToClipboard(this,'TM8JhfHfaxNgBRs3benrTkWAz6Zprk9QmF')">TM8JhfHfaxNgBRs3benrTkWAz6Zprk9QmF</span><br><br><strong>BTC:</strong><br><span class="mono copyable" onclick="copyToClipboard(this,'18rALgWKZZPMgGjVBCDBPgnnpdaj8rEQ2x')">18rALgWKZZPMgGjVBCDBPgnnpdaj8rEQ2x</span><br><br><strong>Bybit UID:</strong> <span class="mono copyable" onclick="copyToClipboard(this,'65577310')">65577310</span><br><strong>OKX UID:</strong> <span class="mono copyable" onclick="copyToClipboard(this,'847060953866125494')">847060953866125494</span><br><strong>BingX UID:</strong> <span class="mono copyable" onclick="copyToClipboard(this,'10276647')">10276647</span><br><br>(Tap any address/UID to copy)<br><br>Amount: <strong>$${total.toFixed(2)}</strong></div>`;
@@ -969,24 +1039,11 @@ function selMethod(id,total){
     sub.textContent="I've Paid ✅"; sub.style.display='block';
   }
 }
-function selCountryMissing(total){
-  document.querySelectorAll('.cb').forEach(b=>b.classList.remove('sel'));
-  const det=document.getElementById('lclDtl');
-  det.innerHTML=`<div class="sl">Select your country</div><div class="cg">${OTHER_COUNTRIES.map(c=>`<div class="cb" data-oc="${c}" onclick="selOtherCountry('${c}')">${c}</div>`).join('')}</div><div id="ocDtl"></div>`;
-  document.getElementById('submitBtn').style.display='none';
-}
 function selOtherCountry(c){
   document.querySelectorAll('[data-oc]').forEach(b=>b.classList.toggle('sel',b.dataset.oc===c));
   const msg=encodeURIComponent(`I am from ${c}, how can I pay?`);
   document.getElementById('ocDtl').innerHTML=`<div class="pdtl on">We don't have automated payment instructions for ${c} yet — message the admin directly, your message is ready to send:<br><br><a href="https://t.me/uptodate_admin?text=${msg}" target="_blank" style="color:var(--teal2);font-weight:700">💬 Message Admin ↗</a></div>`;
   document.getElementById('submitBtn').style.display='none';
-}
-function selCountryFn(c,total){
-  selCountry=c; selApp=null;
-  document.querySelectorAll('.cb').forEach(b=>b.classList.toggle('sel',b.dataset&&b.dataset.c===c));
-  const det=document.getElementById('lclDtl');
-  det.innerHTML=`<div class="pdtl on">${payInstr(c,total)}</div>`;
-  const sub=document.getElementById('submitBtn'); sub.textContent="I've Paid ✅"; sub.style.display='block';
 }
 const OTHER_COUNTRIES=[
   "Afghanistan","Algeria","Argentina","Armenia","Australia","Austria",
@@ -1016,11 +1073,13 @@ function collectDetails(){
 }
 function submitOrder(){
   if(!selPay){showToast('Choose a payment method');return;}
-  if(selPay==='local'&&!selCountry){showToast('Choose your country');return;}
   let pay=selPay;
-  if(selPay==='local') pay=selCountry;
+  if(selPay.startsWith('country:')) pay=selPay.slice(8);
   else if(selPay.startsWith('app:')) pay=selPay.slice(4);
-  tg.sendData(JSON.stringify({action:'full_order',items:collectDetails(),payment_method:pay,total:cartTotal()}));
+  tg.sendData(JSON.stringify({
+    action:'full_order',items:collectDetails(),payment_method:pay,
+    total:effectiveTotal(),use_credits:appliedCreditsFlag,discount_code:appliedDiscountCode,
+  }));
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────
