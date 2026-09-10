@@ -727,12 +727,25 @@ def db_init():
     for column, coltype in [
         ("credentials", "TEXT"), ("delivered_at", "TEXT"),
         ("payment_method", "TEXT"), ("payer_name", "TEXT"), ("receipt_photo_file_id", "TEXT"),
-        ("receipt_reference", "TEXT"),
+        ("receipt_reference", "TEXT"), ("discount_code", "TEXT"),
+        ("credits_applied", "INTEGER"),
     ]:
         try:
             conn.execute(f"ALTER TABLE orders ADD COLUMN {column} {coltype}")
         except sqlite3.OperationalError:
             pass  # column already exists
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS discount_codes (
+            code TEXT PRIMARY KEY,
+            percentage REAL NOT NULL,
+            uses_remaining INTEGER NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
 
     conn.execute(
         """
@@ -1348,6 +1361,90 @@ def db_deduct_credits(user_id: int, amount: int) -> bool:
     return success
 
 
+CREDIT_VALUE_USD = 4  # 1 credit = $4, matching the existing rate used elsewhere
+
+
+def _generate_discount_code(length: int = 8) -> str:
+    import random, string
+    alphabet = string.ascii_uppercase + string.digits
+    return "".join(random.choices(alphabet, k=length))
+
+
+def db_create_discount_code(percentage: float, uses: int, days: int) -> str:
+    """Generates a fresh, guaranteed-unique code and saves it — the admin
+    never types the code itself, only the terms (percentage/uses/days)."""
+    conn = sqlite3.connect(DB_PATH)
+    while True:
+        code = _generate_discount_code()
+        exists = conn.execute("SELECT 1 FROM discount_codes WHERE code = ?", (code,)).fetchone()
+        if not exists:
+            break
+    expires_at = (datetime.utcnow() + timedelta(days=days)).isoformat()
+    conn.execute(
+        "INSERT INTO discount_codes (code, percentage, uses_remaining, expires_at, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (code, percentage, uses, expires_at, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    return code
+
+
+def db_check_discount_code(code: str):
+    """Returns the percentage if the code is valid (exists, has uses left,
+    not expired), else None. Read-only — does NOT consume a use, since a
+    customer might check a code and then abandon checkout; only an
+    actually-completed order should consume it (see db_consume_discount_code)."""
+    if not code:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT percentage, uses_remaining, expires_at FROM discount_codes WHERE code = ?",
+        (code.strip().upper(),),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    percentage, uses_remaining, expires_at = row
+    if uses_remaining <= 0:
+        return None
+    if datetime.utcnow().isoformat() > expires_at:
+        return None
+    return percentage
+
+
+def db_consume_discount_code(code: str) -> bool:
+    """Decrements uses_remaining by one, only if it's still valid — called
+    once an order using this code is actually confirmed as paid, not at
+    entry time (so an abandoned checkout doesn't burn a use)."""
+    if not code:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        "UPDATE discount_codes SET uses_remaining = uses_remaining - 1 "
+        "WHERE code = ? AND uses_remaining > 0 AND expires_at >= ?",
+        (code.strip().upper(), datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    success = cur.rowcount > 0
+    conn.close()
+    return success
+
+
+def db_active_discount_codes() -> dict:
+    """{code: percentage} for every currently-valid code — embedded into
+    the Mini App's page-load data so it can show discount math without a
+    live API call. Purely for display; the server re-validates for real
+    at checkout regardless."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT code, percentage FROM discount_codes WHERE uses_remaining > 0 AND expires_at >= ?",
+        (datetime.utcnow().isoformat(),),
+    ).fetchall()
+    conn.close()
+    return {code: pct for code, pct in rows}
+
+
 def db_mark_referral_intro_shown(user_id: int):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE users SET referral_intro_shown = 1 WHERE user_id = ?", (user_id,))
@@ -1852,6 +1949,33 @@ def db_set_payment_method(order_id: int, method: str):
     conn.close()
 
 
+def db_apply_credits_to_order(order_id: int, new_total: float, credits_applied: int):
+    """Reduces (or zeroes) an order's total to reflect credits being used
+    — the credits themselves aren't deducted from the balance yet, only
+    reserved; finalize_order_confirmation deducts them once the order is
+    actually confirmed paid, so an abandoned order never costs credits."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE orders SET total = ?, credits_applied = ? WHERE id = ?",
+        (new_total, credits_applied, order_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_apply_discount_to_order(order_id: int, new_total: float, code: str):
+    """Reduces an order's total for a discount code — the code's use
+    isn't consumed yet, only recorded; finalize_order_confirmation
+    consumes it once the order is actually confirmed paid."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE orders SET total = ?, discount_code = ? WHERE id = ?",
+        (new_total, code.strip().upper(), order_id),
+    )
+    conn.commit()
+    conn.close()
+
+
 def db_set_payer_name(order_id: int, name: str):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE orders SET payer_name = ? WHERE id = ?", (name, order_id))
@@ -2137,6 +2261,7 @@ A_BOOK_REQUESTS = "📚 Book Requests"
 A_IMD_CATALOG = "🔬 Update iMD Catalog"
 A_CUSTOMER_VIEW = "🛍 Customer Menu"
 A_BACKUP = "🗄 Backup"
+A_DISCOUNT_CODES = "🏷 Discount Codes"
 
 # Kept as internal labels for the Orders submenu buttons — no longer
 # top-level keyboard buttons, but still used as inline button text and
@@ -2150,7 +2275,7 @@ ADMIN_LABELS = [
     A_SERIALS, A_ORDERS, A_INPUT, A_INBOX, A_BROADCAST,
     A_FIND_CUSTOMER, A_STOCK, A_TICKETS, A_CREDITS,
     A_ADD_SUBSCRIPTION, A_BOOK_REQUESTS, A_IMD_CATALOG, A_CUSTOMER_VIEW,
-    A_BACKUP,
+    A_BACKUP, A_DISCOUNT_CODES,
 ]
 
 # Every key the admin's text_state_router uses. clear_admin_flow_state()
@@ -2172,6 +2297,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_imd_diag_username", "awaiting_imd_diag_password", "imd_diag_username",
     "awaiting_sync_serials_username", "awaiting_sync_serials_password", "sync_serials_username",
     "awaiting_restore_file", "restore_staged_path",
+    "awaiting_discount_field", "discount_data",
 ]
 
 def clear_admin_flow_state(user_data: dict):
@@ -2261,11 +2387,24 @@ def _shop_url(user_id: int = 0) -> str:
             for item_id, name, price in db_load_custom_items()
             if item_id not in oos_ids
         ]
+        # Credit balance and currently-active discount codes — embedded
+        # so the Mini App can show accurate credits/discount math without
+        # a live API call. This is a point-in-time snapshot (same
+        # tradeoff as stock status above): if it changes while the
+        # customer is browsing, they see updated data next time they
+        # open the Shop, and the server re-verifies everything for real
+        # at checkout regardless — the client-side numbers are only ever
+        # used for display, never trusted for the actual charge.
+        credits_balance = db_get_credits(user_id)
+        active_codes = db_active_discount_codes()
+
         data = {
             "d": delivered,
             "p": pending,
             "c": custom_filtered,
             "oos": oos_ids,
+            "cr": credits_balance,
+            "dc": active_codes,
         }
         return f"{MINI_APP_URL}?subs={_encode(data)}"
     except Exception:
@@ -2332,6 +2471,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [A_BOOK_REQUESTS],
             [A_IMD_CATALOG],
             [A_CUSTOMER_VIEW, A_BACKUP],
+            [A_DISCOUNT_CODES],
         ],
         resize_keyboard=True,
     )
@@ -3111,6 +3251,7 @@ COLLECTION_STATE_KEYS = [
     "awaiting_payer_name_for_order", "pending_receipt_items", "awaiting_receipt_for_order",
     "collecting_receipts_for_order",
     "awaiting_book_link",
+    "awaiting_discount_code_for_order",
 ]
 
 
@@ -3471,11 +3612,18 @@ def checkout_view(order_id: int):
         [InlineKeyboardButton("🔄 Revolut", callback_data=f"usa_app:{order_id}:Revolut")],
         [InlineKeyboardButton("📲 TapTap Send", callback_data=f"usa_app:{order_id}:TapTap Send")],
         [InlineKeyboardButton("── 💱 Pay in your own currency ──", callback_data="noop")],
-        [InlineKeyboardButton("🌍 Pay using local payment methods", callback_data=f"local_pay:{order_id}")],
-        [InlineKeyboardButton("🎁 Pay using my own Credits", callback_data=f"pay_credits:{order_id}")],
-        [InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")],
-        [InlineKeyboardButton("✖️ Cancel order", callback_data=f"cancel:{order_id}")],
     ]
+    for i in range(0, len(LOCAL_PAYMENT_COUNTRIES), 2):
+        pair = LOCAL_PAYMENT_COUNTRIES[i:i + 2]
+        buttons.append([
+            InlineKeyboardButton(
+                f"{COUNTRY_FLAGS.get(country, '')} {country}", callback_data=f"local_country:{order_id}:{country}"
+            )
+            for country in pair
+        ])
+    buttons.append([InlineKeyboardButton("🌐 My Country is not Mentioned", callback_data=f"country_missing:{order_id}")])
+    buttons.append([InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")])
+    buttons.append([InlineKeyboardButton("✖️ Cancel order", callback_data=f"cancel:{order_id}")])
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -3484,6 +3632,29 @@ async def noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboards have no real divider/label element, so a button with no
     action is the standard workaround. Just clears the loading spinner."""
     await update.callback_query.answer()
+
+
+def pre_payment_view(order_id: int):
+    """Builds the (text, keyboard) for the page shown right after an
+    order is created, before payment methods — offers credits and a
+    discount code entry point before the customer ever sees a payment
+    method."""
+    order = db_get_order(order_id)
+    if not order:
+        return "Order not found.", None
+    total = order[4]
+    text = (
+        f"*Order #{order_id} created*\n\n"
+        f"*Total: {CURRENCY}{total:.2f}*\n\n"
+        "Have credits or a discount code? Apply them here before choosing "
+        "how to pay."
+    )
+    buttons = [
+        [InlineKeyboardButton("💳 Use my credits to pay", callback_data=f"credits_start:{order_id}")],
+        [InlineKeyboardButton("🏷 Enter discount code", callback_data=f"discount_start:{order_id}")],
+        [InlineKeyboardButton("➡️ Continue to Payment Methods", callback_data=f"back_to_checkout:{order_id}")],
+    ]
+    return text, InlineKeyboardMarkup(buttons)
 
 
 async def start_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3499,7 +3670,7 @@ async def start_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = db_create_order(user.id, user.username or user.first_name, cart, total)
     context.user_data["last_order_id"] = order_id
 
-    text, keyboard = checkout_view(order_id)
+    text, keyboard = pre_payment_view(order_id)
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
     # clear the cart now that the order has been placed
@@ -3538,9 +3709,9 @@ OTHER_COUNTRIES = [
     "Afghanistan", "Algeria", "Argentina", "Armenia", "Australia", "Austria",
     "Azerbaijan", "Bahrain", "Bangladesh", "Belgium", "Brazil", "Canada",
     "China", "Colombia", "Denmark", "Egypt", "Finland", "France", "Georgia",
-    "Germany", "Greece", "Indonesia", "Iraq", "Ireland", "Israel", "Italy",
+    "Germany", "Greece", "Indonesia", "Iraq", "Ireland", "Italy",
     "Japan", "Kazakhstan", "Kenya", "Kuwait", "Libya", "Malaysia", "Mexico",
-    "Morocco", "Netherlands", "Nigeria", "Norway", "Oman", "Philippines",
+    "Morocco", "Netherlands", "Nigeria", "Norway", "Oman", "Palestine", "Philippines",
     "Poland", "Portugal", "Qatar", "Romania", "Singapore", "South Africa",
     "South Korea", "Spain", "Sri Lanka", "Sudan", "Sweden", "Switzerland",
     "Syria", "Thailand", "Tunisia", "Turkey", "UAE", "Uganda", "Ukraine",
@@ -3561,7 +3732,7 @@ async def country_missing_start(update: Update, context: ContextTypes.DEFAULT_TY
             InlineKeyboardButton(country, callback_data=f"country_missing_pick:{order_id}:{country}")
             for country in pair
         ])
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"local_pay:{order_id}")])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"back_to_checkout:{order_id}")])
 
     await query.edit_message_text(
         "Select your country:",
@@ -3623,7 +3794,7 @@ def _country_instructions_view(order_id: int, country: str):
     )
     buttons = [
         [InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")],
-        [InlineKeyboardButton("⬅️ Back", callback_data=f"local_pay:{order_id}")],
+        [InlineKeyboardButton("⬅️ Back", callback_data=f"back_to_checkout:{order_id}")],
     ]
     return text, InlineKeyboardMarkup(buttons)
 
@@ -3809,6 +3980,184 @@ async def pay_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons)
     )
+
+
+async def credits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'💳 Use my credits to pay' — shows full/partial coverage, or the
+    'no credits yet' message with a way to get some."""
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+    order = db_get_order(order_id)
+    if not order:
+        await query.edit_message_text("Order not found.")
+        return
+    total = order[4]
+    user_id = query.from_user.id
+    balance = db_get_credits(user_id)
+
+    if balance <= 0:
+        await query.edit_message_text(
+            "You don't have any credits yet.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("How to get credits?", callback_data=f"credits_getfree:{order_id}")],
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"precheck_back:{order_id}")],
+            ]),
+        )
+        return
+
+    credit_value = balance * CREDIT_VALUE_USD
+    if credit_value >= total:
+        credits_needed = math.ceil(total / CREDIT_VALUE_USD)
+        remaining_balance = balance - credits_needed
+        await query.edit_message_text(
+            f"You have {balance} credits ({CURRENCY}{credit_value:.2f}) — that fully covers "
+            f"this order's {CURRENCY}{total:.2f} total.\n\n"
+            f"Using {credits_needed} credit(s) will bring your total to {CURRENCY}0.00 — "
+            f"no other payment needed. You'll have {remaining_balance} credit(s) left.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Confirm & Complete Order", callback_data=f"credits_full:{order_id}")],
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"precheck_back:{order_id}")],
+            ]),
+        )
+    else:
+        new_total = total - credit_value
+        await query.edit_message_text(
+            f"You have {balance} credits ({CURRENCY}{credit_value:.2f}). Applying them brings "
+            f"this order's total from {CURRENCY}{total:.2f} down to {CURRENCY}{new_total:.2f}.\n\n"
+            "You'll still need to pay the remaining amount through one of the payment methods. "
+            "Your credits are only actually deducted once that payment is confirmed.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➡️ Apply & Continue to Payment", callback_data=f"credits_partial:{order_id}")],
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"precheck_back:{order_id}")],
+            ]),
+        )
+
+
+async def credits_getfree(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'How to get credits?' from the no-credits message — same content
+    the 🎁 Get Free Accounts keyboard button shows."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if db_referral_intro_shown(user_id):
+        await send_referral_link(context, user_id, query.message.chat_id)
+    else:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=GET_FREE_ACCOUNTS_INTRO,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Want to proceed?", callback_data="getfree_proceed")]]
+            ),
+        )
+
+
+async def credits_full(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Credits fully cover the order — completes it immediately, no
+    payment method needed at all."""
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+    order = db_get_order(order_id)
+    if not order:
+        await query.edit_message_text("Order not found.")
+        return
+    _, user_id, username, items_json, total, status, created_at = order
+    credits_needed = math.ceil(total / CREDIT_VALUE_USD)
+
+    if not db_deduct_credits(user_id, credits_needed):
+        await query.edit_message_text("Your credit balance changed — please try again.")
+        return
+
+    db_apply_credits_to_order(order_id, 0, credits_needed)
+    db_set_payment_method(order_id, "Credits (Full)")
+    # Credits were already deducted above — finalize_order_confirmation
+    # would otherwise deduct credits_applied again, so clear it first.
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE orders SET credits_applied = 0 WHERE id = ?", (order_id,))
+    conn.commit()
+    conn.close()
+
+    await query.edit_message_text(f"✅ Order #{order_id} paid in full using {credits_needed} credit(s)!")
+    await finalize_order_confirmation(context, order_id, user_id, items_json)
+
+
+async def credits_partial(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Credits reduce but don't cover the order — reserves them (not yet
+    deducted) and continues to payment methods for the remainder."""
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+    order = db_get_order(order_id)
+    if not order:
+        await query.edit_message_text("Order not found.")
+        return
+    total = order[4]
+    user_id = query.from_user.id
+    balance = db_get_credits(user_id)
+    credit_value = balance * CREDIT_VALUE_USD
+    new_total = round(max(0, total - credit_value), 2)
+
+    db_apply_credits_to_order(order_id, new_total, balance)
+
+    text, keyboard = checkout_view(order_id)
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+
+
+async def discount_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'🏷 Enter discount code' — asks for the code as a text reply."""
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+    context.user_data["awaiting_discount_code_for_order"] = order_id
+    await query.edit_message_text(
+        "Type your discount code:",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Cancel", callback_data=f"precheck_back:{order_id}")]]
+        ),
+    )
+
+
+async def discount_code_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer's typed discount code."""
+    order_id = context.user_data.pop("awaiting_discount_code_for_order", None)
+    if not order_id:
+        return
+    code = update.message.text.strip()
+    percentage = db_check_discount_code(code)
+
+    order = db_get_order(order_id)
+    if not order:
+        await update.message.reply_text("Order not found — please start over.")
+        return
+    total = order[4]
+
+    if percentage is None:
+        await update.message.reply_text(
+            "❌ That code isn't valid or has expired. Try another code, or continue without one:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏷 Try another code", callback_data=f"discount_start:{order_id}")],
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"precheck_back:{order_id}")],
+            ]),
+        )
+        return
+
+    new_total = round(total * (1 - percentage / 100), 2)
+    db_apply_discount_to_order(order_id, new_total, code)
+    await update.message.reply_text(
+        f"✅ Code applied — {percentage:.0f}% off! Total: {CURRENCY}{total:.2f} → {CURRENCY}{new_total:.2f}"
+    )
+    text, keyboard = checkout_view(order_id)
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+
+
+async def precheck_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Back to the pre-payment (credits/discount) page from any sub-screen."""
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+    text, keyboard = pre_payment_view(order_id)
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
 
 async def back_to_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4139,13 +4488,16 @@ async def payer_name_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         extracted_amount = _extract_numeric_amount(verdict.get("total_amount"))
         references = [r.strip() for r in (verdict.get("references") or []) if r and r.strip()]
 
-        # A small tolerance (3%, floor 0.5) absorbs real-world FX-rate
-        # drift between our conversion rate and whatever rate the
-        # customer's bank/app actually used — an exact-match requirement
-        # would reject genuinely correct receipts constantly. Card
-        # payments get an extra allowance on the upper side only, since
-        # processor fees routinely add a few dollars on top.
-        tolerance_low = max(0.5, expected_amount * 0.03)
+        # Flat ±$1-equivalent tolerance absorbs real-world FX-rate drift
+        # between our conversion rate and whatever rate the customer's
+        # bank/app actually used — an exact-match requirement would
+        # reject genuinely correct receipts constantly. Converted into
+        # the receipt's actual local currency, not a flat "1" of
+        # whatever that currency is. Card payments get an extra
+        # allowance on the upper side only, since processor fees
+        # routinely add a few dollars on top.
+        _, local_rate = CURRENCY_RATES.get(payment_method, ("USD", 1))
+        tolerance_low = 1.0 * local_rate
         tolerance_high = tolerance_low + (CARD_FEE_ALLOWANCE if payment_method == "card" else 0)
         amount_ok = (
             extracted_amount is not None
@@ -4247,6 +4599,11 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
     if not ANTHROPIC_API_KEY or not items:
         return None
 
+    # Used both in the prompt text (so the AI's own judgment threshold
+    # matches) and by the caller's deterministic amount gate afterward —
+    # 1 USD converted into whatever currency this receipt is actually in.
+    _, local_rate = CURRENCY_RATES.get(payment_method, ("USD", 1))
+
     try:
         import base64
         import anthropic
@@ -4317,10 +4674,15 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
             f"it if it's noticeably lower than required, or wildly higher than a normal fee would "
             f"explain. The proof of payment for this method can legitimately be ANY of: an "
             f"official payment receipt, an SMS text message showing a money deduction for "
-            f"\"Suyool\", or a screenshot of the confirmation web page shown right after paying, "
-            f"also showing a deduction for \"Suyool\". Do NOT treat an SMS screenshot or a "
-            f"webpage screenshot as invalid just because it doesn't look like a traditional bank "
-            f"receipt — all three formats are expected and normal here."
+            f"\"Suyool\", a screenshot of the confirmation web page shown right after paying, "
+            f"also showing a deduction for \"Suyool\", OR a \"Group Payment\" confirmation screen "
+            f"from payments.suyool.com showing a green checkmark, \"Payment Successful\", and text "
+            f"like \"You have successfully gifted USD [amount] to MD\" — this exact format is a "
+            f"normal, valid, expected confirmation for this payment method, NOT something to treat "
+            f"as unusual or suspicious just because it uses the word \"gifted\" rather than \"paid\". "
+            f"Do NOT treat an SMS screenshot, a webpage screenshot, or this Group Payment "
+            f"confirmation screen as invalid just because it doesn't look like a traditional bank "
+            f"receipt — all of these formats are expected and normal here."
             if payment_method == "card" else ""
         )
         crypto_note = (
@@ -4367,8 +4729,8 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
         content.append({"type": "text", "text": (
             f"This is {'a payment receipt' if len(items) == 1 else 'a set of payment receipts'} "
             f"screenshot(s)/document(s). The order requires a payment totaling exactly "
-            f"{expected_amount:.2f} {currency_code}. Any difference of 1 unit of currency or less "
-            f"(e.g. 53.00 vs 52.99, or 1893 vs 1893.33) is ALWAYS a normal rounding/display "
+            f"{expected_amount:.2f} {currency_code}. Any difference of up to {local_rate:.2f} "
+            f"{currency_code} (the equivalent of $1 USD) is ALWAYS a normal rounding/display "
             f"difference — treat it as a match immediately, do not deliberate about it, do not "
             f"mention it as a concern. Only a difference bigger than that actually matters.{multi_note}"
             f"{india_note}{jordan_note}{ksa_note}{ethiopia_note}{card_note}{crypto_note} "
@@ -4719,8 +5081,27 @@ async def finalize_order_confirmation(context: ContextTypes.DEFAULT_TYPE, order_
     """The actual 'this order is paid' logic — marks it paid, notifies the
     customer, starts fulfilment, awards referral credit, and posts to the
     payments channel. Shared by the admin's manual Confirm tap and the AI
-    auto-confirm path, so both do exactly the same thing."""
+    auto-confirm path, so both do exactly the same thing.
+
+    Also finalizes anything that was only *reserved* at checkout time:
+    credits get deducted now (never earlier — an abandoned/rejected order
+    must never cost the customer credits), and a discount code gets its
+    use consumed now (same reasoning — checking a code shouldn't burn a
+    use if the order never actually completes)."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT credits_applied, discount_code FROM orders WHERE id = ?", (order_id,)
+    ).fetchone()
+    conn.close()
+    credits_applied, discount_code = row if row else (None, None)
+
     db_update_status(order_id, "paid")
+
+    if credits_applied:
+        db_deduct_credits(user_id, credits_applied)
+    if discount_code:
+        db_consume_discount_code(discount_code)
+
     await context.bot.send_message(
         chat_id=user_id,
         text=(
@@ -4842,6 +5223,12 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == A_BACKUP:
         await backup_db(update, context)
+
+    elif text == A_DISCOUNT_CODES:
+        clear_admin_flow_state(context.user_data)
+        context.user_data["awaiting_discount_field"] = "percentage"
+        context.user_data["discount_data"] = {}
+        await update.message.reply_text("What discount percentage? (e.g. 20 for 20% off):")
 
 
 def format_fulfilment_info(item_id: str, info_json: str) -> str:
@@ -5191,6 +5578,68 @@ async def stock_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ),
         parse_mode=ParseMode.MARKDOWN,
     )
+
+
+async def discount_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Walks percentage -> times used -> duration (days), one message at
+    a time, then generates the code."""
+    field = context.user_data.get("awaiting_discount_field")
+    data = context.user_data.get("discount_data", {})
+    if not field:
+        return
+
+    text = update.message.text.strip()
+
+    if field == "percentage":
+        try:
+            pct = float(text)
+            if not (0 < pct <= 100):
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Send a number between 1 and 100 (e.g. 20 for 20% off):")
+            return
+        data["percentage"] = pct
+        context.user_data["discount_data"] = data
+        context.user_data["awaiting_discount_field"] = "uses"
+        await update.message.reply_text("How many times can this code be used (by how many people)?")
+        return
+
+    if field == "uses":
+        try:
+            uses = int(text)
+            if uses <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Send a whole number greater than 0:")
+            return
+        data["uses"] = uses
+        context.user_data["discount_data"] = data
+        context.user_data["awaiting_discount_field"] = "days"
+        await update.message.reply_text("Valid for how many days from now?")
+        return
+
+    if field == "days":
+        try:
+            days = int(text)
+            if days <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Send a whole number of days greater than 0:")
+            return
+
+        code = db_create_discount_code(data["percentage"], data["uses"], days)
+        context.user_data.pop("awaiting_discount_field", None)
+        context.user_data.pop("discount_data", None)
+        expires = (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%d")
+        await update.message.reply_text(
+            f"✅ Discount code created:\n\n`{code}`\n\n"
+            f"{data['percentage']:.0f}% off · usable {data['uses']} time(s) · "
+            f"expires {expires}\n\n"
+            "Customers can enter this at checkout. It's active immediately.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
 
 
 async def stock_edit_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7710,6 +8159,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get("awaiting_stock_edit_field"):
             await stock_edit_field_reply(update, context)
             return
+        if context.user_data.get("awaiting_discount_field"):
+            await discount_field_reply(update, context)
+            return
         if context.user_data.get("awaiting_imd_catalog_username"):
             await imd_catalog_username_reply(update, context)
             return
@@ -7756,6 +8208,10 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # admin while the customer got asked an out-of-context question.
     if context.user_data.get("awaiting_payer_name_for_order"):
         await payer_name_reply(update, context)
+        return
+
+    if context.user_data.get("awaiting_discount_code_for_order"):
+        await discount_code_reply(update, context)
         return
 
     if context.user_data.get("awaiting_ticket_field") == "message":
@@ -9152,6 +9608,18 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
+    if action == "goto_getfree":
+        if db_referral_intro_shown(user_id):
+            await send_referral_link(context, user_id, update.effective_chat.id)
+        else:
+            await update.message.reply_text(
+                GET_FREE_ACCOUNTS_INTRO,
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Want to proceed?", callback_data="getfree_proceed")]]
+                ),
+            )
+        return
+
     if action == "clear_unpaid":
         count = db_cancel_unpaid_orders(user_id)
         await update.message.reply_text(
@@ -9233,7 +9701,38 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     total = sum(MENU[i][1] * q for i, q in order_items.items())
+
+    # ── Apply discount code + credits server-side (authoritative — never
+    # trust client-computed amounts for the actual charge) ─────────────
+    discount_code_raw = (data.get("discount_code") or "").strip()
+    applied_discount_code = None
+    if discount_code_raw:
+        pct = db_check_discount_code(discount_code_raw)
+        if pct is not None:
+            total = round(total * (1 - pct / 100), 2)
+            applied_discount_code = discount_code_raw.strip().upper()
+
+    credits_applied = 0
+    if data.get("use_credits"):
+        balance = db_get_credits(user_id)
+        if balance > 0:
+            credit_value = balance * CREDIT_VALUE_USD
+            if credit_value >= total:
+                credits_applied = math.ceil(total / CREDIT_VALUE_USD) if total > 0 else 0
+                total = 0
+            else:
+                credits_applied = balance
+                total = round(total - credit_value, 2)
+
     order_id = db_create_order(user_id, username, order_items, total)
+    if credits_applied or applied_discount_code:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "UPDATE orders SET credits_applied = ?, discount_code = ? WHERE id = ?",
+            (credits_applied or None, applied_discount_code, order_id),
+        )
+        conn.commit()
+        conn.close()
     # Normalize naming inconsistencies between what the Mini App's JS sends
     # and what the in-chat flow stores (e.g. 'crypto' vs 'Cryptocurrency',
     # 'card' is already unified) — every downstream check (receipt prompts,
@@ -9334,24 +9833,29 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     # ── Route based on payment method ───────────────────
     pay_lower = pay_method.lower()
 
-    if pay_lower == "credits":
-        required = math.ceil(total / 4)
-        if not db_deduct_credits(user_id, required):
-            await update.message.reply_text(
-                f"❌ Not enough credits. You need {required} credits (${total:.2f}) — "
-                "earn more via the 🎁 Get Free Accounts tab."
-            )
+    # Credits and/or a discount code already reduced `total` above
+    # (server-verified). If that brought it to $0, the order is complete
+    # right now — no payment method needed at all, regardless of which
+    # tile the customer happened to have selected.
+    if total <= 0 and (credits_applied or applied_discount_code):
+        if credits_applied and not db_deduct_credits(user_id, credits_applied):
+            # Balance changed between page load and submission — bail out
+            # safely rather than deliver something that was never paid for.
             db_update_status(order_id, "cancelled")
+            await update.message.reply_text(
+                "Your credit balance changed and no longer covers this order — please try again."
+            )
             return
-        db_update_status(order_id, "paid")
-        db_set_payment_method(order_id, "Credits — Mini App")
-        await update.message.reply_text(
-            f"✅ Paid with credits!\n\n{summary}\n\nTotal: {CURRENCY}{total:.2f}\n\n"
-            "We're preparing your subscription(s) now."
-        )
-        await start_order_fulfilment(context, order_id, user_id, order_items)
-        await award_referral_credit(context, user_id)
-        await post_receipt_to_payments_channel(context, order_id)
+        db_set_payment_method(order_id, "Credits (Full)" if credits_applied else "Discount Code (Full)")
+        # Deducted directly above — clear credits_applied so
+        # finalize_order_confirmation doesn't deduct it a second time.
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE orders SET credits_applied = 0 WHERE id = ?", (order_id,))
+        conn.commit()
+        conn.close()
+        paid_note = f" using {credits_applied} credit(s)" if credits_applied else " via your discount code"
+        await update.message.reply_text(f"✅ Order #{order_id} paid in full{paid_note}!\n\n{summary}")
+        await finalize_order_confirmation(context, order_id, user_id, json.dumps(order_items))
         return
 
     if pay_lower == "stars":
@@ -9841,6 +10345,12 @@ def main():
     app.add_handler(CallbackQueryHandler(book_request_view, pattern=r"^bookreqview:"))
     app.add_handler(CallbackQueryHandler(goto_getfree, pattern=r"^goto_getfree$"))
     app.add_handler(CallbackQueryHandler(back_to_checkout, pattern=r"^back_to_checkout:"))
+    app.add_handler(CallbackQueryHandler(credits_start, pattern=r"^credits_start:"))
+    app.add_handler(CallbackQueryHandler(credits_getfree, pattern=r"^credits_getfree:"))
+    app.add_handler(CallbackQueryHandler(credits_full, pattern=r"^credits_full:"))
+    app.add_handler(CallbackQueryHandler(credits_partial, pattern=r"^credits_partial:"))
+    app.add_handler(CallbackQueryHandler(discount_start, pattern=r"^discount_start:"))
+    app.add_handler(CallbackQueryHandler(precheck_back, pattern=r"^precheck_back:"))
     app.add_handler(CallbackQueryHandler(my_subscription_detail, pattern=r"^mysub:"))
     app.add_handler(CallbackQueryHandler(subs_menu, pattern=r"^subs_menu$"))
     app.add_handler(CallbackQueryHandler(subs_registered, pattern=r"^subs_registered$"))
