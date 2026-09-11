@@ -160,7 +160,8 @@ MENU = {
     "up_offline_web": ("Uptodate Online + Offline Access 1 Year - Mobile App + Browser", 45.00),
     "up_pathways_app": ("Uptodate Online + Pathways Access 1 Year - Mobile App", 30.00),
     "up_pathways_web": ("Uptodate Online + Pathways Access 1 Year - Mobile App + Browser", 45.00),
-    "uptodate_ai_2m": ("Uptodate AI (Telegram Bot) - 2 Months", 10.00),
+    "uptodate_ai_2m": ("Uptodate Expert AI (Telegram Bot) - 3 Months", 10.00),
+    "uptodate_ai_official_3m": ("Uptodate Expert AI (Official App) - 3 Months", 20.00),
 
     # Amboss — Premium+Library (1 year, or a fixed-date promo), or
     # Library-only.
@@ -228,7 +229,11 @@ CATALOG = {
                     "up_pathways_web": {"label": "Mobile App + Browser", "item": "up_pathways_web"},
                 },
             },
-            "uptodate_ai_2m": {"label": "Uptodate AI (Telegram Bot) - 2 Months", "item": "uptodate_ai_2m"},
+            "uptodate_ai_2m": {"label": "Uptodate Expert AI (Telegram Bot) - 3 Months", "item": "uptodate_ai_2m"},
+            "uptodate_ai_official_3m": {
+                "label": "Uptodate Expert AI (Official App) - 3 Months",
+                "item": "uptodate_ai_official_3m",
+            },
         },
     },
     "amboss": {
@@ -267,7 +272,7 @@ UPTODATE_AI_CODES_DURATION = "uptodate_ai_2m"
 SERIAL_POOL_LABELS = {
     "6m": "iMD — 6 Months",
     "1y": "iMD — 1 Year",
-    UPTODATE_AI_CODES_DURATION: "Uptodate AI (2 Months)",
+    UPTODATE_AI_CODES_DURATION: "Uptodate Expert AI - Telegram Bot (3 Months)",
 }
 IMD_NEW_ITEMS = {"imd_new_6m", "imd_new_1y"}
 IMD_RENEW_ITEMS = {"imd_renew_6m", "imd_renew_1y"}
@@ -281,7 +286,7 @@ IMD_RENEW_ITEMS = {"imd_renew_6m", "imd_renew_1y"}
 UPTODATE_TICKET_ITEMS = {
     "item1", "item3",  # legacy
     "up_online_app", "up_online_web", "up_offline_app", "up_offline_web",
-    "up_pathways_app", "up_pathways_web",
+    "up_pathways_app", "up_pathways_web", "uptodate_ai_official_3m",
 }
 
 IMD_FORGOT_PASSWORD_URL = "https://en.imedicaldoctor.net/forgot.php"
@@ -8639,8 +8644,8 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
                 await context.bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
                     text=(
-                        f"⚠️ Order #{order_id} — Uptodate AI (Telegram Bot) sold but the codes "
-                        "pool is empty. Add more codes via 📦 Manage Stock → Uptodate AI → Stock, "
+                        f"⚠️ Order #{order_id} — Uptodate Expert AI (Telegram Bot) sold but the codes "
+                        "pool is empty. Add more codes via 📦 Manage Stock → Uptodate Expert AI → Stock, "
                         "then deliver this one manually."
                     ),
                     reply_markup=InlineKeyboardMarkup(
@@ -8657,7 +8662,7 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
     db_set_fulfilment_info(fulfilment_id, {"code": code})
 
     message = (
-        "✅ Your Uptodate AI (Telegram Bot) subscription is ready!\n\n"
+        "✅ Your Uptodate Expert AI (Telegram Bot) subscription is ready!\n\n"
         "1️⃣ Click on @Up2down_bot\n"
         f"2️⃣ Type /Redeem {code}"
     )
@@ -8672,7 +8677,7 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
         try:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
-                text=f"✅ Delivered Uptodate AI code {code} — Order #{order_id}",
+                text=f"✅ Delivered Uptodate Expert AI code {code} — Order #{order_id}",
             )
         except Exception:
             pass
