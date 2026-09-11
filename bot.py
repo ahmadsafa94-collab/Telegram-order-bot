@@ -160,7 +160,8 @@ MENU = {
     "up_offline_web": ("Uptodate Online + Offline Access 1 Year - Mobile App + Browser", 45.00),
     "up_pathways_app": ("Uptodate Online + Pathways Access 1 Year - Mobile App", 30.00),
     "up_pathways_web": ("Uptodate Online + Pathways Access 1 Year - Mobile App + Browser", 45.00),
-    "uptodate_ai_2m": ("Uptodate AI (Telegram Bot) - 2 Months", 10.00),
+    "uptodate_ai_2m": ("Uptodate Expert AI (Telegram Bot) - 3 Months", 10.00),
+    "uptodate_ai_official_3m": ("Uptodate Expert AI (Official App) - 3 Months", 20.00),
 
     # Amboss — Premium+Library (1 year, or a fixed-date promo), or
     # Library-only.
@@ -228,7 +229,11 @@ CATALOG = {
                     "up_pathways_web": {"label": "Mobile App + Browser", "item": "up_pathways_web"},
                 },
             },
-            "uptodate_ai_2m": {"label": "Uptodate AI (Telegram Bot) - 2 Months", "item": "uptodate_ai_2m"},
+            "uptodate_ai_2m": {"label": "Uptodate Expert AI (Telegram Bot) - 3 Months", "item": "uptodate_ai_2m"},
+            "uptodate_ai_official_3m": {
+                "label": "Uptodate Expert AI (Official App) - 3 Months",
+                "item": "uptodate_ai_official_3m",
+            },
         },
     },
     "amboss": {
@@ -267,7 +272,7 @@ UPTODATE_AI_CODES_DURATION = "uptodate_ai_2m"
 SERIAL_POOL_LABELS = {
     "6m": "iMD — 6 Months",
     "1y": "iMD — 1 Year",
-    UPTODATE_AI_CODES_DURATION: "Uptodate AI (2 Months)",
+    UPTODATE_AI_CODES_DURATION: "Uptodate AI 3 Months",
 }
 IMD_NEW_ITEMS = {"imd_new_6m", "imd_new_1y"}
 IMD_RENEW_ITEMS = {"imd_renew_6m", "imd_renew_1y"}
@@ -281,7 +286,7 @@ IMD_RENEW_ITEMS = {"imd_renew_6m", "imd_renew_1y"}
 UPTODATE_TICKET_ITEMS = {
     "item1", "item3",  # legacy
     "up_online_app", "up_online_web", "up_offline_app", "up_offline_web",
-    "up_pathways_app", "up_pathways_web",
+    "up_pathways_app", "up_pathways_web", "uptodate_ai_official_3m",
 }
 
 IMD_FORGOT_PASSWORD_URL = "https://en.imedicaldoctor.net/forgot.php"
@@ -925,6 +930,12 @@ def db_init():
         )
         """
     )
+    # Added later so an edited delivery can update the customer's original
+    # message in place instead of only sending a follow-up.
+    try:
+        conn.execute("ALTER TABLE deliveries ADD COLUMN message_id INTEGER")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS fulfilment (
@@ -975,18 +986,24 @@ def db_init():
     conn.close()
 
 
-def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str):
+def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, message_id: int = None) -> int:
     """Records one delivered subscription. An order with several products
     produces several rows here, so 'My Subscriptions' can list them
-    separately instead of lumping a whole order into one entry."""
+    separately instead of lumping a whole order into one entry.
+
+    message_id is the id of the Telegram message sent to the customer,
+    stored so an admin can later edit it in place. Returns the new
+    delivery row's id."""
     conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "INSERT INTO deliveries (order_id, user_id, item_id, message, delivered_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (order_id, user_id, item_id, message, datetime.utcnow().isoformat()),
+    cur = conn.execute(
+        "INSERT INTO deliveries (order_id, user_id, item_id, message, message_id, delivered_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (order_id, user_id, item_id, message, message_id, datetime.utcnow().isoformat()),
     )
+    delivery_id = cur.lastrowid
     conn.commit()
     conn.close()
+    return delivery_id
 
 
 def db_user_deliveries(user_id: int):
@@ -1008,6 +1025,26 @@ def db_get_delivery(delivery_id: int, user_id: int):
     ).fetchone()
     conn.close()
     return row[0] if row else None
+
+
+def db_get_delivery_admin(delivery_id: int):
+    """Admin-only lookup (no user_id scoping) used when editing a
+    previously delivered credentials message."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT id, order_id, user_id, item_id, message, message_id, delivered_at "
+        "FROM deliveries WHERE id = ?",
+        (delivery_id,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def db_update_delivery_message(delivery_id: int, message: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE deliveries SET message = ? WHERE id = ?", (message, delivery_id))
+    conn.commit()
+    conn.close()
 
 
 
@@ -2047,6 +2084,15 @@ def db_save_delivery(order_id: int, credentials_text: str):
         "UPDATE orders SET status = ?, credentials = ?, delivered_at = ? WHERE id = ?",
         ("delivered", credentials_text, datetime.utcnow().isoformat(), order_id),
     )
+    conn.commit()
+    conn.close()
+
+
+def db_update_order_credentials(order_id: int, credentials_text: str):
+    """Keeps orders.credentials (shown by /order) in sync after an admin
+    edits a previously delivered message."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE orders SET credentials = ? WHERE id = ?", (credentials_text, order_id))
     conn.commit()
     conn.close()
 
@@ -8198,6 +8244,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get("awaiting_credentials_fulfilment"):
             await credentials_reply(update, context)
             return
+        if context.user_data.get("awaiting_edit_delivery"):
+            await edit_delivery_reply(update, context)
+            return
 
     # ── 3. Customer collection flows ─────────────────────────────────
     # Receipt/payer-name comes first: once a photo has been uploaded, the
@@ -8595,8 +8644,8 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
                 await context.bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
                     text=(
-                        f"⚠️ Order #{order_id} — Uptodate AI (Telegram Bot) sold but the codes "
-                        "pool is empty. Add more codes via 📦 Manage Stock → Uptodate AI → Stock, "
+                        f"⚠️ Order #{order_id} — Uptodate Expert AI (Telegram Bot) sold but the codes "
+                        "pool is empty. Add more codes via 📦 Manage Stock → Uptodate Expert AI → Stock, "
                         "then deliver this one manually."
                     ),
                     reply_markup=InlineKeyboardMarkup(
@@ -8613,7 +8662,7 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
     db_set_fulfilment_info(fulfilment_id, {"code": code})
 
     message = (
-        "✅ Your Uptodate AI (Telegram Bot) subscription is ready!\n\n"
+        "✅ Your Uptodate Expert AI (Telegram Bot) subscription is ready!\n\n"
         "1️⃣ Click on @Up2down_bot\n"
         f"2️⃣ Type /Redeem {code}"
     )
@@ -8628,7 +8677,7 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
         try:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
-                text=f"✅ Delivered Uptodate AI code {code} — Order #{order_id}",
+                text=f"✅ Delivered Uptodate Expert AI code {code} — Order #{order_id}",
             )
         except Exception:
             pass
@@ -9269,15 +9318,20 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     credentials_text = update.message.text
     name = MENU.get(item_id, (item_id,))[0]
 
-    await context.bot.send_message(
+    sent_message = await context.bot.send_message(
         chat_id=user_id,
         text=f"🔑 Here are your account details for {name} (Order #{order_id}):\n\n{credentials_text}",
     )
     db_save_delivery(order_id, credentials_text)
-    db_add_delivery(order_id, user_id, item_id, credentials_text)
+    delivery_id = db_add_delivery(order_id, user_id, item_id, credentials_text, sent_message.message_id)
     await post_subscription_to_channel(context, order_id, item_id, credentials_text)
     db_set_fulfilment_state(fulfilment_id, "delivered")
-    await update.message.reply_text(f"✅ {name} delivered to the customer (Order #{order_id}).")
+    await update.message.reply_text(
+        f"✅ {name} delivered to the customer (Order #{order_id}).",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("✏️ Edit credentials", callback_data=f"editdeliv:{delivery_id}")]]
+        ),
+    )
 
     # A manual delivery ends whatever the customer was mid-way through for
     # this unit, so clear any stale collection state and move the order on —
@@ -9292,6 +9346,78 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ):
         customer_data.pop(key, None)
     await process_next_in_queue(context, user_id, order_id)
+
+
+async def edit_delivery_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '✏️ Edit credentials' on a previously delivered
+    message. Prompts for the corrected text, matching the 'Send
+    Credentials' flow but targeting an existing delivery row."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    delivery_id = int(query.data.split(":", 1)[1])
+    row = db_get_delivery_admin(delivery_id)
+    if not row:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That delivery no longer exists.")
+        return
+
+    _, order_id, user_id, item_id, message, message_id, delivered_at = row
+    context.user_data["awaiting_edit_delivery"] = delivery_id
+
+    name = MENU.get(item_id, (item_id,))[0]
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=(
+            f"Reply with the corrected account details for {name} (Order #{order_id}).\n\n"
+            f"Current:\n{message}"
+        ),
+    )
+
+
+async def edit_delivery_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Catches the admin's next text message after tapping 'Edit
+    credentials' and applies it: edits the original message in the
+    customer's chat when possible, and updates the stored records so
+    'My Subscriptions' and /order reflect the correction too."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    delivery_id = context.user_data.pop("awaiting_edit_delivery", None)
+    if not delivery_id:
+        return  # admin isn't in the middle of editing anything
+
+    row = db_get_delivery_admin(delivery_id)
+    if not row:
+        await update.message.reply_text("That delivery no longer exists.")
+        return
+
+    _, order_id, user_id, item_id, _old_message, message_id, delivered_at = row
+    new_text = update.message.text
+    name = MENU.get(item_id, (item_id,))[0]
+    new_body = f"🔑 Here are your account details for {name} (Order #{order_id}):\n\n{new_text}"
+
+    edited_in_place = False
+    if message_id:
+        try:
+            await context.bot.edit_message_text(chat_id=user_id, message_id=message_id, text=new_body)
+            edited_in_place = True
+        except Exception:
+            logger.exception("Failed to edit delivery message %s for user %s", delivery_id, user_id)
+
+    if not edited_in_place:
+        # Can't edit in place (message too old, deleted, or its id was
+        # never captured) — send the correction as a new message instead.
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"✏️ Updated account details for {name} (Order #{order_id}):\n\n{new_text}",
+        )
+
+    db_update_delivery_message(delivery_id, new_text)
+    db_update_order_credentials(order_id, new_text)
+    await update.message.reply_text(f"✅ Updated {name} credentials (Order #{order_id}).")
 
 
 async def add_serials_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -9521,12 +9647,23 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text += "\nNo credentials delivered yet."
 
-    await update.message.reply_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{oid}")]]
-        ),
-    )
+    # List each delivered item separately (an order can contain several
+    # products) so the admin can pick exactly which one to edit.
+    conn = sqlite3.connect(DB_PATH)
+    delivery_rows = conn.execute(
+        "SELECT id, item_id, message FROM deliveries WHERE order_id = ? ORDER BY id",
+        (oid,),
+    ).fetchall()
+    conn.close()
+
+    buttons = [[InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{oid}")]]
+    for delivery_id, item_id, message in delivery_rows:
+        name = MENU.get(item_id, (item_id or "item",))[0]
+        buttons.append(
+            [InlineKeyboardButton(f"✏️ Edit {name}", callback_data=f"editdeliv:{delivery_id}")]
+        )
+
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 # ------------------------------------------------------------------
@@ -10293,6 +10430,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_action, pattern=r"^admin_(confirm|reject):"))
     app.add_handler(CallbackQueryHandler(admin_comment_start, pattern=r"^admin_comment:"))
     app.add_handler(CallbackQueryHandler(deliver_start, pattern=r"^deliver:"))
+    app.add_handler(CallbackQueryHandler(edit_delivery_start, pattern=r"^editdeliv:"))
     app.add_handler(CallbackQueryHandler(reg_go, pattern=r"^reg_go:"))
     app.add_handler(CallbackQueryHandler(add_serials_pick_duration, pattern=r"^addser:"))
     app.add_handler(CallbackQueryHandler(serials_add_menu, pattern=r"^serials_add_menu$"))
