@@ -272,7 +272,7 @@ UPTODATE_AI_CODES_DURATION = "uptodate_ai_2m"
 SERIAL_POOL_LABELS = {
     "6m": "iMD — 6 Months",
     "1y": "iMD — 1 Year",
-    UPTODATE_AI_CODES_DURATION: "Uptodate Expert AI - Telegram Bot (3 Months)",
+    UPTODATE_AI_CODES_DURATION: "Uptodate AI 3 Months",
 }
 IMD_NEW_ITEMS = {"imd_new_6m", "imd_new_1y"}
 IMD_RENEW_ITEMS = {"imd_renew_6m", "imd_renew_1y"}
