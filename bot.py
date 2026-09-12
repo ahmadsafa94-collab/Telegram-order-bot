@@ -389,6 +389,14 @@ DELIVERY_48H_MESSAGE = (
     "If you haven't heard from us after 48 hours, please contact support from the menu."
 )
 
+# Cross-promo sent as a follow-up after every account delivery, regardless
+# of which product or delivery path it came through.
+DELIVERY_PROMO_MESSAGE = (
+    "🛑 Our new bot @Medicaltoolkit_bot offers clinical and study tools for "
+    "students, residents, and clinicians. Try it now for free.\n\n"
+    "🛑 Join our channel @uptodate_accounts to stay Connected."
+)
+
 # The fields collected for non-iMD subscriptions, in order.
 GENERIC_FIELDS = [
     ("first_name", "First name:"),
@@ -4959,6 +4967,17 @@ def extract_login_from_delivery_message(text: str):
     return username, password
 
 
+async def send_delivery_promo(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    """Sent as a follow-up right after every account delivery, whichever
+    path it came through. Isolated with its own error handling — a
+    failure here must never affect the actual delivery, which has
+    already happened by the time this runs."""
+    try:
+        await context.bot.send_message(chat_id=user_id, text=DELIVERY_PROMO_MESSAGE)
+    except Exception:
+        logger.exception("Failed to send delivery promo message to user %s", user_id)
+
+
 async def post_subscription_to_channel(context: ContextTypes.DEFAULT_TYPE, order_id: int, item_id: str, delivery_message: str):
     """Posts a delivered subscription to the private Subscriptions channel:
     the product, its login, the date, and the customer. Isolated with its
@@ -7808,6 +7827,7 @@ async def imd_manual_deliver(update: Update, context: ContextTypes.DEFAULT_TYPE)
     message = build_imd_delivery_message(username, password, duration=duration)
 
     await context.bot.send_message(chat_id=user_id, text=message)
+    await send_delivery_promo(context, user_id)
     db_save_delivery(order_id, message)
     db_add_delivery(order_id, user_id, item_id, message)
     await post_subscription_to_channel(context, order_id, item_id, message)
@@ -8672,6 +8692,8 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
         await context.bot.send_message(chat_id=user_id, text=message)
     except Exception:
         logger.exception("Failed to deliver Uptodate AI code to user %s", user_id)
+    else:
+        await send_delivery_promo(context, user_id)
 
     if ADMIN_CHAT_ID:
         try:
@@ -8957,6 +8979,7 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
         )
         if customer_user_id:
             await context.bot.send_message(chat_id=customer_user_id, text=delivery_message)
+            await send_delivery_promo(context, customer_user_id)
             await post_subscription_to_channel(context, order_id, data.get("item_id"), delivery_message)
             if data.get("fulfilment_id"):
                 db_set_fulfilment_state(data["fulfilment_id"], "delivered")
@@ -9322,6 +9345,7 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=user_id,
         text=f"🔑 Here are your account details for {name} (Order #{order_id}):\n\n{credentials_text}",
     )
+    await send_delivery_promo(context, user_id)
     db_save_delivery(order_id, credentials_text)
     delivery_id = db_add_delivery(order_id, user_id, item_id, credentials_text, sent_message.message_id)
     await post_subscription_to_channel(context, order_id, item_id, credentials_text)
