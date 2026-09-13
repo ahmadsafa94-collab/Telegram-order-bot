@@ -5327,6 +5327,7 @@ async def admin_input_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("Today", callback_data="sales:today")],
                 [InlineKeyboardButton("This Week", callback_data="sales:week")],
                 [InlineKeyboardButton("This Month", callback_data="sales:month")],
+                [InlineKeyboardButton("Overall (Lifetime)", callback_data="sales:overall")],
             ]
         ),
     )
@@ -5344,20 +5345,25 @@ async def admin_sales_report(update: Update, context: ContextTypes.DEFAULT_TYPE)
     offset = timedelta(hours=REPORT_UTC_OFFSET)
     local_now = datetime.utcnow() + offset
 
-    if period == "today":
-        local_since = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-        label = "Today"
-    elif period == "week":
-        local_since = (local_now - timedelta(days=local_now.weekday())).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        label = "This week"
+    if period == "overall":
+        label = "Overall (Lifetime)"
+        since_iso = "0000-01-01T00:00:00"
     else:
-        local_since = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        label = "This month"
+        if period == "today":
+            local_since = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            label = "Today"
+        elif period == "week":
+            local_since = (local_now - timedelta(days=local_now.weekday())).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            label = "This week"
+        else:
+            local_since = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            label = "This month"
+        # Convert the local boundary back to UTC, since that's how orders are stored.
+        since_iso = (local_since - offset).isoformat()
 
-    # Convert the local boundary back to UTC, since that's how orders are stored.
-    counts, revenue = db_sales_since((local_since - offset).isoformat())
+    counts, revenue = db_sales_since(since_iso)
 
     back = InlineKeyboardMarkup(
         [
@@ -5365,7 +5371,8 @@ async def admin_sales_report(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 InlineKeyboardButton("Today", callback_data="sales:today"),
                 InlineKeyboardButton("Week", callback_data="sales:week"),
                 InlineKeyboardButton("Month", callback_data="sales:month"),
-            ]
+            ],
+            [InlineKeyboardButton("Overall (Lifetime)", callback_data="sales:overall")],
         ]
     )
 
@@ -8204,6 +8211,16 @@ async def orders_menu_route(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delivered_subscriptions_menu(faux_update, context)
 
 
+def parse_serial_codes(text: str) -> list:
+    """Splits a block of pasted serial codes into individual codes.
+    Accepts one per line, space-separated, or dash-separated (e.g.
+    "a - b - c") — the dash only counts as a separator when it has
+    whitespace on both sides, so a code that uses dashes internally
+    (e.g. "ABCD-1234-EFGH") is left intact."""
+    parts = re.split(r"\s+-\s+|\s+", text.strip())
+    return [p for p in parts if p]
+
+
 async def add_serials_pick_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin picked which pool to add serials to — now wait for the codes."""
     query = update.callback_query
@@ -8218,8 +8235,8 @@ async def add_serials_pick_duration(update: Update, context: ContextTypes.DEFAUL
     context.user_data["add_serials_duration"] = duration
     label = SERIAL_POOL_LABELS.get(duration, duration)
     await query.edit_message_text(
-        f"Send the {label} serial codes now — one per line, or separated by spaces. "
-        "You can paste many at once."
+        f"Send the {label} serial codes now — one per line, separated by spaces, or "
+        "separated by a dash (e.g. a - b - c). You can paste many at once."
     )
 
 
@@ -8233,7 +8250,7 @@ async def admin_input_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if mode == "add_serials":
         duration = context.user_data.pop("add_serials_duration", None)
-        codes = text.split()
+        codes = parse_serial_codes(text)
         added = db_add_serials(duration, codes)
         total = db_count_serials(duration)
         label = SERIAL_POOL_LABELS.get(duration, duration)
@@ -9542,14 +9559,16 @@ async def edit_delivery_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def add_serials_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only: /addserials <6m|1y|uptodateai> <code1> <code2> ... —
     bulk-adds serials/codes to the auto-assignment pool. Codes can be
-    separated by spaces or pasted on separate lines in the same message."""
+    separated by spaces, dashes (e.g. a - b - c), or pasted on separate
+    lines in the same message."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
     if len(context.args) < 2:
         await update.message.reply_text(
             "Usage: /addserials <6m|1y|uptodateai> <code1> <code2> ...\n"
-            "You can paste many codes at once, one per line or space-separated."
+            "You can paste many codes at once — one per line, space-separated, "
+            "or dash-separated (e.g. a - b - c)."
         )
         return
 
@@ -9564,7 +9583,7 @@ async def add_serials_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Duration must be '6m', '1y', or 'uptodateai'.")
         return
 
-    codes = context.args[1:]
+    codes = parse_serial_codes(" ".join(context.args[1:]))
     added = db_add_serials(duration, codes)
     total_available = db_count_serials(duration)
     duration_label = SERIAL_POOL_LABELS.get(duration, duration)
