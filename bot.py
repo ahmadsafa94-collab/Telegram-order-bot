@@ -7842,6 +7842,98 @@ async def imd_manual_deliver(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await process_next_in_queue(context, user_id, order_id)
 
 
+async def imd_manual_cred_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '🔑 Deliver ... Manually' on an undelivered iMD unit
+    from /order — used when there's nothing on file to fall back on
+    (no registration data collected, automation never ran). Prompts for
+    the username, then the password (skipped for renewals, which don't
+    have one), then sends the standard iMD delivery message."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    fulfilment_id = int(query.data.split(":", 1)[1])
+    row = db_get_fulfilment(fulfilment_id)
+    if not row:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That item no longer exists.")
+        return
+
+    _, order_id, user_id, item_id, unit_no, state, info_json = row
+    name = MENU.get(item_id, (item_id,))[0]
+    context.user_data["imd_manual_cred"] = {"fulfilment_id": fulfilment_id, "step": "username"}
+
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=f"What's the username for {name} (Order #{order_id})?",
+    )
+
+
+async def imd_manual_cred_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Catches the admin's username/password replies after tapping
+    '🔑 Deliver ... Manually' and, once both are in (or just the
+    username, for a renewal), sends the iMD delivery message."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    state = context.user_data.get("imd_manual_cred")
+    if not state:
+        return  # admin isn't in the middle of an iMD manual delivery
+
+    fulfilment_id = state["fulfilment_id"]
+    row = db_get_fulfilment(fulfilment_id)
+    if not row:
+        context.user_data.pop("imd_manual_cred", None)
+        await update.message.reply_text("That item no longer exists.")
+        return
+    _, order_id, user_id, item_id, unit_no, fstate, info_json = row
+    name = MENU.get(item_id, (item_id,))[0]
+    is_renew = item_id in IMD_RENEW_ITEMS
+
+    if state["step"] == "username":
+        state["username"] = update.message.text.strip()
+        if is_renew:
+            # Renewals have no password to ask for — go straight to delivery.
+            context.user_data.pop("imd_manual_cred", None)
+            await _finish_imd_manual_delivery(context, order_id, user_id, item_id, fulfilment_id, state["username"], None)
+        else:
+            state["step"] = "password"
+            await update.message.reply_text(f"What's the password for {name} (Order #{order_id})?")
+        return
+
+    # step == "password"
+    password = update.message.text.strip()
+    context.user_data.pop("imd_manual_cred", None)
+    await _finish_imd_manual_delivery(context, order_id, user_id, item_id, fulfilment_id, state["username"], password)
+
+
+async def _finish_imd_manual_delivery(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int,
+                                       item_id: str, fulfilment_id: int, username: str, password: str):
+    """Shared tail end of the manual iMD delivery flow — builds the
+    standard message, sends it, and records the delivery exactly like
+    every other delivery path."""
+    duration = IMD_DURATION_MAP.get(item_id)
+    message = build_imd_delivery_message(username, password, duration=duration)
+    name = MENU.get(item_id, (item_id,))[0]
+
+    await context.bot.send_message(chat_id=user_id, text=message)
+    await send_delivery_promo(context, user_id)
+    db_save_delivery(order_id, message)
+    db_add_delivery(order_id, user_id, item_id, message)
+    await post_subscription_to_channel(context, order_id, item_id, message)
+    db_set_fulfilment_state(fulfilment_id, "delivered")
+    context.application.bot_data.get("pending_registrations", {}).pop(order_id, None)
+
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=f"✅ {name} delivered to the customer (Order #{order_id}).",
+    )
+
+    # Continue with any remaining items in the same order.
+    await process_next_in_queue(context, user_id, order_id)
+
+
 async def admin_pending_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -8266,6 +8358,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if context.user_data.get("awaiting_edit_delivery"):
             await edit_delivery_reply(update, context)
+            return
+        if context.user_data.get("imd_manual_cred"):
+            await imd_manual_cred_reply(update, context)
             return
 
     # ── 3. Customer collection flows ─────────────────────────────────
@@ -9678,6 +9773,13 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "SELECT id, item_id, message FROM deliveries WHERE order_id = ? ORDER BY id",
         (oid,),
     ).fetchall()
+    # Undelivered iMD units — offer a manual username/password delivery for
+    # each, for when automatic registration never went through (or wasn't
+    # tried) and there's nothing on file to fall back on.
+    pending_imd_rows = conn.execute(
+        "SELECT id, item_id, unit_no FROM fulfilment WHERE order_id = ? AND state != 'delivered'",
+        (oid,),
+    ).fetchall()
     conn.close()
 
     buttons = [[InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{oid}")]]
@@ -9685,6 +9787,14 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = MENU.get(item_id, (item_id or "item",))[0]
         buttons.append(
             [InlineKeyboardButton(f"✏️ Edit {name}", callback_data=f"editdeliv:{delivery_id}")]
+        )
+    for fulfilment_id, item_id, unit_no in pending_imd_rows:
+        if item_id not in IMD_TRIGGER_ITEMS:
+            continue
+        name = MENU.get(item_id, (item_id,))[0]
+        suffix = f" #{unit_no}" if unit_no > 1 else ""
+        buttons.append(
+            [InlineKeyboardButton(f"🔑 Deliver {name}{suffix} Manually", callback_data=f"imdmancred:{fulfilment_id}")]
         )
 
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -10532,6 +10642,7 @@ def main():
     app.add_handler(CallbackQueryHandler(announcement_back, pattern=r"^ann_back$"))
     app.add_handler(CallbackQueryHandler(admin_pending_back, pattern=r"^apend_back$"))
     app.add_handler(CallbackQueryHandler(imd_manual_deliver, pattern=r"^imddeliver:"))
+    app.add_handler(CallbackQueryHandler(imd_manual_cred_start, pattern=r"^imdmancred:"))
     app.add_handler(CallbackQueryHandler(admin_sales_report, pattern=r"^sales:"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
