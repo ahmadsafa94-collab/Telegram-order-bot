@@ -3660,7 +3660,6 @@ def checkout_view(order_id: int):
         [InlineKeyboardButton("⭐ Pay with Telegram Stars", callback_data=f"pay_stars:{order_id}")],
         [InlineKeyboardButton("💳 Pay using Visa/Mastercard", callback_data=f"pay_card:{order_id}")],
         [InlineKeyboardButton("₿ Pay with Cryptocurrency", callback_data=f"pay_crypto:{order_id}")],
-        [InlineKeyboardButton("💸 Remitly", callback_data=f"usa_app:{order_id}:Remitly")],
         [InlineKeyboardButton("🏦 Ria", callback_data=f"usa_app:{order_id}:Ria")],
         [InlineKeyboardButton("📨 Paysend", callback_data=f"usa_app:{order_id}:Paysend")],
         [InlineKeyboardButton("🔄 Revolut", callback_data=f"usa_app:{order_id}:Revolut")],
