@@ -1281,6 +1281,22 @@ def db_sales_since(since_iso: str):
     return sorted(counts.items(), key=lambda kv: -kv[1]), revenue
 
 
+def db_sales_by_method_since(since_iso: str):
+    """Revenue and order count grouped by payment_method, same window and
+    paid-order filter as db_sales_since — lets the admin see how much
+    came in via Stars vs. cash transfers vs. card, etc."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT COALESCE(payment_method, 'Unknown'), SUM(total), COUNT(*) FROM orders "
+        "WHERE created_at >= ? AND status NOT IN ('awaiting_payment', 'awaiting_receipt', "
+        "'awaiting_confirmation', 'cancelled', 'rejected') "
+        "GROUP BY COALESCE(payment_method, 'Unknown') ORDER BY SUM(total) DESC",
+        (since_iso,),
+    ).fetchall()
+    conn.close()
+    return [(method, float(total or 0), count) for method, total, count in rows]
+
+
 def db_add_message(order_id: int, user_id: int, direction: str, body: str, delivered: bool = True) -> int:
     """Records one message in either direction. `delivered` tracks whether
     the live push to Telegram actually succeeded — if not, the Inbox is
@@ -5315,6 +5331,27 @@ def format_fulfilment_info(item_id: str, info_json: str) -> str:
     return "\n".join(f"{labels.get(k, k)}: {v}" for k, v in info.items())
 
 
+PAYMENT_METHOD_ICONS = {
+    "Telegram Stars": "⭐",
+    "card": "💳",
+    "Cryptocurrency": "₿",
+    "Credits": "🎁",
+    "Credits (Full)": "🎁",
+    "Discount Code (Full)": "🏷️",
+    "Mini App": "📱",
+    "Unknown": "❔",
+}
+
+
+def payment_method_display(method: str) -> str:
+    """Icon + label for a payment_method value in the sales report. Falls
+    back to a generic 💵 for anything not in the map above — local-currency
+    country names and USA remittance app names (Ria, Paysend, etc.) show
+    up as-is rather than needing an entry each."""
+    label = "Card" if method == "card" else method
+    return f"{PAYMENT_METHOD_ICONS.get(method, '💵')} {label}"
+
+
 async def admin_input_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sales summary — pick a period."""
     if update.effective_user.id != ADMIN_CHAT_ID:
@@ -5388,6 +5425,13 @@ async def admin_sales_report(update: Update, context: ContextTypes.DEFAULT_TYPE)
     lines.append("")
     lines.append(f"Total accounts: {total_units}")
     lines.append(f"Revenue: {CURRENCY}{revenue:.2f}")
+
+    method_rows = db_sales_by_method_since(since_iso)
+    if method_rows:
+        lines.append("")
+        lines.append("By payment method:")
+        for method, method_revenue, count in method_rows:
+            lines.append(f"{payment_method_display(method)}: {CURRENCY}{method_revenue:.2f} ({count})")
 
     await query.edit_message_text("\n".join(lines), reply_markup=back)
 
