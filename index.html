@@ -49,21 +49,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .ico-badge.vis{opacity:1}
 .ico-btn.acc{background:var(--acc)}
 
-/* ── Step bar ───────────────── */
-.steps{display:flex;padding:8px 13px 10px}
-.step{flex:1;text-align:center;position:relative}
-.step::after{content:'';position:absolute;top:11px;left:50%;right:-50%;
-  height:2px;background:rgba(255,255,255,.09);z-index:0}
-.step:last-child::after{display:none}
-.step-dot{width:22px;height:22px;border-radius:50%;border:2px solid rgba(255,255,255,.15);
-  background:var(--bg);display:flex;align-items:center;justify-content:center;
-  margin:0 auto 3px;font-size:10px;font-weight:700;color:var(--hint);
-  position:relative;z-index:1;transition:all .2s}
-.step.done .step-dot{background:var(--teal);border-color:var(--teal);color:#fff}
-.step.active .step-dot{background:var(--acc);border-color:var(--acc);color:#fff}
-.step-lbl{font-size:10px;color:var(--hint);transition:color .2s}
-.step.active .step-lbl{color:var(--text)}
-
 /* ── Pages ──────────────────── */
 .page{display:none;padding:13px}
 .page.on{display:block}
@@ -75,6 +60,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 /* ── Catalog tabs ───────────── */
 .tabs{display:flex;gap:7px;padding:10px 0 4px;overflow-x:auto;scrollbar-width:none}
 .tabs::-webkit-scrollbar{display:none}
+.tabs+.tabs{padding-top:0}
 .tab{flex-shrink:0;padding:6px 12px;border-radius:99px;
   border:1.5px solid rgba(255,255,255,.12);font-size:12px;font-weight:500;
   color:var(--hint);cursor:pointer;background:transparent;transition:all .15s}
@@ -257,11 +243,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
       </button>
     </div>
   </div>
-  <div class="steps">
-    <div class="step active" id="s1"><div class="step-dot">1</div><div class="step-lbl">Catalog</div></div>
-    <div class="step" id="s2"><div class="step-dot">2</div><div class="step-lbl">Details</div></div>
-    <div class="step" id="s3"><div class="step-dot">3</div><div class="step-lbl">Payment</div></div>
-  </div>
 </div>
 
 <!-- Page 1: Catalog -->
@@ -272,6 +253,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     <button class="search-clear" id="searchClearBtn" onclick="clearSearch()">✕</button>
   </div>
   <div class="tabs" id="tabs"></div>
+  <div class="tabs" id="tabsMore"></div>
   <div id="catSec"></div>
   <div id="searchResults" style="display:none"></div>
 </div>
@@ -384,23 +366,6 @@ const IMD = new Set(['imd_6m','imd_1y']);
 const NO_DETAILS_NEEDED = new Set(['uptodate_ai_2m']);
 
 const CATALOG = [
-  {id:'other',name:'All Subscriptions',emoji:'📚',single:[
-    {id:'dynamed',e:'💊',name:'Dynamed',price:20},
-    {id:'dynamedex',e:'💊',name:'DynamedEx',price:30},
-    {id:'bmj_best_practice',e:'📋',name:'BMJ Best Practice',price:20},
-    {id:'bmj_learning',e:'🎓',name:'BMJ Learning',price:30},
-    {id:'visualdx',e:'🔬',name:'VisualDx',price:20},
-    {id:'lexicomp',e:'💉',name:'Lexicomp Mobile',price:20},
-    {id:'accessmedicine',e:'🏥',name:'AccessMedicine',price:20},
-    {id:'boardvitals',e:'📝',name:'Boardvitals VIP',price:55},
-    {id:'clinicalkey',e:'🔑',name:'ClinicalKey',price:35},
-    {id:'sciencedirect',e:'🔭',name:'ScienceDirect',price:35},
-    {id:'statdx',e:'📊',name:'StatDx',price:35},
-    {id:'nejm',e:'📰',name:'NEJM',price:20},
-    {id:'jama_evidence',e:'📰',name:'JAMA Evidence',price:20},
-    {id:'scopus',e:'🌐',name:'Scopus',price:35},
-    {id:'springerlink',e:'📗',name:'SpringerLink',price:35},
-  ]},
   {id:'imd',name:'iMD',emoji:'🎓',groups:[
     {label:'VIP Access',items:[
       {id:'imd_6m',name:'iMD - 6 Months',sub:'New account or renewal',price:50},
@@ -433,6 +398,25 @@ const CATALOG = [
     {label:'Library Only',items:[
       {id:'amboss_library',name:'1 Year',sub:'Limited Qbanks',price:65},
     ]},
+  ]},
+  // Catch-all — rendered on its own row of tabs below iMD/Uptodate/Amboss
+  // (see buildCatalog), and its items are sorted alphabetically there too.
+  {id:'other',name:'All Subscriptions',emoji:'📚',single:[
+    {id:'dynamed',e:'💊',name:'Dynamed',price:20},
+    {id:'dynamedex',e:'💊',name:'DynamedEx',price:30},
+    {id:'bmj_best_practice',e:'📋',name:'BMJ Best Practice',price:20},
+    {id:'bmj_learning',e:'🎓',name:'BMJ Learning',price:30},
+    {id:'visualdx',e:'🔬',name:'VisualDx',price:20},
+    {id:'lexicomp',e:'💉',name:'Lexicomp Mobile',price:20},
+    {id:'accessmedicine',e:'🏥',name:'AccessMedicine',price:20},
+    {id:'boardvitals',e:'📝',name:'Boardvitals VIP',price:55},
+    {id:'clinicalkey',e:'🔑',name:'ClinicalKey',price:35},
+    {id:'sciencedirect',e:'🔭',name:'ScienceDirect',price:35},
+    {id:'statdx',e:'📊',name:'StatDx',price:35},
+    {id:'nejm',e:'📰',name:'NEJM',price:20},
+    {id:'jama_evidence',e:'📰',name:'JAMA Evidence',price:20},
+    {id:'scopus',e:'🌐',name:'Scopus',price:35},
+    {id:'springerlink',e:'📗',name:'SpringerLink',price:35},
   ]},
 ];
 
@@ -821,24 +805,20 @@ function renderBasket(){
 
 // ── Navigation ────────────────────────────────────────────────────────
 function showPage(id){document.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.id===id))}
-function setStep(n){
-  [1,2,3].forEach(i=>{
-    const el=document.getElementById('s'+i);
-    el.classList.toggle('done',i<n); el.classList.toggle('active',i===n);
-    el.querySelector('.step-dot').textContent=i<n?'✓':i;
-  });
-}
-function goCatalog(){showPage('p1');setStep(1);document.getElementById('hdrTitle').textContent='Medic SalesBot';tg.MainButton.hide();window.scrollTo(0,0)}
+function goCatalog(){showPage('p1');document.getElementById('hdrTitle').textContent='Medic SalesBot';tg.MainButton.hide();window.scrollTo(0,0)}
 function goDetails(){
   if(!cartSize()){showToast('Add at least one item first');return;}
   closeBasket();buildDetailForms();
-  showPage('p2');setStep(2);document.getElementById('hdrTitle').textContent='Account Details';tg.MainButton.hide();window.scrollTo(0,0);
+  showPage('p2');document.getElementById('hdrTitle').textContent='Account Details';tg.MainButton.hide();window.scrollTo(0,0);
 }
-function goPayment(){if(!validateDetails())return;buildPaymentPage();showPage('p3');setStep(3);document.getElementById('hdrTitle').textContent='Payment';window.scrollTo(0,0)}
+function goPayment(){if(!validateDetails())return;buildPaymentPage();showPage('p3');document.getElementById('hdrTitle').textContent='Payment';window.scrollTo(0,0)}
 
 // ── Catalog build ─────────────────────────────────────────────────────
 function buildCatalog(){
+  // Structured categories (iMD, Uptodate, Amboss) get the first row of
+  // tabs; the flat catch-all (All Subscriptions) gets its own row below.
   const tabsEl=document.getElementById('tabs');
+  const tabsMoreEl=document.getElementById('tabsMore');
   const secEl=document.getElementById('catSec');
   CATALOG.forEach((cat,ci)=>{
     const tab=document.createElement('button');
@@ -846,7 +826,7 @@ function buildCatalog(){
     tab.dataset.catid=cat.id;
     tab.textContent=cat.emoji+' '+cat.name;
     tab.onclick=()=>switchCat(cat.id);
-    tabsEl.appendChild(tab);
+    (cat.single?tabsMoreEl:tabsEl).appendChild(tab);
     const sec=document.createElement('div');
     sec.id='cat-'+cat.id; sec.style.display=ci===0?'block':'none';
     if(cat.groups) cat.groups.forEach(g=>{
@@ -856,7 +836,8 @@ function buildCatalog(){
     });
     if(cat.single){
       const lbl=document.createElement('div'); lbl.className='sl'; lbl.textContent='1 Year Subscriptions'; sec.appendChild(lbl);
-      cat.single.forEach(i=>sec.appendChild(makeRow({...i,sub:'1 Year'},true)));
+      const alphabetical=[...cat.single].sort((a,b)=>a.name.localeCompare(b.name));
+      alphabetical.forEach(i=>sec.appendChild(makeRow({...i,sub:'1 Year'},true)));
     }
     secEl.appendChild(sec);
   });
@@ -1236,6 +1217,8 @@ if (SUBS_DATA && SUBS_DATA.c && SUBS_DATA.c.length) {
     SUBS_DATA.c.forEach(([itemId, name, price]) => {
       // Register in IMAP with the actual bot item_id so orders work correctly
       IMAP[itemId] = {id: itemId, name, price, sub: '', catId: 'other', catName: 'All Subscriptions', fullname: name};
+    });
+    [...SUBS_DATA.c].sort((a, b) => a[1].localeCompare(b[1])).forEach(([itemId, name, price]) => {
       const row = makeRow({id: itemId, name, price, sub: '', e: '📦'}, true);
       moreSec.appendChild(row);
     });
