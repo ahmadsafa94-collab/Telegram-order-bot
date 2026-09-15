@@ -80,6 +80,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   color:var(--hint);cursor:pointer;background:transparent;transition:all .15s}
 .tab.active{border-color:var(--teal);background:rgba(13,148,136,.15);color:var(--teal2)}
 
+/* ── Search ──────────────── */
+.search-wrap{position:relative;margin-top:2px}
+.search-wrap input{width:100%;background:var(--bg2);border:1.5px solid rgba(255,255,255,.1);
+  border-radius:12px;padding:11px 34px 11px 34px;color:var(--text);font-size:13px;
+  outline:none;transition:border-color .15s}
+.search-wrap input:focus{border-color:var(--teal)}
+.search-wrap .search-ico{position:absolute;left:12px;top:50%;transform:translateY(-50%);
+  font-size:13px;opacity:.55;pointer-events:none}
+.search-wrap .search-clear{position:absolute;right:6px;top:50%;transform:translateY(-50%);
+  width:22px;height:22px;border-radius:50%;border:none;background:rgba(255,255,255,.1);
+  color:var(--hint);font-size:11px;cursor:pointer;display:none;align-items:center;justify-content:center}
+.search-empty{text-align:center;padding:28px 16px;color:var(--hint);font-size:13px}
+
 /* ── Item rows ──────────────── */
 .card{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);margin-bottom:10px;overflow:hidden}
 .row{display:flex;align-items:center;gap:10px;padding:11px 13px;border-bottom:1px solid rgba(255,255,255,.05)}
@@ -93,6 +106,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   cursor:pointer;flex-shrink:0;margin-left:8px;transition:all .15s}
 .add-btn:active{transform:scale(.88)}
 .add-btn.in{background:var(--teal)}
+.add-btn.oos{background:rgba(255,255,255,.15);cursor:not-allowed}
 .solo{display:flex;align-items:center;gap:10px;padding:11px 13px;
   background:var(--bg2);border:1px solid rgba(255,255,255,.07);
   border-radius:var(--r);margin-bottom:7px}
@@ -252,8 +266,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 
 <!-- Page 1: Catalog -->
 <div class="page on" id="p1">
+  <div class="search-wrap">
+    <span class="search-ico">🔍</span>
+    <input id="searchInput" type="text" placeholder="Search subscriptions..." oninput="performSearch(this.value)">
+    <button class="search-clear" id="searchClearBtn" onclick="clearSearch()">✕</button>
+  </div>
   <div class="tabs" id="tabs"></div>
   <div id="catSec"></div>
+  <div id="searchResults" style="display:none"></div>
 </div>
 
 <!-- Page 2: Details -->
@@ -346,6 +366,11 @@ try {
 const CREDITS_BALANCE = (SUBS_DATA && SUBS_DATA.cr) || 0;
 const DISCOUNT_CODES = (SUBS_DATA && SUBS_DATA.dc) || {};
 const CREDIT_VALUE_USD = 4;
+// Out-of-stock item ids — read once here so makeRow() can render every
+// row (catalog tabs, search results, "Additional Subscriptions") with
+// the correct disabled/✕ state from the moment it's created, not just
+// the ones built during the initial page load.
+const OOS_IDS = new Set((SUBS_DATA && SUBS_DATA.oos) || []);
 let appliedCreditsFlag = false;   // did the customer choose to use credits?
 let appliedDiscountCode = '';
 let appliedDiscountPct = 0;
@@ -570,8 +595,10 @@ const cartSize =()=>Object.values(cart).reduce((s,i)=>s+i.qty,0);
 function addItem(id){
   const itm=IMAP[id]; if(!itm) return;
   cart[id]=cart[id]?{...cart[id],qty:cart[id].qty+1}:{name:itm.fullname||itm.name,price:itm.price,qty:1};
-  const btn=document.getElementById('ab-'+id);
-  if(btn){btn.textContent='✓';btn.classList.add('in');}
+  // A matched item can be showing in both the search results and its
+  // normal category tab at once (the tab stays in the DOM, just
+  // hidden) — update every button for this id, not just the first.
+  document.querySelectorAll('#ab-'+id).forEach(btn=>{btn.textContent='✓';btn.classList.add('in');});
   syncBasket(); showToast('Added · $'+itm.price);
 }
 function removeItem(id){delete cart[id]; syncBasket(); renderBasket();}
@@ -834,10 +861,11 @@ function buildCatalog(){
 
 function makeRow(itm,solo){
   const d=document.createElement('div'); d.className=solo?'solo':'row';
+  const oos=OOS_IDS.has(itm.id);
   d.innerHTML=`${solo?`<div style="font-size:21px">${itm.e||'📦'}</div>`:''}
     <div class="ri"><div class="rn">${itm.name}</div><div class="rs">${itm.sub||''}</div></div>
     <div class="rp">$${itm.price}</div>
-    <button class="add-btn" id="ab-${itm.id}" onclick="addItem('${itm.id}')">+</button>`;
+    <button class="add-btn${oos?' oos':''}" id="ab-${itm.id}" ${oos?'disabled':''} onclick="${oos?"event.stopPropagation();showToast('Out of stock')":`addItem('${itm.id}')`}">${oos?'✕':'+'}</button>`;
   return d;
 }
 
@@ -847,6 +875,46 @@ function switchCat(id){
   document.querySelectorAll('.tabs .tab').forEach(t=>t.classList.toggle('active',t.dataset.catid===id));
   const el=document.getElementById('cat-'+id); if(el) el.style.display='block';
   window.scrollTo(0,0);
+}
+
+// ── Search ────────────────────────────────────────────────────────────
+// Live filter across every catalog item (built-in and admin-added custom
+// ones, via IMAP — same map addItem() reads from) by matching against
+// each item's precomputed "Category — Name (Sub)" fullname. Swaps the
+// tab bar out for a flat result list while a query is active.
+function performSearch(raw){
+  const q=raw.trim().toLowerCase();
+  const clearBtn=document.getElementById('searchClearBtn');
+  const tabsEl=document.getElementById('tabs');
+  const catSecEl=document.getElementById('catSec');
+  const resEl=document.getElementById('searchResults');
+  clearBtn.style.display=q?'flex':'none';
+
+  if(!q){
+    resEl.style.display='none'; resEl.innerHTML='';
+    tabsEl.style.display=''; catSecEl.style.display='';
+    return;
+  }
+  tabsEl.style.display='none'; catSecEl.style.display='none';
+  resEl.style.display='block'; resEl.innerHTML='';
+
+  const matches=Object.values(IMAP).filter(itm=>(itm.fullname||itm.name).toLowerCase().includes(q));
+  if(!matches.length){
+    resEl.innerHTML=`<div class="search-empty">No subscriptions match "${escHtml(raw.trim())}"</div>`;
+    return;
+  }
+  const lbl=document.createElement('div'); lbl.className='sl';
+  lbl.textContent=`${matches.length} result${matches.length>1?'s':''}`;
+  resEl.appendChild(lbl);
+  const card=document.createElement('div'); card.className='card';
+  matches.forEach(itm=>card.appendChild(makeRow(itm,false)));
+  resEl.appendChild(card);
+}
+function clearSearch(){
+  const inp=document.getElementById('searchInput');
+  inp.value='';
+  performSearch('');
+  inp.blur();
 }
 
 // ── Detail forms ──────────────────────────────────────────────────────
