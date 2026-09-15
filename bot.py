@@ -747,7 +747,7 @@ def db_init():
         ("credentials", "TEXT"), ("delivered_at", "TEXT"),
         ("payment_method", "TEXT"), ("payer_name", "TEXT"), ("receipt_photo_file_id", "TEXT"),
         ("receipt_reference", "TEXT"), ("discount_code", "TEXT"),
-        ("credits_applied", "INTEGER"),
+        ("credits_applied", "INTEGER"), ("paid_at", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE orders ADD COLUMN {column} {coltype}")
@@ -2009,6 +2009,19 @@ def db_get_order(order_id: int):
     return row
 
 
+def db_get_order_lifecycle(order_id: int):
+    """(created_at, paid_at, delivered_at) — the three milestones the admin
+    panel surfaces for an order: submitted, payment completed, credentials
+    sent."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT created_at, paid_at, delivered_at FROM orders WHERE id = ?",
+        (order_id,),
+    ).fetchone()
+    conn.close()
+    return row or (None, None, None)
+
+
 def db_set_payment_method(order_id: int, method: str):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE orders SET payment_method = ? WHERE id = ?", (method, order_id))
@@ -2129,7 +2142,15 @@ def db_update_order_credentials(order_id: int, credentials_text: str):
 
 def db_update_status(order_id: int, status: str):
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
+    if status == "paid":
+        # COALESCE so re-confirming an already-paid order (e.g. a double
+        # tap) never clobbers the original payment timestamp.
+        conn.execute(
+            "UPDATE orders SET status = ?, paid_at = COALESCE(paid_at, ?) WHERE id = ?",
+            (status, datetime.utcnow().isoformat(), order_id),
+        )
+    else:
+        conn.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
     conn.commit()
     conn.close()
 
@@ -7444,6 +7465,17 @@ def _short_submitted(created_at: str) -> str:
         return "?"
 
 
+def _paid_label(status: str, paid_at: str) -> str:
+    """Text for a missing paid_at: 'not yet' only when the order genuinely
+    hasn't been paid — an already paid/delivered order with no paid_at
+    just predates the column being added."""
+    if paid_at:
+        return paid_at[:19]
+    if status in ("paid", "delivered"):
+        return "unknown (predates tracking)"
+    return "not yet"
+
+
 async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Every undelivered item across all customers, one button each —
     plus a separate 'Payment Pending' section for orders whose receipt
@@ -7735,14 +7767,16 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     name = MENU.get(item_id, (item_id,))[0]
     order = db_get_order(order_id)
     username = order[2] if order else None
-    created_at = order[6] if order else None
+    created_at, paid_at, delivered_at = db_get_order_lifecycle(order_id)
 
     text = (
         f"{name}{f' #{unit_no}' if unit_no > 1 else ''}\n"
         f"Order #{order_id} — {f'@{username}' if username else ''} (ID: {user_id})\n"
         f"Status: {state}\n"
-        f"Submitted: {created_at[:19] if created_at else 'unknown'}\n\n"
-        f"{format_fulfilment_info(item_id, info_json)}"
+        f"Submitted: {created_at[:19] if created_at else 'unknown'}\n"
+        f"Paid: {_paid_label('paid', paid_at)}\n"
+        + (f"Credentials sent: {delivered_at[:19]}\n" if delivered_at else "")
+        + f"\n{format_fulfilment_info(item_id, info_json)}"
     )
 
     buttons = []
@@ -9821,7 +9855,7 @@ async def customer_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT id, user_id, username, items_json, total, status, delivered_at "
+        "SELECT id, user_id, username, items_json, total, status, delivered_at, created_at, paid_at "
         "FROM orders ORDER BY id DESC LIMIT 30"
     ).fetchall()
     conn.close()
@@ -9831,12 +9865,19 @@ async def customer_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lines = []
-    for order_id, user_id, username, items_json, total, status, delivered_at in rows:
+    for order_id, user_id, username, items_json, total, status, delivered_at, created_at, paid_at in rows:
         items = json.loads(items_json)
         item_names = ", ".join(MENU[i][0] for i in items if i in MENU)
-        line = f"#{order_id} {username or 'unknown'} (ID: {user_id}) — {item_names} — {status}"
+        line = (
+            f"#{order_id} {username or 'unknown'} (ID: {user_id}) — {item_names} — {status}\n"
+            f"   submitted {_short_submitted(created_at)}"
+        )
+        if paid_at:
+            line += f" · paid {_short_submitted(paid_at)}"
+        elif status in ("paid", "delivered"):
+            line += " · paid ?"
         if delivered_at:
-            line += f" (delivered {delivered_at[:10]})"
+            line += f" · credentials sent {_short_submitted(delivered_at)}"
         lines.append(line)
 
     # Telegram caps messages at 4096 chars — chunk if the list gets long.
@@ -9863,7 +9904,7 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
         "SELECT id, user_id, username, items_json, total, status, created_at, "
-        "credentials, delivered_at FROM orders WHERE id = ?",
+        "credentials, delivered_at, paid_at FROM orders WHERE id = ?",
         (order_id,),
     ).fetchone()
     conn.close()
@@ -9872,7 +9913,7 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Order #{order_id} not found.")
         return
 
-    oid, user_id, username, items_json, total, status, created_at, credentials, delivered_at = row
+    oid, user_id, username, items_json, total, status, created_at, credentials, delivered_at, paid_at = row
     items = json.loads(items_json)
     item_names = ", ".join(MENU[i][0] for i in items if i in MENU)
 
@@ -9882,10 +9923,11 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Items: {item_names}\n"
         f"Total: {CURRENCY}{total:.2f}\n"
         f"Status: {status}\n"
-        f"Created: {created_at[:19]}\n"
+        f"Submitted: {created_at[:19]}\n"
+        f"Paid: {_paid_label(status, paid_at)}\n"
     )
     if delivered_at:
-        text += f"Delivered: {delivered_at[:19]}\n\nCredentials sent:\n{credentials}"
+        text += f"Credentials sent: {delivered_at[:19]}\n\nCredentials:\n{credentials}"
     else:
         text += "\nNo credentials delivered yet."
 
