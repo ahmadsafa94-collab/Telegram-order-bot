@@ -403,26 +403,26 @@ const CATALOG = [
   ]},
   {id:'imd',name:'iMD',emoji:'🎓',groups:[
     {label:'New Account',items:[
-      {id:'imd_new_6m',name:'6 Months',sub:'New registration',price:50},
-      {id:'imd_new_1y',name:'1 Year',sub:'New registration',price:75},
+      {id:'imd_new_6m',name:'iMD - 6 Months',sub:'New registration',price:50},
+      {id:'imd_new_1y',name:'iMD - 1 Year',sub:'New registration',price:75},
     ]},
     {label:'Renewal',items:[
-      {id:'imd_renew_6m',name:'6 Months',sub:'Existing account',price:50},
-      {id:'imd_renew_1y',name:'1 Year',sub:'Existing account',price:75},
+      {id:'imd_renew_6m',name:'iMD - 6 Months',sub:'Existing account',price:50},
+      {id:'imd_renew_1y',name:'iMD - 1 Year',sub:'Existing account',price:75},
     ]},
   ]},
   {id:'uptodate',name:'Uptodate',emoji:'📖',groups:[
     {label:'Online Access',items:[
-      {id:'up_online_app',name:'Mobile App',sub:'Online · 1 Year',price:20},
-      {id:'up_online_web',name:'Mobile App + Browser',sub:'Online · 1 Year',price:35},
+      {id:'up_online_app',name:'Uptodate Online',sub:'Mobile App · 1 Year',price:20},
+      {id:'up_online_web',name:'Uptodate Online',sub:'Mobile App + Browser · 1 Year',price:35},
     ]},
     {label:'Online + Offline',items:[
-      {id:'up_offline_app',name:'Mobile App',sub:'Offline · 1 Year',price:30},
-      {id:'up_offline_web',name:'Mobile App + Browser',sub:'Offline · 1 Year',price:45},
+      {id:'up_offline_app',name:'Uptodate Online + Offline',sub:'Mobile App · 1 Year',price:30},
+      {id:'up_offline_web',name:'Uptodate Online + Offline',sub:'Mobile App + Browser · 1 Year',price:45},
     ]},
     {label:'Online + Pathways',items:[
-      {id:'up_pathways_app',name:'Mobile App',sub:'Pathways · 1 Year',price:30},
-      {id:'up_pathways_web',name:'Mobile App + Browser',sub:'Pathways · 1 Year',price:45},
+      {id:'up_pathways_app',name:'Uptodate Online + Pathways',sub:'Mobile App · 1 Year',price:30},
+      {id:'up_pathways_web',name:'Uptodate Online + Pathways',sub:'Mobile App + Browser · 1 Year',price:45},
     ]},
     {label:'AI Assistant',items:[
       {id:'uptodate_ai_2m',name:'Uptodate Expert AI (Telegram Bot)',sub:'3 Months',price:10},
@@ -441,9 +441,16 @@ const CATALOG = [
 ];
 
 const IMAP = {};
+// Some item names already lead with their category (e.g. "Uptodate Online",
+// "iMD - 6 Months"), so skip re-prefixing those in fullname — avoids
+// "Uptodate — Uptodate Online (...)" in the basket and Details page.
+const leadsWithCat=(catName,itemName)=>itemName.toLowerCase().startsWith(catName.toLowerCase());
 CATALOG.forEach(c=>{
   if(c.groups) c.groups.forEach(g=>g.items.forEach(i=>{
-    IMAP[i.id]={...i, catId:c.id, catName:c.name, fullname: c.name+' — '+i.name+(i.sub?' ('+i.sub+')':'')};
+    const fullname=leadsWithCat(c.name,i.name)
+      ? i.name+(i.sub?' ('+i.sub+')':'')
+      : c.name+' — '+i.name+(i.sub?' ('+i.sub+')':'');
+    IMAP[i.id]={...i, catId:c.id, catName:c.name, fullname};
   }));
   if(c.single) c.single.forEach(i=>{
     IMAP[i.id]={...i, catId:c.id, catName:c.name, sub:'1 Year', fullname: i.name+' — 1 Year'};
