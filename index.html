@@ -376,7 +376,7 @@ let appliedDiscountCode = '';
 let appliedDiscountPct = 0;
 
 // ── Catalog data ──────────────────────────────────────────────────────
-const IMD = new Set(['imd_new_6m','imd_new_1y','imd_renew_6m','imd_renew_1y']);
+const IMD = new Set(['imd_6m','imd_1y']);
 
 // Uptodate AI is a code-redemption product — no account/credentials are
 // needed at all, it's delivered automatically right after payment. Skip
@@ -402,13 +402,9 @@ const CATALOG = [
     {id:'springerlink',e:'📗',name:'SpringerLink',price:35},
   ]},
   {id:'imd',name:'iMD',emoji:'🎓',groups:[
-    {label:'New Account',items:[
-      {id:'imd_new_6m',name:'iMD - 6 Months',sub:'New registration',price:50},
-      {id:'imd_new_1y',name:'iMD - 1 Year',sub:'New registration',price:75},
-    ]},
-    {label:'Renewal',items:[
-      {id:'imd_renew_6m',name:'iMD - 6 Months',sub:'Existing account',price:50},
-      {id:'imd_renew_1y',name:'iMD - 1 Year',sub:'Existing account',price:75},
+    {label:'VIP Access',items:[
+      {id:'imd_6m',name:'iMD - 6 Months',sub:'New account or renewal',price:50},
+      {id:'imd_1y',name:'iMD - 1 Year',sub:'New account or renewal',price:75},
     ]},
   ]},
   {id:'uptodate',name:'Uptodate',emoji:'📖',groups:[
@@ -966,22 +962,26 @@ function makeNoDetailsBlock(id,name,price,idx){
 }
 function makeDetailBlock(id,name,price,idx){
   const w=document.createElement('div'); w.className='dblock'; w.dataset.id=id; w.dataset.idx=idx;
-  const isIN=id.startsWith('imd_new'), isIR=id.startsWith('imd_renew');
   const lbl=idx>0?` #${idx+1}`:'';
-  let body='';
-  if(isIN) body=flds(id,idx,[['email','Email','email','Never used for iMD before'],['username','Username','text','≥6 chars'],['password','Password','password','Any password you\'ll remember']]);
-  else if(isIR) body=flds(id,idx,[['prev_username','Existing iMD Username','text','']]);
-  else body=`<div class="toggle"><button class="tbtn active" onclick="setType(this,'new','${id}',${idx})">🆕 New</button><button class="tbtn" onclick="setType(this,'renew','${id}',${idx})">🔄 Renewal</button></div><div id="ff-${id}-${idx}">${newFlds(id,idx)}</div>`;
+  const isImd=IMD.has(id);
+  const firstFlds=isImd?imdNewFlds(id,idx):newFlds(id,idx);
+  const body=`<div class="toggle"><button class="tbtn active" onclick="setType(this,'new','${id}',${idx})">🆕 New</button><button class="tbtn" onclick="setType(this,'renew','${id}',${idx})">🔄 Renewal</button></div><div id="ff-${id}-${idx}">${firstFlds}</div>`;
   w.innerHTML=`<div class="dheader"><div class="ri"><div class="rn">${name}${lbl}</div></div><div class="ptag">$${price}</div></div>${body}`;
   return w;
 }
 const newFlds=(id,idx)=>flds(id,idx,[['first_name','First Name','text',''],['last_name','Last Name','text',''],['email','Email','email','Never used for this subscription before'],['username','Username','text','≥6 chars'],['password','Password','password','8+ chars, 1 cap, 1 num, one of: - _ . # @']]);
 const renewFlds=(id,idx)=>flds(id,idx,[['login_username','Username or Email (existing)','text',''],['login_password','Existing Password','password','']]);
+// iMD has its own, simpler field set (no first/last name, no strict
+// password format — see the isImd check in validateDetails).
+const imdNewFlds=(id,idx)=>flds(id,idx,[['email','Email','email','Never used for iMD before'],['username','Username','text','≥6 chars'],['password','Password','password','Any password you\'ll remember']]);
+const imdRenewFlds=(id,idx)=>flds(id,idx,[['prev_username','Existing iMD Username','text','']]);
 function flds(id,idx,list){return'<div class="fields">'+list.map(([n,l,t,h])=>{const fid=`f-${id}-${idx}-${n}`;return`<div class="field"><label for="${fid}">${l}</label><input id="${fid}" name="${n}" type="${t}" autocomplete="off" spellcheck="false">${h?`<div class="fhint">${h}</div>`:''}<div class="ferr" id="e-${fid}"></div></div>`;}).join('')+'</div>';}
 function setType(btn,type,id,idx){
   btn.parentElement.querySelectorAll('.tbtn').forEach(b=>b.classList.toggle('active',b===btn));
   btn.closest('.dblock').dataset.type=type;
-  document.getElementById(`ff-${id}-${idx}`).innerHTML=type==='new'?newFlds(id,idx):renewFlds(id,idx);
+  const isImd=IMD.has(id);
+  const builder=isImd?(type==='new'?imdNewFlds:imdRenewFlds):(type==='new'?newFlds:renewFlds);
+  document.getElementById(`ff-${id}-${idx}`).innerHTML=builder(id,idx);
 }
 
 // ── Validation ────────────────────────────────────────────────────────
@@ -989,8 +989,8 @@ function validateDetails(){
   let ok=true;
   document.querySelectorAll('.dblock').forEach(block=>{
     const id=block.dataset.id, idx=parseInt(block.dataset.idx||0);
-    const isIN=id.startsWith('imd_new'), isIR=id.startsWith('imd_renew');
-    const type=block.dataset.type||(isIN?'new':isIR?'renew':'new');
+    const isImd=IMD.has(id);
+    const type=block.dataset.type||'new';
     block.querySelectorAll('input').forEach(inp=>{
       const n=inp.name,v=inp.value.trim();
       const fe=document.getElementById('e-'+inp.id);
@@ -998,7 +998,7 @@ function validateDetails(){
       if(!v){setErr(inp,'Required');ok=false;return;}
       if(n==='email'&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)){setErr(inp,'Enter a valid email');ok=false;return;}
       if(n==='username'&&v.length<6){setErr(inp,'At least 6 characters');ok=false;return;}
-      if((n==='password'||n==='login_password')&&type==='new'&&!isIN){
+      if((n==='password'||n==='login_password')&&type==='new'&&!isImd){
         if(v.length<8){setErr(inp,'At least 8 characters');ok=false;return;}
         if(!/[A-Z]/.test(v)){setErr(inp,'Need a capital letter');ok=false;return;}
         if(!/[0-9]/.test(v)){setErr(inp,'Need a number');ok=false;return;}
@@ -1181,8 +1181,7 @@ function collectDetails(){
   const out=[];
   document.querySelectorAll('.dblock').forEach(block=>{
     const id=block.dataset.id, idx=parseInt(block.dataset.idx||0);
-    const isIN=id.startsWith('imd_new'), isIR=id.startsWith('imd_renew');
-    const type=block.dataset.type||(isIN?'new':isIR?'renew':'new');
+    const type=block.dataset.type||'new';
     const entry={id,account_type:type};
     block.querySelectorAll('input').forEach(inp=>{if(inp.value.trim()) entry[inp.name]=inp.value.trim();});
     out.push(entry);

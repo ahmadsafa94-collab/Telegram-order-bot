@@ -145,12 +145,19 @@ MENU = {
     "item1": ("Uptodate Online", 20.00),
     "item3": ("Uptodate Online + Offline", 30.00),
     "item4": ("Amboss Full Access - 1 year", 85.00),
-
-    # iMD VIP — unchanged.
+    # iMD used to be 4 separate products (New/Renewal x 6m/1y) — collapsed
+    # into 2 durations below, with New vs Renewal now asked on the account
+    # details page instead. Kept for name lookups on any order already
+    # using these ids from before the merge.
     "imd_new_6m": ("iMD VIP New Account - 6 Months", 50.00),
     "imd_new_1y": ("iMD VIP New Account - 1 Year", 75.00),
     "imd_renew_6m": ("iMD VIP Renewal - 6 Months", 50.00),
     "imd_renew_1y": ("iMD VIP Renewal - 1 Year", 75.00),
+
+    # iMD VIP — one product per duration; New Account vs Renewal is chosen
+    # on the account details page (see IMD_TRIGGER_ITEMS).
+    "imd_6m": ("iMD VIP - 6 Months", 50.00),
+    "imd_1y": ("iMD VIP - 1 Year", 75.00),
 
     # Uptodate — three access tiers, each with a Mobile App / Mobile App +
     # Browser choice.
@@ -255,8 +262,11 @@ CATALOG = {
 # iMD FORM COLLECTION
 # ------------------------------------------------------------------
 
-# All four iMD variants trigger the guided collection flow.
-IMD_TRIGGER_ITEMS = {"imd_new_6m", "imd_new_1y", "imd_renew_6m", "imd_renew_1y"}
+# Both iMD durations trigger the guided collection flow. New Account vs
+# Renewal is no longer encoded in the item id — it's asked as an explicit
+# step in that flow (see start_imd_collection / the Mini App's iMD
+# toggle) and read back via each fulfilment's info_json["account_type"].
+IMD_TRIGGER_ITEMS = {"imd_6m", "imd_1y"}
 
 # Uptodate AI — a code-redemption product (no registration, no customer-
 # entered details at all). Reuses the same serials pool mechanism as
@@ -274,8 +284,6 @@ SERIAL_POOL_LABELS = {
     "1y": "iMD — 1 Year",
     UPTODATE_AI_CODES_DURATION: "Uptodate AI 3 Months",
 }
-IMD_NEW_ITEMS = {"imd_new_6m", "imd_new_1y"}
-IMD_RENEW_ITEMS = {"imd_renew_6m", "imd_renew_1y"}
 
 # ------------------------------------------------------------------
 # SUPPORT TICKETS
@@ -296,10 +304,8 @@ IMD_WEB_URL = "www.imdweb.org"
 
 # Maps each item id to which serial pool it should draw from.
 IMD_DURATION_MAP = {
-    "imd_new_6m": "6m",
-    "imd_new_1y": "1y",
-    "imd_renew_6m": "6m",
-    "imd_renew_1y": "1y",
+    "imd_6m": "6m",
+    "imd_1y": "1y",
 }
 
 # Overridable via Railway variables, so a URL change (or trying http://
@@ -2265,27 +2271,11 @@ async def catalog_navigate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def imd_menu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shows the New Account / Renew Account choice."""
+    """Shows the iMD duration choice. New Account vs Renewal is no longer
+    asked here — it's asked on the account details page after checkout,
+    same as every other subscription (see start_imd_collection)."""
     query = update.callback_query
     await query.answer()
-    buttons = [
-        [InlineKeyboardButton("🆕 Buy New Account", callback_data="imd_type:new")],
-        [InlineKeyboardButton("🔄 Renew Previous Account", callback_data="imd_type:renew")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu")],
-    ]
-    await query.edit_message_text("iMD VIP — what would you like to do?", reply_markup=InlineKeyboardMarkup(buttons))
-
-
-async def imd_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shows the 6 months / 1 year choice for the chosen type."""
-    query = update.callback_query
-    await query.answer()
-    imd_type = query.data.split(":", 1)[1]  # "new" or "renew"
-
-    six_month_id = f"imd_{imd_type}_6m"
-    one_year_id = f"imd_{imd_type}_1y"
-    six_month_price = MENU[six_month_id][1]
-    one_year_price = MENU[one_year_id][1]
     out_of_stock = db_out_of_stock_items()
 
     def label_for(item_id, base_label, price):
@@ -2294,12 +2284,11 @@ async def imd_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return f"{base_label} — {CURRENCY}{price:.2f}"
 
     buttons = [
-        [InlineKeyboardButton(label_for(six_month_id, "6 Months", six_month_price), callback_data=f"add:{six_month_id}")],
-        [InlineKeyboardButton(label_for(one_year_id, "1 Year", one_year_price), callback_data=f"add:{one_year_id}")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="imd_menu")],
+        [InlineKeyboardButton(label_for("imd_6m", "6 Months", MENU["imd_6m"][1]), callback_data="add:imd_6m")],
+        [InlineKeyboardButton(label_for("imd_1y", "1 Year", MENU["imd_1y"][1]), callback_data="add:imd_1y")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu")],
     ]
-    label = "New Account" if imd_type == "new" else "Renew Previous Account"
-    await query.edit_message_text(f"iMD VIP — {label}. Choose a duration:", reply_markup=InlineKeyboardMarkup(buttons))
+    await query.edit_message_text("iMD VIP — choose a duration:", reply_markup=InlineKeyboardMarkup(buttons))
 
 
 # Persistent bottom keyboard labels (must match exactly between the keyboard
@@ -5327,6 +5316,7 @@ def format_fulfilment_info(item_id: str, info_json: str) -> str:
         "username": "Username", "password": "Password",
         "prev_username": "Previous username",
         "login_username": "Username/Email", "login_password": "Password",
+        "account_type": "Account type",
     }
     return "\n".join(f"{labels.get(k, k)}: {v}" for k, v in info.items())
 
@@ -5523,7 +5513,7 @@ async def admin_comment_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 def all_toggleable_items() -> list:
     """Every product that can be individually marked out of stock: the
-    catalog leaves (Uptodate/Amboss variants), the four iMD variants, and
+    catalog leaves (Uptodate/Amboss variants), the two iMD durations, and
     the single-choice mains — in a sensible display order. Excludes
     anything removed via 📦 Manage Stock → Remove."""
     items = []
@@ -5537,7 +5527,7 @@ def all_toggleable_items() -> list:
 
     for cat in CATALOG.values():
         walk(cat)
-    items.extend(["imd_new_6m", "imd_new_1y", "imd_renew_6m", "imd_renew_1y"])
+    items.extend(["imd_6m", "imd_1y"])
     items.extend(SINGLE_MAIN_ITEMS)
     return [i for i in items if not ITEM_OVERRIDES.get(i, (None, None, None, False))[3]]
 
@@ -7858,7 +7848,7 @@ async def imd_manual_deliver(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    is_renew = item_id in IMD_RENEW_ITEMS
+    is_renew = info.get("account_type") == "renew"
     duration = IMD_DURATION_MAP.get(item_id)
 
     if is_renew:
@@ -7895,9 +7885,10 @@ async def imd_manual_deliver(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def imd_manual_cred_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin tapped '🔑 Deliver ... Manually' on an undelivered iMD unit
     from /order — used when there's nothing on file to fall back on
-    (no registration data collected, automation never ran). Prompts for
-    the username, then the password (skipped for renewals, which don't
-    have one), then sends the standard iMD delivery message."""
+    (no registration data collected, automation never ran). Since the
+    item id no longer says new-vs-renewal on its own, asks first, then
+    prompts for the username, then the password (skipped for renewals,
+    which don't have one), then sends the standard iMD delivery message."""
     query = update.callback_query
     if query.from_user.id != ADMIN_CHAT_ID:
         await query.answer("Not authorized.", show_alert=True)
@@ -7912,17 +7903,49 @@ async def imd_manual_cred_start(update: Update, context: ContextTypes.DEFAULT_TY
 
     _, order_id, user_id, item_id, unit_no, state, info_json = row
     name = MENU.get(item_id, (item_id,))[0]
-    context.user_data["imd_manual_cred"] = {"fulfilment_id": fulfilment_id, "step": "username"}
 
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
-        text=f"What's the username for {name} (Order #{order_id})?",
+        text=f"Is {name} (Order #{order_id}) a new account or a renewal?",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🆕 New Account", callback_data=f"imdmantype:{fulfilment_id}:new")],
+                [InlineKeyboardButton("🔄 Renewal", callback_data=f"imdmantype:{fulfilment_id}:renew")],
+            ]
+        ),
     )
 
 
+async def imd_manual_cred_type_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin answered the New Account / Renewal question that starts the
+    manual iMD delivery flow — now ask for the username."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    _, fulfilment_id_str, choice = query.data.split(":", 2)
+    fulfilment_id = int(fulfilment_id_str)
+    is_renew = choice == "renew"
+
+    row = db_get_fulfilment(fulfilment_id)
+    if not row:
+        await query.edit_message_text("That item no longer exists.")
+        return
+    _, order_id, user_id, item_id, unit_no, state, info_json = row
+    name = MENU.get(item_id, (item_id,))[0]
+
+    context.user_data["imd_manual_cred"] = {
+        "fulfilment_id": fulfilment_id, "step": "username", "is_renew": is_renew,
+    }
+    prompt = "previous username" if is_renew else "username"
+    await query.edit_message_text(f"What's the {prompt} for {name} (Order #{order_id})?")
+
+
 async def imd_manual_cred_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catches the admin's username/password replies after tapping
-    '🔑 Deliver ... Manually' and, once both are in (or just the
+    """Catches the admin's username/password replies after answering the
+    New Account / Renewal question and, once both are in (or just the
     username, for a renewal), sends the iMD delivery message."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
@@ -7939,7 +7962,7 @@ async def imd_manual_cred_reply(update: Update, context: ContextTypes.DEFAULT_TY
         return
     _, order_id, user_id, item_id, unit_no, fstate, info_json = row
     name = MENU.get(item_id, (item_id,))[0]
-    is_renew = item_id in IMD_RENEW_ITEMS
+    is_renew = state["is_renew"]
 
     if state["step"] == "username":
         state["username"] = update.message.text.strip()
@@ -8544,8 +8567,8 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
             # the next call finds the same needs_info item and loops forever.
             db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
 
-            is_renew  = item_id.startswith("imd_renew")
-            duration  = "6m" if "6m" in item_id else "1y"
+            is_renew  = existing_info.get("account_type") == "renew"
+            duration  = IMD_DURATION_MAP.get(item_id, "6m" if "6m" in item_id else "1y")
 
             reg_data = {
                 "duration":      duration,
@@ -8861,10 +8884,11 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
 
 
 async def start_imd_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int, imd_item: str, fulfilment_id: int):
-    """Kicks off the customer-facing form collection for an iMD item —
-    email/username/password for a new account, or just the previous
-    username for a renewal."""
-    is_renew = imd_item in IMD_RENEW_ITEMS
+    """Kicks off the customer-facing form collection for an iMD item.
+    First asks whether it's a new account or a renewal (this used to be
+    decided by which of 4 catalog items they bought; now there's just one
+    per duration), then collects email/username/password for a new
+    account, or just the previous username for a renewal."""
     duration = IMD_DURATION_MAP[imd_item]
 
     # context.application.user_data lets us reach into the CUSTOMER's data
@@ -8872,19 +8896,38 @@ async def start_imd_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int
     customer_data = context.application.user_data[user_id]
     customer_data["registration_order"] = order_id
     customer_data["registration_data"] = {}
-    customer_data["registration_is_renew"] = is_renew
     customer_data["registration_duration"] = duration
     customer_data["registration_item_id"] = imd_item
     customer_data["registration_fulfilment_id"] = fulfilment_id
 
+    await context.bot.send_message(
+        chat_id=user_id,
+        text="🎓 iMD Access — is this a new account or are you renewing an existing one?",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🆕 New Account", callback_data="imdregtype:new")],
+                [InlineKeyboardButton("🔄 Renewal", callback_data="imdregtype:renew")],
+            ]
+        ),
+    )
+
+
+async def imd_registration_type_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer answered the New Account / Renewal question that kicks
+    off iMD form collection — starts the actual field-by-field prompts."""
+    query = update.callback_query
+    await query.answer()
+    is_renew = query.data.split(":", 1)[1] == "renew"
+    context.user_data["registration_is_renew"] = is_renew
+
     if is_renew:
-        customer_data["awaiting_registration_field"] = "prev_username"
+        context.user_data["awaiting_registration_field"] = "prev_username"
         text = "🎓 Let's renew your iMD account.\n\nReply with your previous username:"
     else:
-        customer_data["awaiting_registration_field"] = "email"
+        context.user_data["awaiting_registration_field"] = "email"
         text = "🎓 Let's set up your iMD account. Please fill this form to register:\n\nReply with your email address:"
 
-    await context.bot.send_message(chat_id=user_id, text=text)
+    await query.edit_message_text(text)
 
 
 async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8947,6 +8990,14 @@ async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TY
 
     if not order_id:
         return
+
+    # Stamped into `data` itself (not just the pending-registration dict)
+    # so it also lands in the persisted fulfilment info_json below — the
+    # same "account_type" field the Mini App's own iMD form submits,
+    # letting every downstream reader (admin manual delivery, the restart
+    # recovery path) determine new-vs-renewal the same way regardless of
+    # which collection path the order came through.
+    data["account_type"] = "renew" if is_renew else "new"
 
     context.application.bot_data.setdefault("pending_registrations", {})[order_id] = {
         **data,
@@ -9021,8 +9072,8 @@ def db_recover_imd_registration_data(order_id: int):
         return None
     return {
         **info,
-        "is_renew": "renew" in item_id,
-        "duration": "1y" if item_id.endswith("1y") else "6m",
+        "is_renew": info.get("account_type") == "renew",
+        "duration": IMD_DURATION_MAP.get(item_id, "1y" if item_id.endswith("1y") else "6m"),
         "item_id": item_id,
         "fulfilment_id": fulfilment_id,
     }
@@ -10628,6 +10679,7 @@ def main():
     app.add_handler(CallbackQueryHandler(deliver_start, pattern=r"^deliver:"))
     app.add_handler(CallbackQueryHandler(edit_delivery_start, pattern=r"^editdeliv:"))
     app.add_handler(CallbackQueryHandler(reg_go, pattern=r"^reg_go:"))
+    app.add_handler(CallbackQueryHandler(imd_registration_type_choice, pattern=r"^imdregtype:"))
     app.add_handler(CallbackQueryHandler(add_serials_pick_duration, pattern=r"^addser:"))
     app.add_handler(CallbackQueryHandler(serials_add_menu, pattern=r"^serials_add_menu$"))
     app.add_handler(CallbackQueryHandler(serials_remove_menu, pattern=r"^serials_remove_menu$"))
@@ -10659,7 +10711,6 @@ def main():
     app.add_handler(CallbackQueryHandler(tickets_back, pattern=r"^tickets_back$"))
     app.add_handler(CallbackQueryHandler(ticket_view, pattern=r"^ticketview:"))
     app.add_handler(CallbackQueryHandler(ticket_resolve_start, pattern=r"^ticketresolve:"))
-    app.add_handler(CallbackQueryHandler(imd_type_selected, pattern=r"^imd_type:"))
     app.add_handler(CallbackQueryHandler(pay_with_stars, pattern=r"^pay_stars:"))
     app.add_handler(CallbackQueryHandler(local_pay_start, pattern=r"^local_pay:"))
     app.add_handler(CallbackQueryHandler(country_missing_start, pattern=r"^country_missing:"))
@@ -10705,6 +10756,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_pending_back, pattern=r"^apend_back$"))
     app.add_handler(CallbackQueryHandler(imd_manual_deliver, pattern=r"^imddeliver:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_start, pattern=r"^imdmancred:"))
+    app.add_handler(CallbackQueryHandler(imd_manual_cred_type_choice, pattern=r"^imdmantype:"))
     app.add_handler(CallbackQueryHandler(admin_sales_report, pattern=r"^sales:"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
