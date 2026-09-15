@@ -1233,10 +1233,10 @@ def db_rejected_orders():
 
 def db_all_pending_items():
     """Every undelivered unit across all customers, for the admin view.
-    Returns (fulfilment_id, order_id, user_id, username, item_id, unit_no, state)."""
+    Returns (fulfilment_id, order_id, user_id, username, item_id, unit_no, state, created_at)."""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT f.id, f.order_id, f.user_id, o.username, f.item_id, f.unit_no, f.state "
+        "SELECT f.id, f.order_id, f.user_id, o.username, f.item_id, f.unit_no, f.state, o.created_at "
         "FROM fulfilment f JOIN orders o ON o.id = f.order_id "
         # NOT an `o.status = 'paid'` check: delivering the first item of a
         # multi-item order flips the whole order's status to 'delivered',
@@ -7435,6 +7435,15 @@ async def ticket_resolution_reply(update: Update, context: ContextTypes.DEFAULT_
     await refresh_admin_keyboard(context)
 
 
+def _short_submitted(created_at: str) -> str:
+    """Compact 'M/D HH:MM' rendering of an ISO created_at timestamp, for
+    fitting the submission time into the tight space of a list button."""
+    try:
+        return datetime.fromisoformat(created_at).strftime("%m/%d %H:%M")
+    except (TypeError, ValueError):
+        return "?"
+
+
 async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Every undelivered item across all customers, one button each —
     plus a separate 'Payment Pending' section for orders whose receipt
@@ -7450,13 +7459,13 @@ async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     buttons = []
-    for fid, order_id, user_id, username, item_id, unit_no, state in rows:
+    for fid, order_id, user_id, username, item_id, unit_no, state, created_at in rows:
         name = MENU.get(item_id, (item_id,))[0]
         suffix = f" #{unit_no}" if unit_no > 1 else ""
         flag = "📝" if state == "awaiting_delivery" else "⌛"
         who = f"@{username}" if username else str(user_id)
-        label = f"{flag} {name}{suffix} — {who} (#{order_id})"
-        buttons.append([InlineKeyboardButton(label[:60], callback_data=f"apend:{fid}")])
+        label = f"{flag} {name}{suffix} — {who} (#{order_id}) — {_short_submitted(created_at)}"
+        buttons.append([InlineKeyboardButton(label[:64], callback_data=f"apend:{fid}")])
 
     text = "Pending orders:\n📝 = details ready to deliver   ⌛ = waiting on customer"
 
@@ -7464,8 +7473,8 @@ async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
         text += "\n\n💳 Payment Pending (receipt rejected):"
         for order_id, user_id, username, total, created_at in rejected:
             who = f"@{username}" if username else str(user_id)
-            label = f"💳 {CURRENCY}{total:.2f} — {who} (#{order_id})"
-            buttons.append([InlineKeyboardButton(label[:60], callback_data=f"apend_rejected:{order_id}")])
+            label = f"💳 {CURRENCY}{total:.2f} — {who} (#{order_id}) — {_short_submitted(created_at)}"
+            buttons.append([InlineKeyboardButton(label[:64], callback_data=f"apend_rejected:{order_id}")])
 
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -7726,11 +7735,13 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     name = MENU.get(item_id, (item_id,))[0]
     order = db_get_order(order_id)
     username = order[2] if order else None
+    created_at = order[6] if order else None
 
     text = (
         f"{name}{f' #{unit_no}' if unit_no > 1 else ''}\n"
         f"Order #{order_id} — {f'@{username}' if username else ''} (ID: {user_id})\n"
-        f"Status: {state}\n\n"
+        f"Status: {state}\n"
+        f"Submitted: {created_at[:19] if created_at else 'unknown'}\n\n"
         f"{format_fulfilment_info(item_id, info_json)}"
     )
 
@@ -8017,22 +8028,21 @@ async def admin_pending_back(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     buttons = []
-    for fid, order_id, user_id, username, item_id, unit_no, state in rows:
+    for fid, order_id, user_id, username, item_id, unit_no, state, created_at in rows:
         name = MENU.get(item_id, (item_id,))[0]
         suffix = f" #{unit_no}" if unit_no > 1 else ""
         flag = "📝" if state == "awaiting_delivery" else "⌛"
         who = f"@{username}" if username else str(user_id)
-        buttons.append(
-            [InlineKeyboardButton(f"{flag} {name}{suffix} — {who} (#{order_id})"[:60], callback_data=f"apend:{fid}")]
-        )
+        label = f"{flag} {name}{suffix} — {who} (#{order_id}) — {_short_submitted(created_at)}"
+        buttons.append([InlineKeyboardButton(label[:64], callback_data=f"apend:{fid}")])
 
     text = "Pending orders:\n📝 = details ready to deliver   ⌛ = waiting on customer"
     if rejected:
         text += "\n\n💳 Payment Pending (receipt rejected):"
         for order_id, user_id, username, total, created_at in rejected:
             who = f"@{username}" if username else str(user_id)
-            label = f"💳 {CURRENCY}{total:.2f} — {who} (#{order_id})"
-            buttons.append([InlineKeyboardButton(label[:60], callback_data=f"apend_rejected:{order_id}")])
+            label = f"💳 {CURRENCY}{total:.2f} — {who} (#{order_id}) — {_short_submitted(created_at)}"
+            buttons.append([InlineKeyboardButton(label[:64], callback_data=f"apend_rejected:{order_id}")])
 
     await query.edit_message_text(
         text,
