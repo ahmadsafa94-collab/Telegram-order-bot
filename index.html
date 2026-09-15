@@ -443,10 +443,10 @@ const CATALOG = [
 const IMAP = {};
 CATALOG.forEach(c=>{
   if(c.groups) c.groups.forEach(g=>g.items.forEach(i=>{
-    IMAP[i.id]={...i, fullname: c.name+' — '+i.name+(i.sub?' ('+i.sub+')':'')};
+    IMAP[i.id]={...i, catId:c.id, catName:c.name, fullname: c.name+' — '+i.name+(i.sub?' ('+i.sub+')':'')};
   }));
   if(c.single) c.single.forEach(i=>{
-    IMAP[i.id]={...i, sub:'1 Year', fullname: i.name+' — 1 Year'};
+    IMAP[i.id]={...i, catId:c.id, catName:c.name, sub:'1 Year', fullname: i.name+' — 1 Year'};
   });
 });
 
@@ -903,12 +903,22 @@ function performSearch(raw){
     resEl.innerHTML=`<div class="search-empty">No subscriptions match "${escHtml(raw.trim())}"</div>`;
     return;
   }
-  const lbl=document.createElement('div'); lbl.className='sl';
-  lbl.textContent=`${matches.length} result${matches.length>1?'s':''}`;
-  resEl.appendChild(lbl);
-  const card=document.createElement('div'); card.className='card';
-  matches.forEach(itm=>card.appendChild(makeRow(itm,false)));
-  resEl.appendChild(card);
+  const countLbl=document.createElement('div'); countLbl.className='sl';
+  countLbl.textContent=`${matches.length} result${matches.length>1?'s':''}`;
+  resEl.appendChild(countLbl);
+
+  // Grouped by category (Uptodate, iMD, Amboss, All Subscriptions) in the
+  // same order as the tabs, with that category's name as a header — so a
+  // search spanning several categories still reads like the real catalog.
+  CATALOG.forEach(cat=>{
+    const group=matches.filter(itm=>itm.catId===cat.id);
+    if(!group.length) return;
+    const lbl=document.createElement('div'); lbl.className='sl'; lbl.textContent=cat.name;
+    resEl.appendChild(lbl);
+    const card=document.createElement('div'); card.className='card';
+    group.forEach(itm=>card.appendChild(makeRow(itm,false)));
+    resEl.appendChild(card);
+  });
 }
 function clearSearch(){
   const inp=document.getElementById('searchInput');
@@ -1219,7 +1229,7 @@ if (SUBS_DATA && SUBS_DATA.c && SUBS_DATA.c.length) {
     moreSec.appendChild(lbl);
     SUBS_DATA.c.forEach(([itemId, name, price]) => {
       // Register in IMAP with the actual bot item_id so orders work correctly
-      IMAP[itemId] = {id: itemId, name, price, sub: '', fullname: name};
+      IMAP[itemId] = {id: itemId, name, price, sub: '', catId: 'other', catName: 'All Subscriptions', fullname: name};
       const row = makeRow({id: itemId, name, price, sub: '', e: '📦'}, true);
       moreSec.appendChild(row);
     });
