@@ -675,8 +675,8 @@ USA_APP_INSTRUCTIONS = {
     "TapTap Send": (
         "1- Open the Taptap Send app\n"
         "2- Choose Country: Lebanon\n"
-        "3- Choose Whish Money Wallet\n"
-        "Make sure you choose Whish Money wallet not Cash pickup\n"
+        "3- Choose Purpl Wallet\n"
+        "Make sure you choose Purpl wallet not Cash pickup\n"
         "4: Enter the details: (tap to copy)\n\n"
         "Phone Number: `0096181666579`\n"
         "First Name: Ahmad\n"
