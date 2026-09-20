@@ -2449,14 +2449,18 @@ def _shop_url(user_id: int = 0) -> str:
             for _, iid, dat, msg in del_rows
         ]
         pending = [
-            # If the ORDER is awaiting a receipt, show that regardless of
-            # what the fulfilment row says (Mini App pre-stores credentials
-            # and sets awaiting_delivery, but receipt still hasn't arrived).
+            # If the ORDER hasn't been paid yet (any of UNPAID_ORDER_STATUSES),
+            # show THAT regardless of what the fulfilment row says — the Mini
+            # App pre-stores registration details (and even flags non-iMD
+            # items 'awaiting_delivery') before payment, so trusting fstate
+            # here could show an actionable button — like iMD's "Complete
+            # Registration" — for an order nobody has paid for yet. That's
+            # exactly what let one customer get a real iMD account for free.
             # 5th element: whether this order hasn't been paid yet at all —
             # lets the Mini App split "not paid" from "paid, not delivered"
             # instead of lumping both into one vague "pending" bucket.
             [MENU.get(iid, (iid,))[0],
-             "awaiting_receipt" if ostatus == "awaiting_receipt" else fstate,
+             ostatus if ostatus in UNPAID_ORDER_STATUSES else fstate,
              fid, oid, ostatus in UNPAID_ORDER_STATUSES]
             for fid, oid, iid, fstate, ostatus in pend_rows
         ]
