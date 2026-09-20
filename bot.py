@@ -8599,6 +8599,26 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
     existing_row = db_get_fulfilment(fulfilment_id)
     existing_info_json = existing_row[6] if existing_row else None
     if existing_info_json:
+        # The Mini App pre-stores registration details as soon as the
+        # customer fills them in, regardless of whether the order has been
+        # paid yet — that's intentional, so the admin can see them early.
+        # But this whole branch can auto-register a REAL account (iMD) or
+        # auto-deliver a code (Uptodate AI) with no human step in between,
+        # and it's reachable from many call sites (My Subscriptions, the
+        # Mini App's 'complete_registration' action, etc.) — some of which
+        # don't check payment status themselves. Guarding here, once, is
+        # what actually stops an unpaid order from being fulfilled instead
+        # of relying on every caller to remember to check first.
+        order_row = db_get_order(order_id)
+        order_status = order_row[5] if order_row else None
+        if order_status not in ("paid", "delivered"):
+            logger.warning(
+                "process_next_in_queue: refused to auto-process fulfilment #%s for "
+                "order #%s — order status is '%s', not paid.",
+                fulfilment_id, order_id, order_status,
+            )
+            return
+
         existing_info = json.loads(existing_info_json)
 
         if item_id in IMD_TRIGGER_ITEMS:
@@ -10030,6 +10050,15 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         item_id, state = row
         if state == "awaiting_delivery":
             await update.message.reply_text("✅ Your subscription is being prepared. We'll deliver it shortly.")
+            return
+        order_row = db_get_order(oid)
+        order_status = order_row[5] if order_row else None
+        if order_status not in ("paid", "delivered"):
+            await update.message.reply_text(
+                "We haven't received your payment for this order yet — please complete the payment "
+                "and upload your receipt first, then we'll register your account.",
+                reply_markup=main_menu_keyboard(user_id),
+            )
             return
         await update.message.reply_text(
             f"Let's complete your registration for {MENU.get(item_id,(item_id,))[0]}:",
