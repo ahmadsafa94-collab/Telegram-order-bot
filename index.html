@@ -755,6 +755,12 @@ function renderOrders(){
         icon:'📤', label:'Waiting for your payment receipt',
         btn:'Send Receipt Now →', cls:'teal', action:'send_receipt'
       },
+      awaiting_payment: {
+        icon:'⏳', label:'Waiting for payment', btn:null
+      },
+      awaiting_confirmation: {
+        icon:'🔍', label:"We've received your receipt — verifying now", btn:null
+      },
       awaiting_delivery: {
         icon:'🔄', label:'Being prepared by our team', btn:null
       },
