@@ -9904,7 +9904,8 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
         "SELECT id, user_id, username, items_json, total, status, created_at, "
-        "credentials, delivered_at, paid_at FROM orders WHERE id = ?",
+        "credentials, delivered_at, paid_at, payment_method, discount_code, "
+        "credits_applied, receipt_reference FROM orders WHERE id = ?",
         (order_id,),
     ).fetchone()
     conn.close()
@@ -9913,7 +9914,8 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Order #{order_id} not found.")
         return
 
-    oid, user_id, username, items_json, total, status, created_at, credentials, delivered_at, paid_at = row
+    (oid, user_id, username, items_json, total, status, created_at, credentials,
+     delivered_at, paid_at, payment_method, discount_code, credits_applied, receipt_reference) = row
     items = json.loads(items_json)
     item_names = ", ".join(MENU[i][0] for i in items if i in MENU)
 
@@ -9923,6 +9925,10 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Items: {item_names}\n"
         f"Total: {CURRENCY}{total:.2f}\n"
         f"Status: {status}\n"
+        f"Payment method: {payment_method or 'not set'}\n"
+        f"Discount code: {discount_code or 'none'}\n"
+        f"Credits applied: {credits_applied or 0}\n"
+        f"Receipt reference: {receipt_reference or 'none on file'}\n"
         f"Submitted: {created_at[:19]}\n"
         f"Paid: {_paid_label(status, paid_at)}\n"
     )
