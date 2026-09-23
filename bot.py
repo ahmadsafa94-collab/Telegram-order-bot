@@ -192,13 +192,14 @@ MENU = {
     "jama_evidence": ("JAMA Evidence - 1 Year", 20.00),
     "scopus": ("Scopus - 1 Year", 35.00),
     "springerlink": ("SpringerLink - 1 Year", 35.00),
+    "sanford_guide": ("Sanford Guide - 1 Year", 35.00),
 }
 
 # Order the single-choice items appear in the main menu.
 SINGLE_MAIN_ITEMS = [
     "dynamed", "dynamedex", "bmj_best_practice", "bmj_learning", "visualdx",
     "lexicomp", "accessmedicine", "boardvitals", "clinicalkey", "sciencedirect",
-    "statdx", "nejm", "jama_evidence", "scopus", "springerlink",
+    "statdx", "nejm", "jama_evidence", "scopus", "springerlink", "sanford_guide",
 ]
 
 # Admin edits from 📦 Manage Stock → Edit, layered on top of MENU at
