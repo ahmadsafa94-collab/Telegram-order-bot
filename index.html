@@ -506,7 +506,7 @@ const LOGOS = {
 
 // ── Payment data ──────────────────────────────────────────────────────
 const FLAGS={Lebanon:'🇱🇧',Jordan:'🇯🇴',India:'🇮🇳',Ghana:'🇬🇭',
-  Pakistan:'🇵🇰',Europe:'🇪🇺',KSA:'🇸🇦',Russia:'🇷🇺',Ethiopia:'🇪🇹'};
+  Pakistan:'🇵🇰',Europe:'🇪🇺',KSA:'🇸🇦',Russia:'🇷🇺',Ethiopia:'🇪🇹',Armenia:'🇦🇲'};
 
 function payInstr(c,t){
   const m={
@@ -592,6 +592,12 @@ function payInstr(c,t){
       Name: <strong>Seid Ahmed Seid</strong><br><br>
       Amount: <strong>${Math.round(t*176).toLocaleString()} ETB</strong><br>
       Screenshot the receipt showing the transaction ID, amount, and name.`,
+
+    Armenia:`
+      <strong>📲 Idram Transfer — ${Math.round(t*383.5).toLocaleString()} AMD</strong><br>
+      Idram number: <span class="mono">682671753</span><br><br>
+      Amount: <strong>${Math.round(t*383.5).toLocaleString()} AMD</strong><br>
+      After the payment is done, send the receipt of the payment.`,
   };
   return m[c]||`Amount: <strong>$${t.toFixed(2)}</strong>`;
 }
@@ -1254,7 +1260,7 @@ function selOtherCountry(c){
   document.getElementById('submitBtn').style.display='none';
 }
 const OTHER_COUNTRIES=[
-  "Afghanistan","Algeria","Argentina","Armenia","Australia","Austria",
+  "Afghanistan","Algeria","Argentina","Australia","Austria",
   "Azerbaijan","Bahrain","Bangladesh","Belgium","Brazil","Canada",
   "China","Colombia","Denmark","Egypt","Finland","France","Georgia",
   "Germany","Greece","Indonesia","Iraq","Ireland","Italy",
