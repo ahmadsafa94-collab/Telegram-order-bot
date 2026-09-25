@@ -484,12 +484,12 @@ PAYMENT_INSTRUCTIONS = (
 PAYMENT_LINK_BASE_URL = "https://payments.suyool.com/pay/g401_MD"
 
 # Countries offered under "Pay using local payment methods."
-LOCAL_PAYMENT_COUNTRIES = ["Lebanon", "Jordan", "India", "Ghana", "Pakistan", "Europe", "KSA", "Russia", "Ethiopia"]
+LOCAL_PAYMENT_COUNTRIES = ["Lebanon", "Jordan", "India", "Ghana", "Pakistan", "Europe", "KSA", "Russia", "Ethiopia", "Armenia"]
 
 COUNTRY_FLAGS = {
     "Lebanon": "🇱🇧", "Jordan": "🇯🇴", "India": "🇮🇳", "Ghana": "🇬🇭",
     "Pakistan": "🇵🇰", "Europe": "🇪🇺", "USA": "🇺🇸", "KSA": "🇸🇦", "Russia": "🇷🇺",
-    "Ethiopia": "🇪🇹",
+    "Ethiopia": "🇪🇹", "Armenia": "🇦🇲",
 }
 
 # 1 USD in the local currency, and the currency code to display it in.
@@ -505,6 +505,7 @@ CURRENCY_RATES = {
     "KSA": ("SAR", 3.8),
     "Russia": ("RUB", 85.5),
     "Ethiopia": ("ETB", 176),
+    "Armenia": ("AMD", 383.5),
 }
 
 # Payment methods where a unique transaction reference isn't realistic to
@@ -654,6 +655,10 @@ LOCAL_PAYMENT_INSTRUCTIONS = {
         "Phone number: `+992002373232`\n"
         "Name: Alijon Karimov\n"
         "Recipient Bank: Alif Bank"
+    ),
+    "Armenia": (
+        "Idram\n\n"
+        "Idram Number (tap to copy):\n`682671753`"
     ),
 
 }
@@ -3790,7 +3795,7 @@ async def local_pay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # payment instructions for). Picking one just opens a chat with admin with
 # a ready-made message, nothing automated happens after that.
 OTHER_COUNTRIES = [
-    "Afghanistan", "Algeria", "Argentina", "Armenia", "Australia", "Austria",
+    "Afghanistan", "Algeria", "Argentina", "Australia", "Austria",
     "Azerbaijan", "Bahrain", "Bangladesh", "Belgium", "Brazil", "Canada",
     "China", "Colombia", "Denmark", "Egypt", "Finland", "France", "Georgia",
     "Germany", "Greece", "Indonesia", "Iraq", "Ireland", "Italy",
