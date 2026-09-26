@@ -145,6 +145,9 @@ MENU = {
     "item1": ("Uptodate Online", 20.00),
     "item3": ("Uptodate Online + Offline", 30.00),
     "item4": ("Amboss Full Access - 1 year", 85.00),
+    # Promo expired 18/9/2026 — no longer purchasable, kept for name/price
+    # lookups on any order already placed with it.
+    "amboss_premium_promo": ("Amboss Premium (Unlimited Qbanks) + Library - Valid until 18/9/2026", 35.00),
     # iMD used to be 4 separate products (New/Renewal x 6m/1y) — collapsed
     # into 2 durations below, with New vs Renewal now asked on the account
     # details page instead. Kept for name lookups on any order already
@@ -170,10 +173,8 @@ MENU = {
     "uptodate_ai_2m": ("Uptodate Expert AI (Telegram Bot) - 3 Months", 10.00),
     "uptodate_ai_official_3m": ("Uptodate Expert AI (Official App) - 3 Months", 20.00),
 
-    # Amboss — Premium+Library (1 year, or a fixed-date promo), or
-    # Library-only.
+    # Amboss — Premium+Library, or Library-only.
     "amboss_premium_1y": ("Amboss Premium (Unlimited Qbanks) + Library - 1 Year", 85.00),
-    "amboss_premium_promo": ("Amboss Premium (Unlimited Qbanks) + Library - Valid until 18/9/2026", 35.00),
     "amboss_library": ("Amboss Library Access Only (Limited Qbanks) - 1 Year", 65.00),
 
     # Single-choice subscriptions — one price each, no sub-menu needed.
@@ -255,7 +256,6 @@ CATALOG = {
                 "label": "Premium (Unlimited Qbanks) + Library",
                 "children": {
                     "amboss_premium_1y": {"label": "1 Year", "item": "amboss_premium_1y"},
-                    "amboss_premium_promo": {"label": "Valid until 18/9/2026", "item": "amboss_premium_promo"},
                 },
             },
             "amboss_library": {"label": "Library Access Only (Limited Qbanks)", "item": "amboss_library"},
