@@ -193,6 +193,10 @@ MENU = {
     "scopus": ("Scopus - 1 Year", 35.00),
     "springerlink": ("SpringerLink - 1 Year", 35.00),
     "sanford_guide": ("Sanford Guide - 1 Year", 35.00),
+
+    # Telegram AI bots — no registration details needed; access is granted
+    # directly on the relevant Telegram bot after payment.
+    "medical_toolkit": ("Medical Toolkit Bot Access - 1 Month", 5.00),
 }
 
 # Order the single-choice items appear in the main menu.
@@ -276,6 +280,13 @@ IMD_TRIGGER_ITEMS = {"imd_6m", "imd_1y"}
 # (📦 Manage Stock → this item → Stock, or the same add/remove flow).
 UPTODATE_AI_TRIGGER_ITEMS = {"uptodate_ai_2m"}
 UPTODATE_AI_CODES_DURATION = "uptodate_ai_2m"
+
+# Items that need no customer-entered details at all AND can't be
+# auto-delivered (unlike Uptodate AI's serial pool) — access has to be
+# granted by hand on a different system (e.g. whitelisting the customer
+# on another bot), so these just get a clean "paid, please grant access"
+# admin notice instead of the generic credential-fields notice.
+MANUAL_ACCESS_ITEMS = {"medical_toolkit"}
 
 # Every code/serial pool the admin can manage via ➕ Add Serials, 📋 View
 # Serials, and /addserials — used to build those buttons/labels/parsing so
@@ -8687,6 +8698,24 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
                         [[InlineKeyboardButton("📤 Send Book", callback_data=f"deliver:{fulfilment_id}")]]
                     ),
                 )
+        elif item_id in MANUAL_ACCESS_ITEMS:
+            # No credential fields to show — access is granted by hand on a
+            # different system, so just a clean "paid, grant access" notice.
+            db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
+            if ADMIN_CHAT_ID:
+                who = f"@{order_row[2]}" if order_row and order_row[2] else str(user_id)
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(
+                        f"🤖 {item_name} paid — Order #{order_id}\n"
+                        f"Customer: {who} (ID: {user_id})\n\n"
+                        "Grant them access, then use the 📤 Send Credentials button to "
+                        "send a confirmation message."
+                    ),
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("📤 Send Credentials", callback_data=f"deliver:{fulfilment_id}")]]
+                    ),
+                )
         else:
             # Non-iMD: state MUST be changed before the recursive call below
             db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
@@ -10271,6 +10300,30 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             # Notify admin immediately with the stored credentials so they
             # can register as soon as the payment is confirmed.
             item_name = MENU.get(iid, (iid,))[0]
+
+            if iid in MANUAL_ACCESS_ITEMS:
+                # No credential fields to show — just a clean "grant access"
+                # notice, so the admin isn't shown a wall of blank fields.
+                if ADMIN_CHAT_ID:
+                    who = f"@{username}" if username else str(user_id)
+                    try:
+                        await context.bot.send_message(
+                            chat_id=ADMIN_CHAT_ID,
+                            text=(
+                                f"🤖 {item_name} — Order #{order_id} (awaiting payment)\n"
+                                f"Customer: {who} (ID: {user_id})\n\n"
+                                "Grant access once payment is confirmed, using the 📤 Send "
+                                "Credentials button to send them a confirmation message."
+                            ),
+                            reply_markup=InlineKeyboardMarkup(
+                                [[InlineKeyboardButton("📤 Send Credentials",
+                                                       callback_data=f"deliver:{fid}")]]
+                            ),
+                        )
+                    except Exception:
+                        logger.exception("Failed to send pre-payment manual-access notice to admin")
+                continue
+
             atype = detail_entry.get("account_type", "new")
             if atype == "new":
                 cred_lines = (

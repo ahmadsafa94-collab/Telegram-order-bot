@@ -414,7 +414,11 @@ const IMD = new Set(['imd_6m','imd_1y']);
 // Uptodate AI is a code-redemption product — no account/credentials are
 // needed at all, it's delivered automatically right after payment. Skip
 // generating a details form for it entirely.
-const NO_DETAILS_NEEDED = new Set(['uptodate_ai_2m']);
+const NO_DETAILS_NEEDED = new Set(['uptodate_ai_2m', 'medical_toolkit']);
+// Subset of NO_DETAILS_NEEDED that isn't auto-delivered — access has to be
+// granted by hand on another system, so the checkout copy shouldn't say
+// "automatically" for these.
+const MANUAL_ACCESS_ITEMS = new Set(['medical_toolkit']);
 
 const CATALOG = [
   {id:'imd',name:'iMD',emoji:'🎓',groups:[
@@ -448,6 +452,12 @@ const CATALOG = [
     ]},
     {label:'Library Only',items:[
       {id:'amboss_library',name:'1 Year',sub:'Limited Qbanks',price:65},
+    ]},
+  ]},
+  {id:'ai_bots',name:'Telegram AI Bots',emoji:'🤖',groups:[
+    {label:'Bot Subscriptions',items:[
+      {id:'medical_toolkit',name:'Medical Toolkit Bot',sub:'Full Access · 1 Month',price:5},
+      {id:'uptodate_ai_2m',name:'Uptodate Expert AI (Telegram Bot)',sub:'3 Months',price:10},
     ]},
   ]},
   // Catch-all — rendered on its own row of tabs below iMD/Uptodate/Amboss
@@ -1047,11 +1057,16 @@ function buildDetailForms(){
 function makeNoDetailsBlock(id,name,price,idx){
   const w=document.createElement('div'); w.className='dblock'; w.dataset.id=id; w.dataset.idx=idx;
   const lbl=idx>0?` #${idx+1}`:'';
+  // Most no-details items auto-deliver right after payment (serial pool);
+  // manual-access ones (e.g. Medical Toolkit) instead need the admin to
+  // grant access on another bot, so say that instead of over-promising.
+  const note=MANUAL_ACCESS_ITEMS.has(id)
+    ? '✅ No account details needed — access is granted shortly after payment is confirmed.'
+    : '✅ No account details needed — delivered automatically after payment.';
   w.innerHTML=`<div class="dheader"><div class="ri"><div class="rn">${name}${lbl}</div></div>`+
     `<div class="ptag">$${price}</div>`+
     `<button class="rm" title="Remove" onclick="removeDetailItem('${id}')">×</button></div>`+
-    `<div style="font-size:12px;color:var(--hint);padding:4px 2px 8px">`+
-    `✅ No account details needed — delivered automatically after payment.</div>`;
+    `<div style="font-size:12px;color:var(--hint);padding:4px 2px 8px">${note}</div>`;
   return w;
 }
 function makeDetailBlock(id,name,price,idx){
