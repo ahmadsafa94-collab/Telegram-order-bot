@@ -454,7 +454,7 @@ const CATALOG = [
       {id:'amboss_library',name:'1 Year',sub:'Limited Qbanks',price:65},
     ]},
   ]},
-  {id:'ai_bots',name:'Telegram AI Bots',emoji:'🤖',groups:[
+  {id:'ai_bots',name:'Telegram AI Bots',emoji:'🤖',row2:true,groups:[
     {label:'Bot Subscriptions',items:[
       {id:'medical_toolkit',name:'Medical Toolkit Bot',sub:'Full Access · 1 Month',price:5},
       {id:'uptodate_ai_2m',name:'Uptodate Expert AI (Telegram Bot)',sub:'3 Months',price:10},
@@ -942,7 +942,7 @@ function buildCatalog(){
     const tabLogo=LOGOS[cat.id];
     tab.innerHTML=(tabLogo?`<img src="${tabLogo}" class="tab-logo">`:cat.emoji)+' '+escHtml(cat.name);
     tab.onclick=()=>switchCat(cat.id);
-    (cat.single?tabsMoreEl:tabsEl).appendChild(tab);
+    (cat.single||cat.row2?tabsMoreEl:tabsEl).appendChild(tab);
     const sec=document.createElement('div');
     sec.id='cat-'+cat.id; sec.style.display='none';
     if(cat.groups) cat.groups.forEach(g=>{
@@ -1383,10 +1383,26 @@ function buildAdBanner(){
       dots.appendChild(d);
     });
     wrap.appendChild(dots);
+
+    // Auto-advance every 7s. The timer restarts after any scroll — manual
+    // swipe or auto-advance alike — so a manual swipe always gets a fresh
+    // 7s before the next auto jump instead of fighting with one already
+    // in flight.
+    let autoTimer, scrollSettle;
+    const advance = () => {
+      const cur = Math.round(track.scrollLeft / track.clientWidth);
+      const next = (cur + 1) % ADS.length;
+      track.scrollTo({ left: next * track.clientWidth, behavior: 'smooth' });
+    };
+    const restartAutoTimer = () => { clearInterval(autoTimer); autoTimer = setInterval(advance, 7000); };
+
     track.addEventListener('scroll', () => {
       const idx = Math.round(track.scrollLeft / track.clientWidth);
       [...dots.children].forEach((d, i) => d.classList.toggle('active', i === idx));
+      clearTimeout(scrollSettle);
+      scrollSettle = setTimeout(restartAutoTimer, 150); // wait for scroll-snap to settle
     });
+    restartAutoTimer();
   }
 }
 
