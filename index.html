@@ -1176,7 +1176,10 @@ function buildPaymentPage(){
   addSectionLabel('🌍 Pay using international methods');
   [{id:'stars',ico:'⭐',lbl:'Telegram Stars',sub:'Pay with Stars'},
    {id:'card',ico:'💳',img:LOGOS.card,lbl:'Visa/Mastercard',sub:'Pay online'},
-   {id:'paypal',ico:'🅿️',lbl:'PayPal',sub:'Pay online'},
+   // PayPal on hold for now — the selMethod() 'paypal' branch, TITLES
+   // entry, and server-side handling are all still in place; re-enable
+   // by uncommenting this tile.
+   // {id:'paypal',ico:'🅿️',lbl:'PayPal',sub:'Pay online'},
    {id:'crypto',ico:'₿',lbl:'Cryptocurrency',sub:'USDT, BTC, more'},
    {id:'app:Ria',ico:'🏦',img:LOGOS.ria,lbl:'Ria',sub:'Money transfer'},
    {id:'app:Paysend',ico:'📨',img:LOGOS.paysend,lbl:'Paysend',sub:'Money transfer'},

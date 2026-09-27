@@ -3710,7 +3710,10 @@ def checkout_view(order_id: int):
         [InlineKeyboardButton("── 🌍 Pay using international methods ──", callback_data="noop")],
         [InlineKeyboardButton("⭐ Pay with Telegram Stars", callback_data=f"pay_stars:{order_id}")],
         [InlineKeyboardButton("💳 Pay using Visa/Mastercard", callback_data=f"pay_card:{order_id}")],
-        [InlineKeyboardButton("🅿️ Pay with PayPal", callback_data=f"pay_paypal:{order_id}")],
+        # PayPal on hold for now — the handler (pay_paypal_start), callback
+        # registration, and AI-verification note are all still in place;
+        # re-enable by uncommenting this button.
+        # [InlineKeyboardButton("🅿️ Pay with PayPal", callback_data=f"pay_paypal:{order_id}")],
         [InlineKeyboardButton("₿ Pay with Cryptocurrency", callback_data=f"pay_crypto:{order_id}")],
         [InlineKeyboardButton("🏦 Ria", callback_data=f"usa_app:{order_id}:Ria")],
         [InlineKeyboardButton("📨 Paysend", callback_data=f"usa_app:{order_id}:Paysend")],
