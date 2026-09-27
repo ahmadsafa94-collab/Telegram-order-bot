@@ -1176,6 +1176,7 @@ function buildPaymentPage(){
   addSectionLabel('🌍 Pay using international methods');
   [{id:'stars',ico:'⭐',lbl:'Telegram Stars',sub:'Pay with Stars'},
    {id:'card',ico:'💳',img:LOGOS.card,lbl:'Visa/Mastercard',sub:'Pay online'},
+   {id:'paypal',ico:'🅿️',lbl:'PayPal',sub:'Pay online'},
    {id:'crypto',ico:'₿',lbl:'Cryptocurrency',sub:'USDT, BTC, more'},
    {id:'app:Ria',ico:'🏦',img:LOGOS.ria,lbl:'Ria',sub:'Money transfer'},
    {id:'app:Paysend',ico:'📨',img:LOGOS.paysend,lbl:'Paysend',sub:'Money transfer'},
@@ -1241,6 +1242,9 @@ function selMethod(id,total){
   }else if(id==='card'){
     det.innerHTML=`<div class="pdtl on">1. <a href="https://payments.suyool.com/pay/g401_MD" target="_blank" style="color:var(--teal2)">Open Payment Link ↗</a><br>2. "Pay online with your card"<br>3. From: your name · Amount: <strong>$${total.toFixed(2)}</strong> · Message: empty<br>4. Enter card details and complete</div>`;
     sub.textContent="I've Paid ✅"; sub.style.display='block';
+  }else if(id==='paypal'){
+    det.innerHTML=`<div class="pdtl on">1. <a href="https://www.paypal.com/ncp/payment/QA24N96VRQALU" target="_blank" style="color:var(--teal2)">Open Payment Link ↗</a><br>2. Enter the amount: <strong>$${total.toFixed(2)}</strong> USD<br>3. Pay with your PayPal balance, bank, card, or Venmo</div>`;
+    sub.textContent="I've Paid ✅"; sub.style.display='block';
   }else if(id.startsWith('country:')){
     const c=id.slice(8);
     selCountry=c;
@@ -1258,7 +1262,7 @@ function selMethod(id,total){
     sub.textContent="I've Paid ✅"; sub.style.display='block';
   }
   const TITLES={stars:'⭐ Telegram Stars',credits:'🎁 My Credits',card:'💳 Visa/Mastercard',
-    crypto:'₿ Cryptocurrency',country_missing:'🌐 Select Your Country'};
+    paypal:'🅿️ PayPal',crypto:'₿ Cryptocurrency',country_missing:'🌐 Select Your Country'};
   const title=TITLES[id]||(id.startsWith('app:')?id.slice(4):id.startsWith('country:')?id.slice(8):'Payment Details');
   openPmDetail(title);
 }
