@@ -494,6 +494,10 @@ PAYMENT_INSTRUCTIONS = (
 # Card payment link (Visa/Mastercard).
 PAYMENT_LINK_BASE_URL = "https://payments.suyool.com/pay/g401_MD"
 
+# PayPal hosted payment page — the customer enters the amount themselves,
+# same as the Visa/Mastercard link above.
+PAYPAL_LINK_URL = "https://www.paypal.com/ncp/payment/QA24N96VRQALU"
+
 # Countries offered under "Pay using local payment methods."
 LOCAL_PAYMENT_COUNTRIES = ["Lebanon", "Jordan", "India", "Ghana", "Pakistan", "Europe", "KSA", "Russia", "Ethiopia", "Armenia"]
 
@@ -3706,6 +3710,7 @@ def checkout_view(order_id: int):
         [InlineKeyboardButton("── 🌍 Pay using international methods ──", callback_data="noop")],
         [InlineKeyboardButton("⭐ Pay with Telegram Stars", callback_data=f"pay_stars:{order_id}")],
         [InlineKeyboardButton("💳 Pay using Visa/Mastercard", callback_data=f"pay_card:{order_id}")],
+        [InlineKeyboardButton("🅿️ Pay with PayPal", callback_data=f"pay_paypal:{order_id}")],
         [InlineKeyboardButton("₿ Pay with Cryptocurrency", callback_data=f"pay_crypto:{order_id}")],
         [InlineKeyboardButton("🏦 Ria", callback_data=f"usa_app:{order_id}:Ria")],
         [InlineKeyboardButton("📨 Paysend", callback_data=f"usa_app:{order_id}:Paysend")],
@@ -3987,6 +3992,34 @@ async def pay_card_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_photo(chat_id=query.message.chat_id, photo=img_file)
             except Exception:
                 logger.exception("Failed to send card tutorial image: %s", path)
+
+
+async def pay_paypal_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows PayPal payment instructions before sending the customer to
+    the hosted payment link, where they enter the amount themselves."""
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+
+    order = db_get_order(order_id)
+    total = order[4] if order else 0
+    db_set_payment_method(order_id, "PayPal")
+
+    text = (
+        "*🅿️ Pay using PayPal*\n\n"
+        f"Amount to pay: *{CURRENCY}{total:.2f}*\n\n"
+        "1️⃣ Click \"Open Payment Link\" below\n\n"
+        f"2️⃣ Enter the amount: *{total:.2f}* USD\n\n"
+        "3️⃣ Pay with your PayPal balance, bank, card, or Venmo\n\n"
+        "✅ Done!\n\n"
+        "4️⃣ Click *I've Paid* below after the payment is done."
+    )
+    buttons = [
+        [InlineKeyboardButton("🅿️ Open Payment Link", url=PAYPAL_LINK_URL)],
+        [InlineKeyboardButton("✅ I've Paid", callback_data=f"paid:{order_id}")],
+        [InlineKeyboardButton("⬅️ Back", callback_data=f"back_to_checkout:{order_id}")],
+    ]
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def pay_credits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4404,6 +4437,11 @@ async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• The last web page you got after you did the payment, showing the "
                 "deduction of the money for Suyool"
             )
+        elif payment_method == "PayPal":
+            text = (
+                "📸 *Upload a screenshot of your PayPal payment confirmation*, clearly "
+                "showing the amount paid and the transaction ID."
+            )
         elif payment_method == "Cryptocurrency":
             text = (
                 "📸 *Upload a screenshot of the transaction showing the amount paid, "
@@ -4785,6 +4823,15 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
             f"receipt — all of these formats are expected and normal here."
             if payment_method == "card" else ""
         )
+        paypal_note = (
+            " This is a PayPal payment. The proof of payment is a screenshot of the PayPal "
+            "payment confirmation (or the email receipt), showing the amount paid and a "
+            "transaction ID (PayPal transaction IDs are typically a 17-character mix of "
+            "uppercase letters and digits, e.g. \"9XX12345XX678901Y\"). Treat that as the "
+            "transaction reference. Do not treat it as suspicious just because it says "
+            "\"PayPal\" or \"Venmo\" rather than a bank name."
+            if payment_method == "PayPal" else ""
+        )
         crypto_note = (
             " This is a cryptocurrency payment. Our only valid receiving wallet addresses are:\n"
             f"  USDT (BEP20): {CRYPTO_WALLETS['USDT_BEP20']}\n"
@@ -4833,7 +4880,7 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
             f"{currency_code} (the equivalent of $1 USD) is ALWAYS a normal rounding/display "
             f"difference — treat it as a match immediately, do not deliberate about it, do not "
             f"mention it as a concern. Only a difference bigger than that actually matters.{multi_note}"
-            f"{india_note}{jordan_note}{ksa_note}{ethiopia_note}{card_note}{crypto_note} "
+            f"{india_note}{jordan_note}{ksa_note}{ethiopia_note}{card_note}{paypal_note}{crypto_note} "
             f"{reference_requirement}\n\n"
             "Look at the image(s)/document(s) and respond with ONLY a JSON object, no other text:\n"
             '{"verdict": "looks_valid" | "looks_off" | "unclear", '
@@ -5366,6 +5413,7 @@ def format_fulfilment_info(item_id: str, info_json: str) -> str:
 PAYMENT_METHOD_ICONS = {
     "Telegram Stars": "⭐",
     "card": "💳",
+    "PayPal": "🅿️",
     "Cryptocurrency": "₿",
     "Credits": "🎁",
     "Credits (Full)": "🎁",
@@ -10249,6 +10297,8 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     # AI verification) keys off these exact canonical strings.
     if pay_method == "crypto":
         pay_method = "Cryptocurrency"
+    elif pay_method == "paypal":
+        pay_method = "PayPal"
     db_set_payment_method(order_id, pay_method or "Mini App")
 
     # Create a fulfilment row for each unit and pre-populate it with the
@@ -10440,6 +10490,11 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "• The SMS you received showing the deduction of the money for Suyool\n"
             "• The last web page you got after you did the payment, showing the "
             "deduction of the money for Suyool"
+        )
+    elif pay_method == "PayPal":
+        receipt_prompt = (
+            "📸 *Upload a screenshot of your PayPal payment confirmation*, clearly "
+            "showing the amount paid and the transaction ID."
         )
     elif pay_method == "Cryptocurrency":
         receipt_prompt = (
@@ -10869,6 +10924,7 @@ def main():
     app.add_handler(CallbackQueryHandler(usa_app_selected, pattern=r"^usa_app:"))
     app.add_handler(CallbackQueryHandler(noop_callback, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(pay_card_start, pattern=r"^pay_card:"))
+    app.add_handler(CallbackQueryHandler(pay_paypal_start, pattern=r"^pay_paypal:"))
     app.add_handler(CallbackQueryHandler(pay_crypto, pattern=r"^pay_crypto:"))
     app.add_handler(CallbackQueryHandler(pay_credits_start, pattern=r"^pay_credits:"))
     app.add_handler(CallbackQueryHandler(generic_type_selected, pattern=r"^gentype:"))
