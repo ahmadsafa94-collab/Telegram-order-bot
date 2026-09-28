@@ -85,6 +85,13 @@ PAYMENTS_CHANNEL_ID = int(PAYMENTS_CHANNEL_ID_RAW) if PAYMENTS_CHANNEL_ID_RAW.st
 # Example: https://ahmadsafa94-collab.github.io/Telegram-order-bot/
 MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 
+# Cache-buster for the Mini App URL — Telegram's client caches the Mini App
+# page by URL and does NOT reliably refetch index.html just because GitHub
+# Pages has a newer version, so a query param that only changes when the
+# page's contents change (bumped by hand on every index.html edit) forces
+# a fresh load instead of silently serving a stale cached copy.
+MINI_APP_VERSION = "2"
+
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
 # beyond enabling "Public Networking" on the bot's Railway service.
@@ -2442,10 +2449,10 @@ def _shop_url(user_id: int = 0) -> str:
     if not user_id:
         if custom:
             try:
-                return f"{MINI_APP_URL}?subs={_encode({'d':[],'p':[],'c':custom})}"
+                return f"{MINI_APP_URL}?v={MINI_APP_VERSION}&subs={_encode({'d':[],'p':[],'c':custom})}"
             except Exception:
                 pass
-        return MINI_APP_URL
+        return f"{MINI_APP_URL}?v={MINI_APP_VERSION}"
 
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -2519,15 +2526,15 @@ def _shop_url(user_id: int = 0) -> str:
             "dc": active_codes,
             "api": BOT_API_URL,
         }
-        return f"{MINI_APP_URL}?subs={_encode(data)}"
+        return f"{MINI_APP_URL}?v={MINI_APP_VERSION}&subs={_encode(data)}"
     except Exception:
         logger.exception("_shop_url: failed to encode subscription data for user %s", user_id)
         if custom:
             try:
-                return f"{MINI_APP_URL}?subs={_encode({'d':[],'p':[],'c':custom})}"
+                return f"{MINI_APP_URL}?v={MINI_APP_VERSION}&subs={_encode({'d':[],'p':[],'c':custom})}"
             except Exception:
                 pass
-        return MINI_APP_URL
+        return f"{MINI_APP_URL}?v={MINI_APP_VERSION}"
 
 
 def main_menu_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
