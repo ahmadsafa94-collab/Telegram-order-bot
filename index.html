@@ -1199,9 +1199,9 @@ async function imdCatalogSearch(q,offset){
   }
   imdSearchQuery=q;
   resEl.innerHTML='<div class="search-empty">Searching…</div>';
+  const apiBase=(SUBS_DATA&&SUBS_DATA.api)||'';
+  const url=apiBase+'/api/imd_search?q='+encodeURIComponent(q)+'&offset='+offset;
   try{
-    const apiBase=(SUBS_DATA&&SUBS_DATA.api)||'';
-    const url=apiBase+'/api/imd_search?q='+encodeURIComponent(q)+'&offset='+offset;
     const resp=await fetch(url);
     const data=await resp.json();
     if(!resp.ok){
@@ -1210,7 +1210,8 @@ async function imdCatalogSearch(q,offset){
     }
     renderImdResults(data);
   }catch(e){
-    resEl.innerHTML='<div class="search-empty">Search failed — check your connection and try again.</div>';
+    resEl.innerHTML='<div class="search-empty">Search failed: '+escHtml(e.message||String(e))+
+      '<br><span style="font-size:10px;word-break:break-all">('+escHtml(url)+')</span></div>';
   }
 }
 function renderImdResults(data){
