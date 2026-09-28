@@ -1109,6 +1109,7 @@ function validateDetails(){
       if(!v){setErr(inp,'Required');ok=false;return;}
       if(n==='email'&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)){setErr(inp,'Enter a valid email');ok=false;return;}
       if(n==='username'&&v.length<6){setErr(inp,'At least 6 characters');ok=false;return;}
+      if(n==='username'&&isImd&&type==='new'&&/\s/.test(v)){setErr(inp,'One word only — no spaces');ok=false;return;}
       if((n==='password'||n==='login_password')&&type==='new'&&!isImd){
         if(v.length<8){setErr(inp,'At least 8 characters');ok=false;return;}
         if(!/[A-Z]/.test(v)){setErr(inp,'Need a capital letter');ok=false;return;}
