@@ -10179,6 +10179,14 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
+    if action == "imd_catalog_search":
+        # Reuses the exact same chat-based search feature (live inline
+        # search over the full imd_catalog table) — the Mini App hands off
+        # to it rather than duplicating a search over a catalog that can
+        # run into the thousands of entries.
+        await imd_search_start(update, context)
+        return
+
     if action == "goto_getfree":
         if db_referral_intro_shown(user_id):
             await send_referral_link(context, user_id, update.effective_chat.id)
