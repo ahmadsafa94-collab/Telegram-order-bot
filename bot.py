@@ -2534,7 +2534,6 @@ def main_menu_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
             [
                 [KeyboardButton("🟢 SHOP 🟢\n(Click here to buy)", web_app=WebAppInfo(url=shop_url))],
-                [MY_SUBS_LABEL],
                 [_badge(ANNOUNCEMENTS_LABEL, ann_count), JOIN_CHANNEL_LABEL],
                 [GET_FREE_LABEL, MY_CREDITS_LABEL],
                 [BOOK_REQUEST_LABEL, TICKET_LABEL],
@@ -2547,7 +2546,6 @@ def main_menu_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
             [
                 [BUY_LABEL],
-                [MY_SUBS_LABEL],
                 [BASKET_LABEL],
                 [_badge(ANNOUNCEMENTS_LABEL, ann_count), JOIN_CHANNEL_LABEL],
                 [GET_FREE_LABEL, MY_CREDITS_LABEL],
@@ -9094,6 +9092,18 @@ async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT
 
     is_renew = context.user_data.get("registration_is_renew", False)
     value = update.message.text.strip()
+
+    # New-account username only (never renewal's prev_username, which is
+    # an existing account lookup, not something being created) — iMD
+    # usernames can't contain spaces, so reject here before it's ever
+    # stored, whether this is the normal first pass or a post-rejection
+    # retry (both paths funnel through here).
+    if field == "username" and not is_renew and re.search(r"\s", value):
+        await update.message.reply_text(
+            "⚠️ Username can't contain spaces — it must be one word. Please resend it:"
+        )
+        return
+
     data = context.user_data.setdefault("registration_data", {})
     data[field] = value
 
