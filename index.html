@@ -378,6 +378,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   </div>
 </div>
 
+<!-- iMD catalog search sheet -->
+<div class="overlay" id="imdSearchOverlay" onclick="if(event.target===this)closeImdSearch()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">🔬 What does iMD include?</div>
+    <div style="padding:11px 15px 0">
+      <div class="search-wrap" style="margin-top:0">
+        <span class="search-ico">🔍</span>
+        <input id="imdSearchInput" type="text" placeholder="Search iMD's catalog..." oninput="imdCatalogInput(this.value)">
+        <button class="search-clear" id="imdSearchClearBtn" onclick="imdCatalogClear()">✕</button>
+      </div>
+    </div>
+    <div id="imdSearchResults" style="padding:11px 15px 0"></div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -1140,12 +1156,79 @@ function setErr(inp,msg){inp.classList.add('err');const el=document.getElementBy
 function goGetFreeAccounts(){
   tg.sendData(JSON.stringify({action:'goto_getfree'}));
 }
-// iMD's resource catalog runs into the thousands of entries — rather than
-// duplicate that search inside the Mini App, hand off to the bot's
-// existing live-search feature (same data, same search, no new data to
-// embed/maintain here).
+// iMD's resource catalog runs into the thousands of entries — too many to
+// embed client-side, so this searches live against the bot's own HTTP API
+// (see BOT_API_URL / start_api_server in bot.py). Falls back to handing
+// off to the bot's chat-based search if the API isn't reachable yet (e.g.
+// the admin hasn't enabled Railway Public Networking for the bot service).
 function imdWhatsIncluded(){
-  tg.sendData(JSON.stringify({action:'imd_catalog_search'}));
+  if(SUBS_DATA && SUBS_DATA.api){
+    openImdSearch();
+  } else {
+    tg.sendData(JSON.stringify({action:'imd_catalog_search'}));
+  }
+}
+function openImdSearch(){
+  document.getElementById('imdSearchOverlay').classList.add('on');
+  const input=document.getElementById('imdSearchInput');
+  input.value='';
+  document.getElementById('imdSearchClearBtn').style.display='none';
+  document.getElementById('imdSearchResults').innerHTML='<div class="search-empty">Type at least 2 characters to search.</div>';
+  setTimeout(()=>input.focus(),200);
+}
+function closeImdSearch(){
+  document.getElementById('imdSearchOverlay').classList.remove('on');
+}
+let imdSearchDebounce=null, imdSearchQuery='';
+function imdCatalogInput(v){
+  document.getElementById('imdSearchClearBtn').style.display=v?'flex':'none';
+  clearTimeout(imdSearchDebounce);
+  imdSearchDebounce=setTimeout(()=>imdCatalogSearch(v.trim(),0),300);
+}
+function imdCatalogClear(){
+  const input=document.getElementById('imdSearchInput');
+  input.value=''; input.focus();
+  document.getElementById('imdSearchClearBtn').style.display='none';
+  document.getElementById('imdSearchResults').innerHTML='<div class="search-empty">Type at least 2 characters to search.</div>';
+}
+async function imdCatalogSearch(q,offset){
+  const resEl=document.getElementById('imdSearchResults');
+  if(q.length<2){
+    resEl.innerHTML='<div class="search-empty">Type at least 2 characters to search.</div>';
+    return;
+  }
+  imdSearchQuery=q;
+  resEl.innerHTML='<div class="search-empty">Searching…</div>';
+  try{
+    const apiBase=(SUBS_DATA&&SUBS_DATA.api)||'';
+    const url=apiBase+'/api/imd_search?q='+encodeURIComponent(q)+'&offset='+offset;
+    const resp=await fetch(url);
+    const data=await resp.json();
+    if(!resp.ok){
+      resEl.innerHTML='<div class="search-empty">'+escHtml(data.error||'Search failed.')+'</div>';
+      return;
+    }
+    renderImdResults(data);
+  }catch(e){
+    resEl.innerHTML='<div class="search-empty">Search failed — check your connection and try again.</div>';
+  }
+}
+function renderImdResults(data){
+  const resEl=document.getElementById('imdSearchResults');
+  if(!data.results.length){
+    resEl.innerHTML=`<div class="search-empty">No results for "${escHtml(data.query)}".</div>`;
+    return;
+  }
+  const start=data.offset+1, end=data.offset+data.results.length;
+  let html=`<div style="font-size:12px;color:var(--hint);margin-bottom:8px">${data.total.toLocaleString()} result${data.total!==1?'s':''} found — showing ${start}-${end}</div>`;
+  html+='<div class="card">'+data.results.map(r=>
+    `<div class="row" style="cursor:default"><div class="ri"><div class="rn">📖 ${escHtml(r.name)}</div>${r.category?`<div class="rs">${escHtml(r.category)}</div>`:''}</div></div>`
+  ).join('')+'</div>';
+  const nav=[];
+  if(data.offset>0) nav.push(`<button class="btn sec" style="width:auto;padding:8px 14px;font-size:12px;margin:0" onclick="imdCatalogSearch(imdSearchQuery,${Math.max(0,data.offset-data.limit)})">◀️ Prev</button>`);
+  if(end<data.total) nav.push(`<button class="btn sec" style="width:auto;padding:8px 14px;font-size:12px;margin:0" onclick="imdCatalogSearch(imdSearchQuery,${data.offset+data.limit})">Next ▶️</button>`);
+  if(nav.length) html+=`<div style="display:flex;gap:8px;justify-content:center;margin-top:10px">${nav.join('')}</div>`;
+  resEl.innerHTML=html;
 }
 function applyDiscountCode(){
   const raw=(document.getElementById('discountInput').value||'').trim().toUpperCase();

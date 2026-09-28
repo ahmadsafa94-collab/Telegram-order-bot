@@ -86,8 +86,15 @@ PAYMENTS_CHANNEL_ID = int(PAYMENTS_CHANNEL_ID_RAW) if PAYMENTS_CHANNEL_ID_RAW.st
 MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 
 # HTTP API server for the Mini App to call.
-# Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed.
+# Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
+# beyond enabling "Public Networking" on the bot's Railway service.
 # If running locally or on another host, set BOT_API_URL manually.
+BOT_API_URL = os.environ.get("BOT_API_URL") or (
+    f"https://{os.environ['RAILWAY_PUBLIC_DOMAIN']}" if os.environ.get("RAILWAY_PUBLIC_DOMAIN") else ""
+)
+# Port the API server listens on — Railway injects PORT automatically once
+# Public Networking is turned on; 8080 is just a sane local-dev fallback.
+BOT_API_PORT = int(os.environ.get("PORT", "8080"))
 
 # Private "Subscriptions" channel — every subscription actually delivered
 # to a customer is posted here (product, login, date, customer).
@@ -2510,6 +2517,7 @@ def _shop_url(user_id: int = 0) -> str:
             "oos": oos_ids,
             "cr": credits_balance,
             "dc": active_codes,
+            "api": BOT_API_URL,
         }
         return f"{MINI_APP_URL}?subs={_encode(data)}"
     except Exception:
@@ -7223,6 +7231,93 @@ def render_imd_search_page(query: str, offset: int):
     return text, keyboard
 
 
+# ------------------------------------------------------------------
+# MINI APP HTTP API  (aiohttp, runs alongside the bot in the same loop)
+# ------------------------------------------------------------------
+# The Mini App is a static page (GitHub Pages) with no backend of its own,
+# and the iMD catalog runs into the thousands of rows — too large to embed
+# client-side. This tiny read-only API lets the Mini App search it live
+# instead. Started from post_init (see main()) so it shares the bot's
+# asyncio event loop rather than needing a second process.
+
+def _imd_search_cors_headers() -> dict:
+    # Read-only, no auth, no per-user data — open CORS is fine here and
+    # avoids needing to know/maintain the Mini App's exact origin.
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    }
+
+
+async def http_imd_search(request):
+    from aiohttp import web
+    query = (request.query.get("q") or "").strip()
+    try:
+        offset = max(0, int(request.query.get("offset", "0")))
+    except ValueError:
+        offset = 0
+
+    if len(query) < 2:
+        return web.json_response(
+            {"error": "Query must be at least 2 characters."},
+            status=400, headers=_imd_search_cors_headers(),
+        )
+
+    rows, total = db_imd_search(query, limit=IMD_SEARCH_PAGE_SIZE, offset=offset)
+    return web.json_response(
+        {
+            "query": query,
+            "offset": offset,
+            "limit": IMD_SEARCH_PAGE_SIZE,
+            "total": total,
+            "results": [{"name": name, "category": category} for name, category in rows],
+        },
+        headers=_imd_search_cors_headers(),
+    )
+
+
+async def http_imd_search_options(request):
+    from aiohttp import web
+    return web.Response(headers=_imd_search_cors_headers())
+
+
+async def http_health(request):
+    from aiohttp import web
+    return web.json_response({"ok": True})
+
+
+async def start_api_server(application):
+    """Starts the aiohttp API server in the background. Called from
+    post_init so it runs in the same event loop as the bot's polling —
+    no separate process or thread needed. Silently skipped (with a log
+    line) if the port is already taken, so a bad redeploy overlap can't
+    crash the whole bot."""
+    from aiohttp import web
+
+    api_app = web.Application()
+    api_app.router.add_get("/api/imd_search", http_imd_search)
+    api_app.router.add_options("/api/imd_search", http_imd_search_options)
+    api_app.router.add_get("/health", http_health)
+
+    runner = web.AppRunner(api_app)
+    await runner.setup()
+    try:
+        site = web.TCPSite(runner, "0.0.0.0", BOT_API_PORT)
+        await site.start()
+        application.bot_data["api_runner"] = runner
+        logger.info("Mini App API server listening on 0.0.0.0:%s", BOT_API_PORT)
+    except OSError:
+        logger.exception("Could not bind Mini App API server to port %s — skipping", BOT_API_PORT)
+        await runner.cleanup()
+
+
+async def stop_api_server(application):
+    runner = application.bot_data.pop("api_runner", None)
+    if runner:
+        await runner.cleanup()
+
+
 async def imd_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     count = db_imd_catalog_count()
     if count == 0:
@@ -10816,6 +10911,11 @@ def main():
         except Exception:
             logger.exception("Failed to reset menu button")
 
+        await start_api_server(application)
+
+    async def post_shutdown(application):
+        await stop_api_server(application)
+
     async def global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
         """Without this, any unhandled exception in a handler is only
         logged to stderr and otherwise disappears — a button click (or any
@@ -10866,7 +10966,14 @@ def main():
         store_data=PersistenceInput(bot_data=True, chat_data=True, user_data=True, callback_data=False),
     )
 
-    app = Application.builder().token(BOT_TOKEN).persistence(persistence).post_init(post_init).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .persistence(persistence)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
     # Nightly automatic backup at 00:00 local time (per REPORT_UTC_OFFSET —
     # the same "local day" convention already used for sales reports).
