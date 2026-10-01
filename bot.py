@@ -5274,13 +5274,22 @@ async def finalize_order_confirmation(context: ContextTypes.DEFAULT_TYPE, order_
     if discount_code:
         db_consume_discount_code(discount_code)
 
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=(
-            f"✅ Payment confirmed for order #{order_id}! We're preparing it now.\n"
-            f"Your Telegram ID: {user_id} (keep this for any support requests)."
-        ),
-    )
+    # Isolated like every other step below — a transient network blip
+    # sending this confirmation must never stop fulfilment from starting.
+    # Without this, that exact failure would abort the function right
+    # here and leave a paid order with no delivery and no notification
+    # at all.
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=(
+                f"✅ Payment confirmed for order #{order_id}! We're preparing it now.\n"
+                f"Your Telegram ID: {user_id} (keep this for any support requests)."
+            ),
+        )
+    except Exception:
+        logger.exception("Failed to send payment-confirmed message for order #%s", order_id)
+
     items = json.loads(items_json)
     await start_order_fulfilment(context, order_id, user_id, items)
     await award_referral_credit(context, user_id)
