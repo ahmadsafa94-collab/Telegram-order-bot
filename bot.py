@@ -2415,7 +2415,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_credentials_fulfilment",
     "awaiting_admin_message_for_order",
     "awaiting_new_sub_field", "new_sub_data",
-    "awaiting_book_price_for",
+    "awaiting_book_price_for", "awaiting_book_message_for",
     "awaiting_stock_edit_field", "stock_edit_item_id", "stock_edit_name", "stock_edit_duration",
     "awaiting_imd_catalog_username", "awaiting_imd_catalog_password",
     "awaiting_imd_session_token", "imd_extract_username",
@@ -2996,10 +2996,105 @@ async def book_link_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
             text=f"📚 New book request #{request_id} — {who}\n\n{link}",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("💰 Set Price", callback_data=f"bookprice:{request_id}")]]
-            ),
+            reply_markup=book_request_admin_buttons(request_id),
         )
+
+
+def book_request_admin_buttons(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💰 Set Price", callback_data=f"bookprice:{request_id}")],
+        [InlineKeyboardButton("💬 Reply to Request", callback_data=f"bookmsg:{request_id}")],
+    ])
+
+
+async def book_msg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '💬 Reply to Request' — wait for their next text and
+    send it to the customer who made the book request."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    request_id = int(query.data.split(":", 1)[1])
+    clear_admin_flow_state(context.user_data)
+    context.user_data["awaiting_book_message_for"] = request_id
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=f"Type the message to send the customer about book request #{request_id}:",
+    )
+
+
+async def book_msg_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends the admin's typed message to the customer, with a Reply button
+    so they can answer from within the message."""
+    request_id = context.user_data.pop("awaiting_book_message_for", None)
+    if not request_id:
+        return
+
+    request = db_get_book_request(request_id)
+    if not request:
+        await update.message.reply_text("That book request no longer exists.")
+        return
+
+    user_id = request[1]
+    link = request[3]
+    body = update.message.text
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"📚 Message about your book request:\n{link}\n\n{body}",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ Reply", callback_data=f"bookreply:{request_id}")]]
+            ),
+            disable_web_page_preview=True,
+        )
+        await update.message.reply_text(f"✅ Message sent to the customer for book request #{request_id}.")
+    except Exception:
+        logger.exception("Failed to deliver admin message for book request #%s", request_id)
+        await update.message.reply_text(
+            f"⚠️ Could not deliver this to the customer for book request #{request_id}. "
+            "They may have blocked the bot."
+        )
+
+
+async def book_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer tapped '↩️ Reply' on a book request message."""
+    query = update.callback_query
+    await query.answer()
+    request_id = int(query.data.split(":", 1)[1])
+    request = db_get_book_request(request_id)
+    if not request or request[1] != query.from_user.id:
+        await context.bot.send_message(chat_id=query.from_user.id, text="This request is no longer available.")
+        return
+    context.user_data["awaiting_book_reply_for"] = request_id
+    await context.bot.send_message(chat_id=query.from_user.id, text="Type your reply:")
+
+
+async def book_reply_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Forwards the customer's reply to the admin, with buttons to answer
+    again or set the price."""
+    request_id = context.user_data.pop("awaiting_book_reply_for", None)
+    if not request_id:
+        return
+
+    await update.message.reply_text("✅ Sent! We'll get back to you here.")
+    if not ADMIN_CHAT_ID:
+        return
+
+    request = db_get_book_request(request_id)
+    username = update.effective_user.username
+    who = f"@{username}" if username else str(update.effective_user.id)
+    link = request[3] if request else ""
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"📚 Reply from {who} — Book request #{request_id}\n{link}\n\n{update.message.text}",
+            reply_markup=book_request_admin_buttons(request_id),
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        logger.exception("Failed to deliver customer reply for book request #%s to admin", request_id)
 
 
 async def book_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6080,6 +6175,7 @@ async def book_request_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     if status == "pending":
         buttons.append([InlineKeyboardButton("💰 Set Price", callback_data=f"bookprice:{request_id}")])
+    buttons.append([InlineKeyboardButton("💬 Reply to Request", callback_data=f"bookmsg:{request_id}")])
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"bookreqs:{status}")])
 
     await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -8854,6 +8950,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("awaiting_customer_reply_for_order"):
         await customer_reply_text(update, context)
         return
+    if context.user_data.get("awaiting_book_reply_for"):
+        await book_reply_text(update, context)
+        return
 
     # ── 2. Admin interactive states (all here, in a single block) ────
     if update.effective_user.id == ADMIN_CHAT_ID:
@@ -8865,6 +8964,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if context.user_data.get("awaiting_comment_for_order"):
             await admin_comment_reply(update, context)
+            return
+        if context.user_data.get("awaiting_book_message_for"):
+            await book_msg_reply(update, context)
             return
         if context.user_data.get("awaiting_book_price_for"):
             await book_price_reply(update, context)
@@ -11335,6 +11437,8 @@ def main():
     app.add_handler(CallbackQueryHandler(pay_credits_start, pattern=r"^pay_credits:"))
     app.add_handler(CallbackQueryHandler(generic_type_selected, pattern=r"^gentype:"))
     app.add_handler(CallbackQueryHandler(book_price_start, pattern=r"^bookprice:"))
+    app.add_handler(CallbackQueryHandler(book_msg_start, pattern=r"^bookmsg:"))
+    app.add_handler(CallbackQueryHandler(book_reply_start, pattern=r"^bookreply:"))
     app.add_handler(CallbackQueryHandler(book_proceed, pattern=r"^bookproceed:"))
     app.add_handler(CallbackQueryHandler(book_cancel, pattern=r"^bookcancel:"))
     app.add_handler(CallbackQueryHandler(book_requests_list, pattern=r"^bookreqs:"))
