@@ -1031,8 +1031,19 @@ def db_init():
         conn.execute("DROP TABLE fulfilment_old")
         logger.info("Migrated fulfilment table to per-unit schema")
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
+
+    load_bundled_imd_catalog()
 
 
 def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, message_id: int = None) -> int:
@@ -6140,6 +6151,149 @@ def db_imd_save_catalog(names: list):
     conn.close()
 
 
+# iMD publishes its full resource list as a SQLite file (an FTS4 table
+# "DBs" with one row per downloadable database/book). The bot ships a
+# compact snapshot of it (title + publisher only) and loads that on
+# startup; the admin can refresh it from the live file at any time.
+IMD_DBS_URL = "https://imedicaldoctor.net/dbs.db"
+IMD_CATALOG_SNAPSHOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "imd_catalog.json.gz")
+
+# dbs.db "type" column -> label shown to customers next to each title.
+IMD_TYPE_LABELS = {
+    "epub": "eBook",
+    "ovid": "Ovid",
+    "elseviernew": "Elsevier",
+    "cme": "CME Video",
+    "uworld": "UWorld",
+    "medhand": "MedHand",
+    "accessmedicine": "AccessMedicine",
+    "lww": "LWW",
+    "lexi": "Lexicomp",
+    "skyscape": "Skyscape",
+    "uptodate": "UpToDate",
+    "uptodateddx": "UpToDate",
+    "sanford": "Sanford Guide",
+    "kaptest": "Kaplan",
+    "micromedex-neofax": "Micromedex",
+    "micromedex-iv": "Micromedex",
+    "micromedex-interact": "Micromedex",
+    "micromedex-drug": "Micromedex",
+    "statdx": "STATdx",
+    "amirsys": "Amirsys",
+    "statworkup": "Amirsys",
+    "mksap": "MKSAP",
+    "facts": "Facts & Comparisons",
+    "epocrate": "Epocrates",
+    "visualdx": "VisualDx",
+    "stockley": "Stockley's",
+    "nejm": "NEJM",
+    "Dictionary": "Dictionary",
+    "labvalues": "Lab Values",
+    "infopoems": "InfoPOEMs",
+    "rxvigilance": "RxVigilance",
+    "irandarou": "Iran Darou",
+    "irandrugs": "Iran Drugs",
+    "tol": "Tools",
+}
+
+
+def build_imd_catalog_from_dbs(path: str) -> list:
+    """Reads iMD's dbs.db and returns [(title, label), ...], one entry per
+    distinct title+publisher (the file lists every version of a resource
+    separately, e.g. 21 rows for 'Uptodate')."""
+    conn = sqlite3.connect(path)
+    try:
+        rows = conn.execute("SELECT Title, type FROM DBs").fetchall()
+    finally:
+        conn.close()
+
+    seen = set()
+    catalog = []
+    for title, rtype in rows:
+        title = " ".join((title or "").split())
+        if not title:
+            continue
+        rtype = (rtype or "").strip()
+        label = IMD_TYPE_LABELS.get(rtype, rtype.title() if rtype else None)
+        key = (title.lower(), label)
+        if key in seen:
+            continue
+        seen.add(key)
+        catalog.append((title, label))
+    if not catalog:
+        raise ValueError("dbs.db contained no resources.")
+    return catalog
+
+
+def db_get_meta(key: str):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT value FROM app_meta WHERE key = ?", (key,)).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def db_set_meta(key: str, value: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO app_meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_bundled_imd_catalog():
+    """Loads assets/imd_catalog.json.gz into imd_catalog whenever the
+    bundled snapshot changes (i.e. once per deploy that ships a new one).
+    A restart with the same snapshot leaves the table alone, so a newer
+    catalog synced live by the admin isn't overwritten by an older file."""
+    import gzip
+    import hashlib
+
+    if not os.path.exists(IMD_CATALOG_SNAPSHOT):
+        return
+    try:
+        with open(IMD_CATALOG_SNAPSHOT, "rb") as f:
+            raw = f.read()
+        digest = hashlib.sha256(raw).hexdigest()
+        if db_get_meta("imd_catalog_snapshot") == digest and db_imd_catalog_count() > 0:
+            return
+        catalog = [tuple(entry) for entry in json.loads(gzip.decompress(raw))]
+        db_imd_save_catalog(catalog)
+        db_set_meta("imd_catalog_snapshot", digest)
+        logger.info("Loaded %d iMD resources from bundled catalog snapshot", len(catalog))
+    except Exception:
+        logger.exception("Failed to load bundled iMD catalog snapshot")
+
+
+async def sync_imd_catalog_from_url(url: str = IMD_DBS_URL) -> int:
+    """Downloads the live dbs.db, rebuilds imd_catalog from it and returns
+    the number of resources saved."""
+    import tempfile
+    import aiohttp
+
+    timeout = aiohttp.ClientTimeout(total=300)
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    raise ValueError(f"Download failed: HTTP {resp.status}")
+                with open(tmp_path, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(1 << 16):
+                        f.write(chunk)
+        catalog = await asyncio.to_thread(build_imd_catalog_from_dbs, tmp_path)
+        await asyncio.to_thread(db_imd_save_catalog, catalog)
+        return len(catalog)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
 async def _imd_login(page, username: str, password: str, status_cb, bot=None, admin_id=None):
     """Shared login flow: logs into imdweb.org, dismisses the User
     Agreement, and lands on the downloads page. Raises ValueError on
@@ -6618,12 +6772,47 @@ async def imd_catalog_extract_start(update: Update, context: ContextTypes.DEFAUL
     msg = ""
     if count:
         msg = f"Current catalog has {count:,} databases.\n\n"
-    context.user_data["awaiting_imd_catalog_username"] = True
     await update.message.reply_text(
-        f"{msg}🔬 Extract iMD Catalog\n\n"
-        "This will log into imdweb.org, extract all database names, and save them "
-        "so customers can search before having credentials.\n\n"
-        "Send your iMD username:"
+        f"{msg}🔬 Update iMD Catalog\n\n"
+        "🌐 Sync pulls iMD's official resource list straight from "
+        "imedicaldoctor.net/dbs.db — no login needed.\n"
+        "🔑 Extract logs into imdweb.org and reads the list from there instead.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌐 Sync from imedicaldoctor.net", callback_data="imdcat:sync")],
+            [InlineKeyboardButton("🔑 Extract via imdweb.org login", callback_data="imdcat:login")],
+        ]),
+    )
+
+
+async def imd_catalog_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin picked how to update the iMD catalog."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    if query.data == "imdcat:login":
+        context.user_data["awaiting_imd_catalog_username"] = True
+        await query.edit_message_text(
+            "🔑 Extract iMD Catalog\n\n"
+            "This will log into imdweb.org, extract all database names, and save them "
+            "so customers can search before having credentials.\n\n"
+            "Send your iMD username:"
+        )
+        return
+
+    await query.edit_message_text("🔄 Downloading iMD's resource list (dbs.db)...")
+    try:
+        saved = await sync_imd_catalog_from_url()
+    except Exception as e:
+        logger.exception("iMD catalog sync from dbs.db failed")
+        await query.edit_message_text(f"❌ Sync failed: {e}")
+        return
+    await query.edit_message_text(
+        f"✅ iMD Catalog updated!\n\n"
+        f"📚 {saved:,} resources saved.\n\n"
+        "Customers can now use 🔬 What does iMD include?"
     )
 
 
@@ -11045,6 +11234,7 @@ def main():
     app.add_handler(CallbackQueryHandler(orders_menu_route, pattern=r"^orders_(recent|pending|find|delivered)$"))
     app.add_handler(CallbackQueryHandler(imd_menu_start, pattern=r"^imd_menu$"))
     app.add_handler(CallbackQueryHandler(imd_search_page_nav, pattern=r"^imdpage:"))
+    app.add_handler(CallbackQueryHandler(imd_catalog_choice, pattern=r"^imdcat:"))
     app.add_handler(InlineQueryHandler(imd_inline_query))
     app.add_handler(CallbackQueryHandler(catalog_navigate, pattern=r"^cat:"))
     app.add_handler(CallbackQueryHandler(stock_toggle, pattern=r"^stocktoggle:"))
