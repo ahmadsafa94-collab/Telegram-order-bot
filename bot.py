@@ -8836,6 +8836,14 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
             # Run automation in background so it doesn't block the queue loop
             context.application.create_task(run_imd_registration(context, order_id))
 
+            # Do NOT advance the queue here. pending_registrations is keyed
+            # by order_id, so starting a second iMD item from the same order
+            # now would overwrite this item's data before its run reads it
+            # (a renewal + new account in one cart both ran as the new
+            # account). run_imd_registration advances the queue itself once
+            # this item succeeds, so iMD items are processed one at a time.
+            return
+
         elif item_id in UPTODATE_AI_TRIGGER_ITEMS:
             # Nothing was actually collected for this one (empty info_json
             # besides account_type — it needs no credentials at all), so
@@ -9332,6 +9340,7 @@ def db_recover_imd_registration_data(order_id: int):
     row = conn.execute(
         f"SELECT id, item_id, info_json FROM fulfilment "
         f"WHERE order_id = ? AND item_id IN ({placeholders}) AND info_json IS NOT NULL "
+        f"AND state = 'awaiting_delivery' "
         f"ORDER BY id LIMIT 1",
         (order_id, *IMD_TRIGGER_ITEMS),
     ).fetchone()
