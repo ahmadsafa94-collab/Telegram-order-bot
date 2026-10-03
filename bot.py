@@ -6267,23 +6267,120 @@ def load_bundled_imd_catalog():
         logger.exception("Failed to load bundled iMD catalog snapshot")
 
 
+IMD_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+)
+
+
+def _is_sqlite_file(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(16) == b"SQLite format 3\x00"
+    except OSError:
+        return False
+
+
+async def _download_via_browser(url: str, dest_path: str):
+    """Fetches url with headless Chromium so Cloudflare's challenge can run.
+    Clears the challenge on the site first, then downloads with the same
+    browser session (falling back to a browser-initiated download if the
+    session request is still refused)."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+        )
+        try:
+            context = await browser.new_context(
+                user_agent=IMD_BROWSER_USER_AGENT,
+                viewport={"width": 1280, "height": 800},
+                accept_downloads=True,
+            )
+            page = await context.new_page()
+            try:
+                await page.goto(IMD_REGISTER_URL, wait_until="networkidle", timeout=30000)
+                await wait_for_challenge(page, attempts=15)
+            except Exception:
+                pass  # warm-up is best effort
+
+            resp = await context.request.get(url, timeout=180000)
+            if resp.ok:
+                body = await resp.body()
+                if body[:16] == b"SQLite format 3\x00":
+                    with open(dest_path, "wb") as f:
+                        f.write(body)
+                    return
+
+            # Session request refused — navigate to the file instead, so the
+            # browser itself solves any challenge on that URL and then
+            # downloads it.
+            downloads = []
+            page.on("download", lambda d: downloads.append(d))
+            try:
+                await page.goto(url, timeout=60000)
+            except Exception:
+                pass  # navigating to a file raises "Download is starting"
+            for _ in range(20):
+                if downloads:
+                    break
+                title = await page.title()
+                if "Just a moment" not in title and _ >= 2:
+                    break  # a normal page loaded — no download is coming
+                await page.wait_for_timeout(3000)
+            if not downloads:
+                raise ValueError(
+                    f"Download failed: imedicaldoctor.net refused the file even in a browser "
+                    f"(HTTP {resp.status}, page title: {await page.title()!r})."
+                )
+            await downloads[0].save_as(dest_path)
+        finally:
+            await browser.close()
+
+
 async def sync_imd_catalog_from_url(url: str = IMD_DBS_URL) -> int:
     """Downloads the live dbs.db, rebuilds imd_catalog from it and returns
     the number of resources saved."""
     import tempfile
     import aiohttp
 
-    timeout = aiohttp.ClientTimeout(total=300)
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
         tmp_path = tmp.name
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    raise ValueError(f"Download failed: HTTP {resp.status}")
-                with open(tmp_path, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(1 << 16):
-                        f.write(chunk)
+        # Plain download first (fast). imedicaldoctor.net sits behind
+        # Cloudflare, which can refuse non-browser clients with a 403 or
+        # hand back a challenge page instead of the file — in that case
+        # fetch it through a real browser, like the iMD form automation.
+        direct_error = None
+        try:
+            headers = {
+                "User-Agent": IMD_BROWSER_USER_AGENT,
+                "Accept": "*/*",
+                "Referer": "https://imedicaldoctor.net/",
+            }
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status != 200:
+                        raise ValueError(f"HTTP {resp.status}")
+                    with open(tmp_path, "wb") as f:
+                        async for chunk in resp.content.iter_chunked(1 << 16):
+                            f.write(chunk)
+            if not _is_sqlite_file(tmp_path):
+                raise ValueError("got a web page instead of the database file")
+        except Exception as e:
+            direct_error = e
+
+        if direct_error is not None:
+            logger.info("Direct dbs.db download failed (%s) — retrying through a browser", direct_error)
+            await _download_via_browser(url, tmp_path)
+            if not _is_sqlite_file(tmp_path):
+                raise ValueError(
+                    "Download failed: imedicaldoctor.net returned a web page instead of the "
+                    "database file (still blocked by Cloudflare)."
+                )
+
         catalog = await asyncio.to_thread(build_imd_catalog_from_dbs, tmp_path)
         await asyncio.to_thread(db_imd_save_catalog, catalog)
         return len(catalog)
