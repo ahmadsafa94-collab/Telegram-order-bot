@@ -3004,7 +3004,90 @@ def book_request_admin_buttons(request_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💰 Set Price", callback_data=f"bookprice:{request_id}")],
         [InlineKeyboardButton("💬 Reply to Request", callback_data=f"bookmsg:{request_id}")],
+        [InlineKeyboardButton("❌ Cancel Request", callback_data=f"bookadmcancel:{request_id}")],
     ])
+
+
+# Inline button shown under every "type your message/price" prompt for a
+# book request, so the admin can back out without sending anything.
+BOOK_PROMPT_CANCEL = InlineKeyboardMarkup(
+    [[InlineKeyboardButton("✖️ Cancel", callback_data="bookpromptcancel")]]
+)
+
+
+async def book_prompt_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped ✖️ Cancel under a Reply / Set Price prompt."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    was_waiting = (
+        context.user_data.pop("awaiting_book_message_for", None)
+        or context.user_data.pop("awaiting_book_price_for", None)
+    )
+    await query.edit_message_text(
+        "✖️ Cancelled — nothing was sent." if was_waiting else "Nothing to cancel."
+    )
+
+
+async def book_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped ❌ Cancel Request — ask to confirm first, then mark the
+    request cancelled and let the customer know."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    action, _, rest = query.data.partition(":")
+    request_id = int(rest)
+    request = db_get_book_request(request_id)
+    if not request:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That book request no longer exists.")
+        return
+    user_id, link, status = request[1], request[3], request[5]
+
+    if status in ("ordered", "cancelled"):
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"Book request #{request_id} is already {status} — nothing to cancel.",
+        )
+        return
+
+    if action == "bookadmcancel":
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"Cancel book request #{request_id}?\n{link}\n\nThe customer will be told it was cancelled.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Yes, cancel it", callback_data=f"bookadmcancelok:{request_id}")],
+                [InlineKeyboardButton("↩️ No, keep it", callback_data="bookadmcancelno")],
+            ]),
+            disable_web_page_preview=True,
+        )
+        return
+
+    # Confirmed.
+    db_set_book_status(request_id, "cancelled")
+    context.user_data.pop("awaiting_book_message_for", None)
+    context.user_data.pop("awaiting_book_price_for", None)
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"📚 Your book request has been cancelled:\n{link}",
+            disable_web_page_preview=True,
+        )
+        note = "The customer has been notified."
+    except Exception:
+        logger.exception("Failed to notify customer of cancelled book request #%s", request_id)
+        note = "⚠️ Couldn't notify the customer (they may have blocked the bot)."
+    await query.edit_message_text(f"❌ Book request #{request_id} cancelled. {note}")
+
+
+async def book_admin_cancel_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Kept — the request was not cancelled.")
 
 
 async def book_msg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3022,6 +3105,7 @@ async def book_msg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
         text=f"Type the message to send the customer about book request #{request_id}:",
+        reply_markup=BOOK_PROMPT_CANCEL,
     )
 
 
@@ -3109,7 +3193,8 @@ async def book_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_book_price_for"] = request_id
     await context.bot.send_message(
-        chat_id=ADMIN_CHAT_ID, text=f"Enter the price in USD for book request #{request_id}:"
+        chat_id=ADMIN_CHAT_ID, text=f"Enter the price in USD for book request #{request_id}:",
+        reply_markup=BOOK_PROMPT_CANCEL,
     )
 
 
@@ -3124,7 +3209,7 @@ async def book_price_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if price <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("Please send a valid positive number for the price:")
+        await update.message.reply_text("Please send a valid positive number for the price:", reply_markup=BOOK_PROMPT_CANCEL)
         context.user_data["awaiting_book_price_for"] = request_id
         return
 
@@ -6176,6 +6261,8 @@ async def book_request_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if status == "pending":
         buttons.append([InlineKeyboardButton("💰 Set Price", callback_data=f"bookprice:{request_id}")])
     buttons.append([InlineKeyboardButton("💬 Reply to Request", callback_data=f"bookmsg:{request_id}")])
+    if status in ("pending", "priced"):
+        buttons.append([InlineKeyboardButton("❌ Cancel Request", callback_data=f"bookadmcancel:{request_id}")])
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"bookreqs:{status}")])
 
     await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -11438,6 +11525,9 @@ def main():
     app.add_handler(CallbackQueryHandler(generic_type_selected, pattern=r"^gentype:"))
     app.add_handler(CallbackQueryHandler(book_price_start, pattern=r"^bookprice:"))
     app.add_handler(CallbackQueryHandler(book_msg_start, pattern=r"^bookmsg:"))
+    app.add_handler(CallbackQueryHandler(book_prompt_cancel, pattern=r"^bookpromptcancel$"))
+    app.add_handler(CallbackQueryHandler(book_admin_cancel, pattern=r"^bookadmcancel(ok)?:"))
+    app.add_handler(CallbackQueryHandler(book_admin_cancel_no, pattern=r"^bookadmcancelno$"))
     app.add_handler(CallbackQueryHandler(book_reply_start, pattern=r"^bookreply:"))
     app.add_handler(CallbackQueryHandler(book_proceed, pattern=r"^bookproceed:"))
     app.add_handler(CallbackQueryHandler(book_cancel, pattern=r"^bookcancel:"))
