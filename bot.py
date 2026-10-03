@@ -3058,7 +3058,7 @@ async def book_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "bookadmcancel":
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
-            text=f"Cancel book request #{request_id}?\n{link}\n\nThe customer will be told it was cancelled.",
+            text=f"Cancel book request #{request_id}?\n{link}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ Yes, cancel it", callback_data=f"bookadmcancelok:{request_id}")],
                 [InlineKeyboardButton("↩️ No, keep it", callback_data="bookadmcancelno")],
@@ -3067,10 +3067,41 @@ async def book_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Confirmed.
+    # Confirmed — cancel now, then ask whether to tell the customer.
     db_set_book_status(request_id, "cancelled")
     context.user_data.pop("awaiting_book_message_for", None)
     context.user_data.pop("awaiting_book_price_for", None)
+    await query.edit_message_text(
+        f"❌ Book request #{request_id} cancelled.\n\nNotify the customer?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔔 Yes, notify them", callback_data=f"bookcxnotify:{request_id}")],
+            [InlineKeyboardButton("🔕 No, don't notify", callback_data=f"bookcxsilent:{request_id}")],
+        ]),
+    )
+
+
+async def book_cancel_notify_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin chose whether to tell the customer their book request was
+    cancelled."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    action, _, rest = query.data.partition(":")
+    request_id = int(rest)
+    if action == "bookcxsilent":
+        await query.edit_message_text(
+            f"❌ Book request #{request_id} cancelled. The customer was not notified."
+        )
+        return
+
+    request = db_get_book_request(request_id)
+    if not request:
+        await query.edit_message_text("That book request no longer exists.")
+        return
+    user_id, link = request[1], request[3]
     try:
         await context.bot.send_message(
             chat_id=user_id,
@@ -11528,6 +11559,7 @@ def main():
     app.add_handler(CallbackQueryHandler(book_prompt_cancel, pattern=r"^bookpromptcancel$"))
     app.add_handler(CallbackQueryHandler(book_admin_cancel, pattern=r"^bookadmcancel(ok)?:"))
     app.add_handler(CallbackQueryHandler(book_admin_cancel_no, pattern=r"^bookadmcancelno$"))
+    app.add_handler(CallbackQueryHandler(book_cancel_notify_choice, pattern=r"^bookcx(notify|silent):"))
     app.add_handler(CallbackQueryHandler(book_reply_start, pattern=r"^bookreply:"))
     app.add_handler(CallbackQueryHandler(book_proceed, pattern=r"^bookproceed:"))
     app.add_handler(CallbackQueryHandler(book_cancel, pattern=r"^bookcancel:"))
