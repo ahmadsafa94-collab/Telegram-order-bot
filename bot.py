@@ -2417,7 +2417,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_new_sub_field", "new_sub_data",
     "awaiting_book_price_for",
     "awaiting_stock_edit_field", "stock_edit_item_id", "stock_edit_name", "stock_edit_duration",
-    "awaiting_imd_catalog_username", "awaiting_imd_catalog_password",
+    "awaiting_imd_catalog_username", "awaiting_imd_catalog_password", "awaiting_imd_dbs_upload",
     "awaiting_imd_session_token", "imd_extract_username",
     "awaiting_imd_api_url", "imd_saved_token",
     "awaiting_imd_diag_username", "awaiting_imd_diag_password", "imd_diag_username",
@@ -6873,11 +6873,95 @@ async def imd_catalog_extract_start(update: Update, context: ContextTypes.DEFAUL
         f"{msg}🔬 Update iMD Catalog\n\n"
         "🌐 Sync pulls iMD's official resource list straight from "
         "imedicaldoctor.net/dbs.db — no login needed.\n"
+        "📤 Upload lets you send the file yourself, if the sync is blocked.\n"
         "🔑 Extract logs into imdweb.org and reads the list from there instead.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🌐 Sync from imedicaldoctor.net", callback_data="imdcat:sync")],
+            [InlineKeyboardButton("📤 Upload dbs.db file", callback_data="imdcat:upload")],
             [InlineKeyboardButton("🔑 Extract via imdweb.org login", callback_data="imdcat:login")],
         ]),
+    )
+
+
+IMD_DBS_UPLOAD_INSTRUCTIONS = (
+    "📤 Upload iMD's resource list\n\n"
+    "1. Open https://imedicaldoctor.net/dbs.db in your browser — it downloads dbs.db.\n"
+    "2. Zip it (it's ~29 MB, and Telegram only lets bots receive files up to 20 MB; "
+    "zipped it's ~6 MB).\n"
+    "3. Send the .zip here as a file."
+)
+TELEGRAM_BOT_DOWNLOAD_LIMIT = 20 * 1024 * 1024
+
+
+async def imd_dbs_file_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin sent dbs.db (zipped, gzipped or raw) after tapping Upload —
+    rebuilds the iMD catalog from it."""
+    import gzip
+    import tempfile
+    import zipfile
+
+    doc = update.message.document
+    name = (doc.file_name or "").lower()
+    if not name.endswith((".zip", ".gz", ".db")):
+        await update.message.reply_text(
+            "That doesn't look like dbs.db — send the .zip containing it."
+        )
+        return
+    if doc.file_size and doc.file_size > TELEGRAM_BOT_DOWNLOAD_LIMIT:
+        await update.message.reply_text(
+            f"That file is {doc.file_size / 1024 / 1024:.0f} MB — Telegram only lets bots receive "
+            "files up to 20 MB. Zip dbs.db first (it shrinks to ~6 MB) and send the .zip."
+        )
+        return
+
+    context.user_data.pop("awaiting_imd_dbs_upload", None)
+    status_msg = await update.message.reply_text("🔄 Reading the file...")
+
+    workdir = tempfile.mkdtemp()
+    upload_path = os.path.join(workdir, "upload")
+    db_path = os.path.join(workdir, "dbs.db")
+    try:
+        tg_file = await context.bot.get_file(doc.file_id)
+        await tg_file.download_to_drive(upload_path)
+
+        def unpack():
+            if name.endswith(".zip"):
+                with zipfile.ZipFile(upload_path) as zf:
+                    members = [m for m in zf.namelist() if m.lower().endswith(".db")]
+                    if not members:
+                        raise ValueError("the .zip doesn't contain a .db file")
+                    with zf.open(members[0]) as src, open(db_path, "wb") as dst:
+                        while chunk := src.read(1 << 20):
+                            dst.write(chunk)
+            elif name.endswith(".gz"):
+                with gzip.open(upload_path) as src, open(db_path, "wb") as dst:
+                    while chunk := src.read(1 << 20):
+                        dst.write(chunk)
+            else:
+                os.replace(upload_path, db_path)
+            if not _is_sqlite_file(db_path):
+                raise ValueError("the file isn't a SQLite database")
+            try:
+                catalog = build_imd_catalog_from_dbs(db_path)
+            except sqlite3.Error:
+                raise ValueError("the database has no iMD resource list (no 'DBs' table)")
+            db_imd_save_catalog(catalog)
+            return len(catalog)
+
+        saved = await asyncio.to_thread(unpack)
+    except Exception as e:
+        logger.exception("iMD catalog upload failed")
+        context.user_data["awaiting_imd_dbs_upload"] = True
+        await status_msg.edit_text(f"❌ Couldn't use that file: {e}\n\nSend another one.")
+        return
+    finally:
+        import shutil
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    await status_msg.edit_text(
+        f"✅ iMD Catalog updated!\n\n"
+        f"📚 {saved:,} resources saved.\n\n"
+        "Customers can now use 🔬 What does iMD include?"
     )
 
 
@@ -6899,12 +6983,24 @@ async def imd_catalog_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
+    if query.data == "imdcat:upload":
+        clear_admin_flow_state(context.user_data)
+        context.user_data["awaiting_imd_dbs_upload"] = True
+        await query.edit_message_text(IMD_DBS_UPLOAD_INSTRUCTIONS)
+        return
+
     await query.edit_message_text("🔄 Downloading iMD's resource list (dbs.db)...")
     try:
         saved = await sync_imd_catalog_from_url()
     except Exception as e:
         logger.exception("iMD catalog sync from dbs.db failed")
-        await query.edit_message_text(f"❌ Sync failed: {e}")
+        await query.edit_message_text(
+            f"❌ Sync failed: {e}\n\n"
+            "You can still update the catalog by sending the file yourself:",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("📤 Upload dbs.db file", callback_data="imdcat:upload")]]
+            ),
+        )
         return
     await query.edit_message_text(
         f"✅ iMD Catalog updated!\n\n"
@@ -11032,6 +11128,9 @@ async def restore_file_received(update: Update, context: ContextTypes.DEFAULT_TY
     path and asks for explicit confirmation before touching the live
     database at all."""
     if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    if context.user_data.get("awaiting_imd_dbs_upload"):
+        await imd_dbs_file_received(update, context)
         return
     if not context.user_data.get("awaiting_restore_file"):
         return  # not expecting a .db upload right now — ignore
