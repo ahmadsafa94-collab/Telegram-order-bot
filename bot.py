@@ -6154,8 +6154,9 @@ def db_imd_save_catalog(names: list):
 # iMD publishes its full resource list as a SQLite file (an FTS4 table
 # "DBs" with one row per downloadable database/book). The bot ships a
 # compact snapshot of it (title + publisher only) and loads that on
-# startup; the admin can refresh it from the live file at any time.
-IMD_DBS_URL = "https://imedicaldoctor.net/dbs.db"
+# startup. To refresh it, the admin downloads imedicaldoctor.net/dbs.db
+# and sends it to the bot (it can't be fetched server-side — Cloudflare
+# challenges that URL harder than headless Chrome can pass).
 IMD_CATALOG_SNAPSHOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "imd_catalog.json.gz")
 
 # dbs.db "type" column -> label shown to customers next to each title.
@@ -6267,128 +6268,12 @@ def load_bundled_imd_catalog():
         logger.exception("Failed to load bundled iMD catalog snapshot")
 
 
-IMD_BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-)
-
-
 def _is_sqlite_file(path: str) -> bool:
     try:
         with open(path, "rb") as f:
             return f.read(16) == b"SQLite format 3\x00"
     except OSError:
         return False
-
-
-async def _download_via_browser(url: str, dest_path: str):
-    """Fetches url with headless Chromium so Cloudflare's challenge can run.
-    Clears the challenge on the site first, then downloads with the same
-    browser session (falling back to a browser-initiated download if the
-    session request is still refused)."""
-    from playwright.async_api import async_playwright
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-        )
-        try:
-            context = await browser.new_context(
-                user_agent=IMD_BROWSER_USER_AGENT,
-                viewport={"width": 1280, "height": 800},
-                accept_downloads=True,
-            )
-            page = await context.new_page()
-            try:
-                await page.goto(IMD_REGISTER_URL, wait_until="networkidle", timeout=30000)
-                await wait_for_challenge(page, attempts=15)
-            except Exception:
-                pass  # warm-up is best effort
-
-            resp = await context.request.get(url, timeout=180000)
-            if resp.ok:
-                body = await resp.body()
-                if body[:16] == b"SQLite format 3\x00":
-                    with open(dest_path, "wb") as f:
-                        f.write(body)
-                    return
-
-            # Session request refused — navigate to the file instead, so the
-            # browser itself solves any challenge on that URL and then
-            # downloads it.
-            downloads = []
-            page.on("download", lambda d: downloads.append(d))
-            try:
-                await page.goto(url, timeout=60000)
-            except Exception:
-                pass  # navigating to a file raises "Download is starting"
-            for _ in range(20):
-                if downloads:
-                    break
-                title = await page.title()
-                if "Just a moment" not in title and _ >= 2:
-                    break  # a normal page loaded — no download is coming
-                await page.wait_for_timeout(3000)
-            if not downloads:
-                raise ValueError(
-                    f"Download failed: imedicaldoctor.net refused the file even in a browser "
-                    f"(HTTP {resp.status}, page title: {await page.title()!r})."
-                )
-            await downloads[0].save_as(dest_path)
-        finally:
-            await browser.close()
-
-
-async def sync_imd_catalog_from_url(url: str = IMD_DBS_URL) -> int:
-    """Downloads the live dbs.db, rebuilds imd_catalog from it and returns
-    the number of resources saved."""
-    import tempfile
-    import aiohttp
-
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-        tmp_path = tmp.name
-    try:
-        # Plain download first (fast). imedicaldoctor.net sits behind
-        # Cloudflare, which can refuse non-browser clients with a 403 or
-        # hand back a challenge page instead of the file — in that case
-        # fetch it through a real browser, like the iMD form automation.
-        direct_error = None
-        try:
-            headers = {
-                "User-Agent": IMD_BROWSER_USER_AGENT,
-                "Accept": "*/*",
-                "Referer": "https://imedicaldoctor.net/",
-            }
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
-                async with session.get(url, headers=headers) as resp:
-                    if resp.status != 200:
-                        raise ValueError(f"HTTP {resp.status}")
-                    with open(tmp_path, "wb") as f:
-                        async for chunk in resp.content.iter_chunked(1 << 16):
-                            f.write(chunk)
-            if not _is_sqlite_file(tmp_path):
-                raise ValueError("got a web page instead of the database file")
-        except Exception as e:
-            direct_error = e
-
-        if direct_error is not None:
-            logger.info("Direct dbs.db download failed (%s) — retrying through a browser", direct_error)
-            await _download_via_browser(url, tmp_path)
-            if not _is_sqlite_file(tmp_path):
-                raise ValueError(
-                    "Download failed: imedicaldoctor.net returned a web page instead of the "
-                    "database file (still blocked by Cloudflare)."
-                )
-
-        catalog = await asyncio.to_thread(build_imd_catalog_from_dbs, tmp_path)
-        await asyncio.to_thread(db_imd_save_catalog, catalog)
-        return len(catalog)
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
 
 
 async def _imd_login(page, username: str, password: str, status_cb, bot=None, admin_id=None):
@@ -6870,14 +6755,104 @@ async def imd_catalog_extract_start(update: Update, context: ContextTypes.DEFAUL
     if count:
         msg = f"Current catalog has {count:,} databases.\n\n"
     await update.message.reply_text(
-        f"{msg}🔬 Update iMD Catalog\n\n"
-        "🌐 Sync pulls iMD's official resource list straight from "
-        "imedicaldoctor.net/dbs.db — no login needed.\n"
-        "🔑 Extract logs into imdweb.org and reads the list from there instead.",
+        f"{msg}{IMD_DBS_UPLOAD_INSTRUCTIONS}\n\n"
+        "Or extract the list by logging into imdweb.org instead:",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🌐 Sync from imedicaldoctor.net", callback_data="imdcat:sync")],
             [InlineKeyboardButton("🔑 Extract via imdweb.org login", callback_data="imdcat:login")],
         ]),
+    )
+
+
+IMD_DBS_UPLOAD_INSTRUCTIONS = (
+    "🔬 Update iMD Catalog\n\n"
+    "Send me iMD's resource list at any time and the catalog updates itself:\n"
+    "1. Open https://imedicaldoctor.net/dbs.db in your browser — it downloads dbs.db.\n"
+    "2. Zip it (it's ~29 MB, and Telegram only lets bots receive files up to 20 MB; "
+    "zipped it's ~6 MB).\n"
+    "3. Send or forward the .zip to this bot as a file — no need to tap anything first."
+)
+
+
+def looks_like_imd_dbs_upload(file_name: str) -> bool:
+    """dbs.db as the admin would send it: dbs.db / dbs.zip / dbs.db.zip /
+    'dbs (1).zip' etc., or any .zip/.gz (the contents are validated)."""
+    name = (file_name or "").lower()
+    if name.endswith((".zip", ".gz")):
+        return True
+    return name.startswith("dbs") and name.endswith(".db")
+TELEGRAM_BOT_DOWNLOAD_LIMIT = 20 * 1024 * 1024
+
+
+async def imd_dbs_file_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin sent dbs.db (zipped, gzipped or raw) — rebuilds the iMD
+    catalog from it."""
+    import gzip
+    import tempfile
+    import zipfile
+
+    doc = update.message.document
+    name = (doc.file_name or "").lower()
+    if not name.endswith((".zip", ".gz", ".db")):
+        await update.message.reply_text(
+            "That doesn't look like dbs.db — send the .zip containing it."
+        )
+        return
+    if doc.file_size and doc.file_size > TELEGRAM_BOT_DOWNLOAD_LIMIT:
+        await update.message.reply_text(
+            f"That file is {doc.file_size / 1024 / 1024:.0f} MB — Telegram only lets bots receive "
+            "files up to 20 MB. Zip dbs.db first (it shrinks to ~6 MB) and send the .zip."
+        )
+        return
+
+    status_msg = await update.message.reply_text("🔄 Updating the iMD catalog from this file...")
+
+    workdir = tempfile.mkdtemp()
+    upload_path = os.path.join(workdir, "upload")
+    db_path = os.path.join(workdir, "dbs.db")
+    try:
+        tg_file = await context.bot.get_file(doc.file_id)
+        await tg_file.download_to_drive(upload_path)
+
+        def unpack():
+            if name.endswith(".zip"):
+                with zipfile.ZipFile(upload_path) as zf:
+                    members = [m for m in zf.namelist() if m.lower().endswith(".db")]
+                    if not members:
+                        raise ValueError("the .zip doesn't contain a .db file")
+                    with zf.open(members[0]) as src, open(db_path, "wb") as dst:
+                        while chunk := src.read(1 << 20):
+                            dst.write(chunk)
+            elif name.endswith(".gz"):
+                with gzip.open(upload_path) as src, open(db_path, "wb") as dst:
+                    while chunk := src.read(1 << 20):
+                        dst.write(chunk)
+            else:
+                os.replace(upload_path, db_path)
+            if not _is_sqlite_file(db_path):
+                raise ValueError("the file isn't a SQLite database")
+            try:
+                catalog = build_imd_catalog_from_dbs(db_path)
+            except sqlite3.Error:
+                raise ValueError("the database has no iMD resource list (no 'DBs' table)")
+            db_imd_save_catalog(catalog)
+            return len(catalog)
+
+        saved = await asyncio.to_thread(unpack)
+    except Exception as e:
+        logger.exception("iMD catalog upload failed")
+        await status_msg.edit_text(
+            f"❌ Couldn't update the iMD catalog from that file: {e}\n\n"
+            "The existing catalog was left as it was."
+        )
+        return
+    finally:
+        import shutil
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    await status_msg.edit_text(
+        f"✅ iMD Catalog updated!\n\n"
+        f"📚 {saved:,} resources saved.\n\n"
+        "Customers can now use 🔬 What does iMD include?"
     )
 
 
@@ -6890,6 +6865,7 @@ async def imd_catalog_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
 
     if query.data == "imdcat:login":
+        clear_admin_flow_state(context.user_data)
         context.user_data["awaiting_imd_catalog_username"] = True
         await query.edit_message_text(
             "🔑 Extract iMD Catalog\n\n"
@@ -6898,19 +6874,6 @@ async def imd_catalog_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "Send your iMD username:"
         )
         return
-
-    await query.edit_message_text("🔄 Downloading iMD's resource list (dbs.db)...")
-    try:
-        saved = await sync_imd_catalog_from_url()
-    except Exception as e:
-        logger.exception("iMD catalog sync from dbs.db failed")
-        await query.edit_message_text(f"❌ Sync failed: {e}")
-        return
-    await query.edit_message_text(
-        f"✅ iMD Catalog updated!\n\n"
-        f"📚 {saved:,} resources saved.\n\n"
-        "Customers can now use 🔬 What does iMD include?"
-    )
 
 
 async def sync_serials_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11034,7 +10997,12 @@ async def restore_file_received(update: Update, context: ContextTypes.DEFAULT_TY
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
     if not context.user_data.get("awaiting_restore_file"):
-        return  # not expecting a .db upload right now — ignore
+        # Not restoring a backup — a dbs.db sent at any other time
+        # updates the iMD catalog.
+        doc = update.message.document
+        if doc and looks_like_imd_dbs_upload(doc.file_name):
+            await imd_dbs_file_received(update, context)
+        return
 
     doc = update.message.document
     if not doc or not doc.file_name.endswith(".db"):
