@@ -549,11 +549,11 @@ JORDAN_RECIPIENT_IDENTIFIERS = [
     "MOHAMMAD SHAMALTI", "MOHAMMAD ISMAIL ABEDELQADER SHAMALTY", "SHAMALTY", "SHAMALTI",
 ]
 
-# KSA (Al Rajhi) receipts DO normally show a reference number, so KSA
+# KSA (Al Ahli) receipts DO normally show a reference number, so KSA
 # keeps the standard reference/amount checks — this is an ADDITIONAL
 # gate on top of those, not a replacement (unlike Jordan/CLIQ above).
 METHODS_REQUIRING_RECIPIENT_NAME = {"KSA", "Ethiopia"}
-KSA_RECIPIENT_IDENTIFIERS = ["JAMEEL HEJJI", "JAMEEL HEJJI ALMIZRAQ", "HEJJI"]
+KSA_RECIPIENT_IDENTIFIERS = ["JAMEEL HEJJI", "JAMEEL HEJJI ALMIZRAQ", "JAMEEL HEJJI A ALMIZRAQ", "HEJJI"]
 ETHIOPIA_RECIPIENT_IDENTIFIERS = ["SEID AHMED SEID", "SEID AHMED", "AHMED SEID", "SEID"]
 
 # Card payments routinely show a slightly higher charge than the order
@@ -611,6 +611,28 @@ def convert_for_country(total_usd: float, country: str) -> str:
     return f"{converted:,.2f} {code} (≈{CURRENCY}{total_usd:.2f})"
 
 
+# KSA payment details. Only one is live at a time (see "KSA" below);
+# the other is kept here to switch back to if needed.
+# KSA 1 — previous details (two IBANs), not currently shown to customers.
+KSA_1_PAYMENT_INSTRUCTIONS = (
+    "(Tap to copy)\n\n"
+    "`SA8710000006857309000101`\n\n"
+    "`SA0510000062300187719603`\n\n"
+    "Bank: Ahli Bank\n"
+    "Name: JAMEEL HEJJI ALMIZRAQ\n\n"
+    "*Please make sure the purpose of the payment be Friends and family or "
+    "personal NOT goods or services.*"
+)
+# KSA 2 — current details.
+KSA_2_PAYMENT_INSTRUCTIONS = (
+    "(Tap to copy)\n\n"
+    "IBAN: `SA0510000062300187719603`\n"
+    "Name: `JAMEEL HEJJI A ALMIZRAQ`\n"
+    "Bank: Al Ahli Bank\n\n"
+    "*Please make sure the purpose of the payment be Friends and family or "
+    "personal NOT goods or services.*"
+)
+
 # Payment instructions per country. Wrapped in backticks where possible so
 # the ID/number is tap-to-copy in Telegram.
 LOCAL_PAYMENT_INSTRUCTIONS = {
@@ -658,15 +680,8 @@ LOCAL_PAYMENT_INSTRUCTIONS = {
         "Name: Alijon Karimov\n"
         "Country: Tajikistan"
     ),
-    "KSA": (
-        "(Tap to copy)\n\n"
-        "`SA8710000006857309000101`\n\n"
-        "`SA0510000062300187719603`\n\n"
-        "Bank: Ahli Bank\n"
-        "Name: JAMEEL HEJJI ALMIZRAQ\n\n"
-        "*Please make sure the purpose of the payment be Friends and family or "
-        "personal NOT goods or services.*"
-    ),
+    # Switch to KSA_1_PAYMENT_INSTRUCTIONS to bring back the old details.
+    "KSA": KSA_2_PAYMENT_INSTRUCTIONS,
     "Ethiopia": (
         "(Tap to copy)\n\n"
         "`2901711380911`\n\n"
@@ -5017,7 +5032,7 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
             if payment_method == "Jordan" else ""
         )
         ksa_note = (
-            " This is a KSA (Al Rajhi Bank) payment. In ADDITION to the normal amount and "
+            " This is a KSA (Al Ahli Bank) payment. In ADDITION to the normal amount and "
             "transaction reference checks, the receipt's recipient/beneficiary name MUST match "
             f"one of these: {', '.join(KSA_RECIPIENT_IDENTIFIERS)}. Matching rules: "
             "case-insensitive; a surname appearing anywhere in a longer full name is enough on "
