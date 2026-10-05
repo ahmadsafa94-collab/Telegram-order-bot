@@ -2439,6 +2439,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_sync_serials_username", "awaiting_sync_serials_password", "sync_serials_username",
     "awaiting_restore_file", "restore_staged_path",
     "awaiting_discount_field", "discount_data",
+    "awaiting_resend_message_for_fulfilment",
 ]
 
 def clear_admin_flow_state(user_data: dict):
@@ -8454,11 +8455,156 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     elif state == "awaiting_delivery":
         buttons.append([InlineKeyboardButton("📤 Deliver Manually", callback_data=f"deliver:{fulfilment_id}")])
+    # Anything that isn't a no-details item (code delivery, manual-access
+    # grant, or a book link) actually has credentials a customer could be
+    # asked to resend.
+    if item_id not in UPTODATE_AI_TRIGGER_ITEMS and item_id not in MANUAL_ACCESS_ITEMS and not item_id.startswith("book_"):
+        buttons.append(
+            [InlineKeyboardButton("📨 Ask to Resend Credentials", callback_data=f"askresend:{fulfilment_id}")]
+        )
     buttons.append([InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{order_id}")])
     buttons.append([InlineKeyboardButton("🗑 Delete", callback_data=f"pdel:{fulfilment_id}")])
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="apend_back")])
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def ask_resend_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '📨 Ask to Resend Credentials' — offers an optional
+    custom note before the request goes out, since sometimes the admin
+    wants to explain why (wrong info on file, lost in a restart, etc.)
+    and sometimes a plain nudge is enough."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    fulfilment_id = int(query.data.split(":", 1)[1])
+    if not db_get_fulfilment(fulfilment_id):
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That item no longer exists.")
+        return
+
+    clear_admin_flow_state(context.user_data)
+    context.user_data["awaiting_resend_message_for_fulfilment"] = fulfilment_id
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=(
+            "Type a custom message to include when asking the customer to resend their "
+            "credentials, or tap Cancel to send the request without one:"
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Cancel (no message)", callback_data=f"askresend_skip:{fulfilment_id}")]]
+        ),
+    )
+
+
+async def ask_resend_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped 'Cancel (no message)' — sends the resend request with
+    no custom note attached."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    fulfilment_id = int(query.data.split(":", 1)[1])
+    context.user_data.pop("awaiting_resend_message_for_fulfilment", None)
+    await _send_resend_request(context, fulfilment_id, None)
+
+
+async def ask_resend_message_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Catches the admin's typed custom message after tapping '📨 Ask to
+    Resend Credentials' and sends the request with it attached."""
+    fulfilment_id = context.user_data.pop("awaiting_resend_message_for_fulfilment", None)
+    if not fulfilment_id:
+        return
+    await _send_resend_request(context, fulfilment_id, update.message.text.strip())
+
+
+async def _send_resend_request(context: ContextTypes.DEFAULT_TYPE, fulfilment_id: int, custom_message: str | None):
+    """Shared tail for both the Cancel and custom-message paths above —
+    sends the customer a message with a button that kicks off a fresh
+    New Account / Renewal credential collection for this exact item."""
+    row = db_get_fulfilment(fulfilment_id)
+    if not row:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That item no longer exists.")
+        return
+    _, order_id, user_id, item_id, unit_no, state, info_json = row
+    name = MENU.get(item_id, (item_id,))[0]
+
+    text = f"🔐 We need you to resend your account details for {name} (Order #{order_id})."
+    if custom_message:
+        text += f"\n\n{custom_message}"
+    text += "\n\nTap below to get started:"
+
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔄 Resend Credentials", callback_data=f"resendcred:{fulfilment_id}")]]
+            ),
+        )
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"✅ Asked the customer to resend credentials for {name} (Order #{order_id}).",
+        )
+    except Exception:
+        logger.exception("Failed to send resend-credentials request for fulfilment #%s", fulfilment_id)
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=(
+                f"⚠️ Could not reach the customer for order #{order_id} — they may have "
+                "blocked the bot."
+            ),
+        )
+
+
+async def resend_cred_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer tapped '🔄 Resend Credentials' from the admin's request —
+    clears any stale in-progress collection for this customer, then
+    re-runs the exact same New Account / Renewal entry point used right
+    after payment, so the rest of the flow (validation, auto-registration
+    for iMD, the admin notification for everything else) is identical to
+    a first-time submission."""
+    query = update.callback_query
+    fulfilment_id = int(query.data.split(":", 1)[1])
+    row = db_get_fulfilment(fulfilment_id)
+    if not row:
+        await query.answer("This request has expired.", show_alert=True)
+        return
+
+    _, order_id, user_id, item_id, unit_no, state, info_json = row
+    if query.from_user.id != user_id:
+        await query.answer("This isn't your order.", show_alert=True)
+        return
+    if state == "delivered":
+        await query.answer("This has already been delivered.", show_alert=True)
+        return
+    await query.answer()
+
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    # A different in-progress collection (or a leftover one from before)
+    # must not collide with this fresh one — same cleanup used whenever a
+    # manual delivery short-circuits an existing flow (see credentials_reply).
+    for key in (
+        "awaiting_registration_field", "registration_order", "registration_data",
+        "registration_is_renew", "registration_duration", "registration_item_id",
+        "registration_fulfilment_id", "registration_retry_field",
+        "awaiting_generic_field", "generic_data", "generic_order_id",
+        "generic_item_id", "generic_fulfilment_id", "generic_account_type",
+    ):
+        context.user_data.pop(key, None)
+
+    if item_id in IMD_TRIGGER_ITEMS:
+        await start_imd_collection(context, order_id, user_id, item_id, fulfilment_id)
+    else:
+        await start_generic_collection(context, order_id, user_id, item_id, fulfilment_id)
 
 
 async def pending_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -9146,6 +9292,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get("awaiting_credentials_fulfilment"):
             await credentials_reply(update, context)
             return
+        if context.user_data.get("awaiting_resend_message_for_fulfilment"):
+            await ask_resend_message_reply(update, context)
+            return
         if context.user_data.get("awaiting_edit_delivery"):
             await edit_delivery_reply(update, context)
             return
@@ -9254,7 +9403,6 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
     fulfilment_id, item_id = nxt
 
     item_name = MENU.get(item_id, (item_id, 0))[0]
-    customer_data = context.application.user_data[user_id]
 
     # Before asking the customer anything, check if credentials were already
     # collected (Mini App Step 2 or any pre-payment collection). If info_json
@@ -9426,21 +9574,7 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
                 ),
             )
     else:
-        # Store which unit this is for, but wait for New/Renewal before
-        # starting either field list.
-        customer_data["generic_fulfilment_id"] = fulfilment_id
-        customer_data["generic_item_id"] = item_id
-        customer_data["generic_order_id"] = order_id
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"📝 Let's set up your {item_name}. Is this a:",
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton("🆕 New Account", callback_data="gentype:new")],
-                    [InlineKeyboardButton("🔄 Renewal of a previous account", callback_data="gentype:renew")],
-                ]
-            ),
-        )
+        await start_generic_collection(context, order_id, user_id, item_id, fulfilment_id)
 
 
 async def generic_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -9634,6 +9768,30 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
             )
         except Exception:
             pass
+
+
+async def start_generic_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int,
+                                    item_id: str, fulfilment_id: int):
+    """Kicks off the customer-facing New Account / Renewal choice for a
+    non-iMD subscription. This is the normal entry point right after
+    payment, pulled out into its own function so the admin's "Ask to
+    Resend Credentials" button (see resend_cred_tap) can reuse it exactly
+    as-is to re-ask a customer who already went through this once."""
+    item_name = MENU.get(item_id, (item_id, 0))[0]
+    customer_data = context.application.user_data[user_id]
+    customer_data["generic_fulfilment_id"] = fulfilment_id
+    customer_data["generic_item_id"] = item_id
+    customer_data["generic_order_id"] = order_id
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=f"📝 Let's set up your {item_name}. Is this a:",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🆕 New Account", callback_data="gentype:new")],
+                [InlineKeyboardButton("🔄 Renewal of a previous account", callback_data="gentype:renew")],
+            ]
+        ),
+    )
 
 
 async def start_imd_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int, imd_item: str, fulfilment_id: int):
@@ -11607,6 +11765,9 @@ def main():
     app.add_handler(CallbackQueryHandler(announcement_detail, pattern=r"^annview:"))
     app.add_handler(CallbackQueryHandler(announcement_back, pattern=r"^ann_back$"))
     app.add_handler(CallbackQueryHandler(admin_pending_back, pattern=r"^apend_back$"))
+    app.add_handler(CallbackQueryHandler(ask_resend_start, pattern=r"^askresend:"))
+    app.add_handler(CallbackQueryHandler(ask_resend_skip, pattern=r"^askresend_skip:"))
+    app.add_handler(CallbackQueryHandler(resend_cred_tap, pattern=r"^resendcred:"))
     app.add_handler(CallbackQueryHandler(imd_manual_deliver, pattern=r"^imddeliver:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_start, pattern=r"^imdmancred:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_type_choice, pattern=r"^imdmantype:"))
