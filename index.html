@@ -399,7 +399,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 <script>
 const tg = window.Telegram.WebApp;
 tg.ready(); tg.expand();
-tg.setHeaderColor('secondary_bg_color');
+// setHeaderColor needs Bot API 6.1+ — on an older Telegram client it's
+// missing entirely, and calling it unguarded would throw here and halt
+// this whole script before the catalog/ads/search below ever run.
+try { tg.setHeaderColor && tg.setHeaderColor('secondary_bg_color'); } catch(e) {}
 
 // ── Load subscription data from URL query param ──────────────────────
 // The bot encodes the user's subscriptions + custom catalog items as
