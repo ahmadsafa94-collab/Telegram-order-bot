@@ -92,7 +92,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "8"
+MINI_APP_VERSION = "9"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -164,6 +164,9 @@ MENU = {
     # Promo expired 18/9/2026 — no longer purchasable, kept for name/price
     # lookups on any order already placed with it.
     "amboss_premium_promo": ("Amboss Premium (Unlimited Qbanks) + Library - Valid until 18/9/2026", 35.00),
+    # Replaced by the With AI / Without AI split below — kept for name/price
+    # lookups on any order already placed with it.
+    "sciencedirect": ("ScienceDirect - 1 Year", 35.00),
     # iMD used to be 4 separate products (New/Renewal x 6m/1y) — collapsed
     # into 2 durations below, with New vs Renewal now asked on the account
     # details page instead. Kept for name lookups on any order already
@@ -203,7 +206,8 @@ MENU = {
     "accessmedicine": ("AccessMedicine - 1 Year", 20.00),
     "boardvitals": ("Boardvitals VIP - 1 Year", 55.00),
     "clinicalkey": ("ClinicalKey - 1 Year", 35.00),
-    "sciencedirect": ("ScienceDirect - 1 Year", 35.00),
+    "sciencedirect_noai": ("ScienceDirect (Without AI) - 1 Year", 30.00),
+    "sciencedirect_ai": ("ScienceDirect (With AI) - 1 Year", 40.00),
     "statdx": ("StatDx - 1 Year", 35.00),
     "nejm": ("NEJM - 1 Year", 20.00),
     "jama_evidence": ("JAMA Evidence - 1 Year", 20.00),
@@ -220,7 +224,7 @@ MENU = {
 # Order the single-choice items appear in the main menu.
 SINGLE_MAIN_ITEMS = [
     "dynamed", "dynamedex", "bmj_best_practice", "bmj_learning", "visualdx",
-    "lexicomp", "accessmedicine", "boardvitals", "clinicalkey", "sciencedirect",
+    "lexicomp", "accessmedicine", "boardvitals", "clinicalkey", "sciencedirect_noai", "sciencedirect_ai",
     "statdx", "nejm", "jama_evidence", "scopus", "springerlink", "sanford_guide", "embase",
 ]
 
