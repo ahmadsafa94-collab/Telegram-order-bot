@@ -30,6 +30,8 @@ DB needed to get started.
 
 import asyncio
 import csv
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -37,7 +39,9 @@ import os
 import math
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta, time as dt_time
+from urllib.parse import parse_qsl
 
 from telegram import (
     InlineKeyboardButton,
@@ -90,7 +94,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "3"
+MINI_APP_VERSION = "4"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -1055,6 +1059,36 @@ def db_init():
         """
     )
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS coworkers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            discount_pct REAL NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+
+    # coworker_id on orders/users is added later — ALTER TABLE is skipped
+    # if the column already exists, same pattern as every other late column
+    # above. orders.coworker_id tags which coworker (if any) placed an
+    # order, so it can show up in that coworker's own filtered view in
+    # addition to the regular Pending Orders list. users.coworker_id tracks
+    # which Telegram account is currently logged in via /coworker, so the
+    # Mini App can show that user discounted prices.
+    for column, coltype in [("coworker_id", "INTEGER")]:
+        try:
+            conn.execute(f"ALTER TABLE orders ADD COLUMN {column} {coltype}")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {column} {coltype}")
+        except sqlite3.OperationalError:
+            pass
+
     conn.commit()
     conn.close()
 
@@ -1571,6 +1605,145 @@ def db_active_discount_codes() -> dict:
     ).fetchall()
     conn.close()
     return {code: pct for code, pct in rows}
+
+
+# ------------------------------------------------------------------
+# COWORKERS — internal accounts that get a discounted price tier via
+# /coworker, tracked separately from customer discount codes since each
+# coworker has their own name, login, and admin-set discount rate.
+# ------------------------------------------------------------------
+
+def _hash_coworker_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def db_create_coworker(name: str, username: str, password: str, discount_pct: float) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        "INSERT INTO coworkers (name, username, password_hash, discount_pct, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (name, username, _hash_coworker_password(password), discount_pct, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    coworker_id = cur.lastrowid
+    conn.close()
+    return coworker_id
+
+
+def db_coworker_username_taken(username: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT 1 FROM coworkers WHERE LOWER(username) = LOWER(?)", (username,)).fetchone()
+    conn.close()
+    return row is not None
+
+
+def db_verify_coworker_login(username: str, password: str):
+    """Returns (coworker_id, name, discount_pct) on a correct username +
+    password, else None."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT id, name, password_hash, discount_pct FROM coworkers WHERE LOWER(username) = LOWER(?)",
+        (username,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    coworker_id, name, password_hash, discount_pct = row
+    if password_hash != _hash_coworker_password(password):
+        return None
+    return coworker_id, name, discount_pct
+
+
+def db_list_coworkers():
+    """Returns (id, name, username, discount_pct, created_at) for every
+    coworker, newest first."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, name, username, discount_pct, created_at FROM coworkers ORDER BY id DESC"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def db_get_coworker(coworker_id: int):
+    """Returns (id, name, username, discount_pct, created_at) or None."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT id, name, username, discount_pct, created_at FROM coworkers WHERE id = ?",
+        (coworker_id,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def db_set_user_coworker(user_id: int, coworker_id: int):
+    """Upserts rather than a plain UPDATE — /coworker could in principle be
+    someone's very first message (no prior /start), in which case there's
+    no users row yet and a plain UPDATE would silently affect 0 rows,
+    leaving the login looking successful but not actually persisted."""
+    now = datetime.utcnow().isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO users (user_id, coworker_id, first_seen, last_seen) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET coworker_id = excluded.coworker_id",
+        (user_id, coworker_id, now, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_get_user_coworker(user_id: int):
+    """Returns (coworker_id, name, discount_pct) if this Telegram user is
+    currently logged in as a coworker, else None."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT c.id, c.name, c.discount_pct FROM users u JOIN coworkers c ON c.id = u.coworker_id "
+        "WHERE u.user_id = ?",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def db_coworker_stats(coworker_id: int):
+    """Lifetime (orders count, revenue, pending count) for one coworker —
+    'paid' covers every order that actually went through (paid or fully
+    delivered), same exclusion list used everywhere else in the app."""
+    conn = sqlite3.connect(DB_PATH)
+    paid_row = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(total), 0) FROM orders WHERE coworker_id = ? "
+        "AND status NOT IN ('awaiting_payment', 'awaiting_receipt', 'awaiting_confirmation', "
+        "'cancelled', 'rejected')",
+        (coworker_id,),
+    ).fetchone()
+    pending_row = conn.execute(
+        "SELECT COUNT(*) FROM fulfilment f JOIN orders o ON o.id = f.order_id "
+        "WHERE o.coworker_id = ? AND f.state != 'delivered' "
+        "AND o.status NOT IN ('cancelled', 'rejected', 'awaiting_payment', "
+        "'awaiting_receipt', 'awaiting_confirmation')",
+        (coworker_id,),
+    ).fetchone()
+    conn.close()
+    orders_count, revenue = paid_row
+    pending_count = pending_row[0]
+    return orders_count, float(revenue or 0), pending_count
+
+
+def db_coworker_pending_items(coworker_id: int):
+    """Same shape as db_all_pending_items, filtered to one coworker's
+    orders — lets the admin see just their team's pending queue."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT f.id, f.order_id, f.user_id, o.username, f.item_id, f.unit_no, f.state, o.created_at "
+        "FROM fulfilment f JOIN orders o ON o.id = f.order_id "
+        "WHERE o.coworker_id = ? AND f.state != 'delivered' "
+        "AND o.status NOT IN ('cancelled', 'rejected', 'awaiting_payment', "
+        "'awaiting_receipt', 'awaiting_confirmation') "
+        "ORDER BY f.order_id, f.id",
+        (coworker_id,),
+    ).fetchall()
+    conn.close()
+    return rows
 
 
 def db_mark_referral_intro_shown(user_id: int):
@@ -2228,6 +2401,81 @@ def db_user_orders(user_id: int, limit: int = 5):
     return rows
 
 
+# Order statuses that mean "never actually paid" — excluded from every
+# paid-order view (Mini App Orders tab, purchase history, sales reports).
+UNPAID_EXCLUDED_STATUSES = (
+    "awaiting_payment", "awaiting_receipt", "awaiting_confirmation", "cancelled", "rejected",
+)
+
+
+def db_user_paid_fulfilment_items(user_id: int):
+    """Every fulfilment unit belonging to a paid order for this customer —
+    the data behind the Mini App's Orders tab. Returns (fulfilment_id,
+    order_id, item_id, unit_no, state, order_created_at)."""
+    conn = sqlite3.connect(DB_PATH)
+    placeholders = ",".join("?" * len(UNPAID_EXCLUDED_STATUSES))
+    rows = conn.execute(
+        f"SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state, o.created_at "
+        f"FROM fulfilment f JOIN orders o ON o.id = f.order_id "
+        f"WHERE f.user_id = ? AND o.status NOT IN ({placeholders}) "
+        f"ORDER BY f.order_id DESC, f.id",
+        (user_id, *UNPAID_EXCLUDED_STATUSES),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def db_fulfilment_detail_for_user(fulfilment_id: int, user_id: int):
+    """Ownership-checked single fulfilment row for the Mini App's order
+    detail view. Returns (fulfilment_id, order_id, item_id, unit_no,
+    state, info_json, order_created_at, order_status) or None if it
+    doesn't exist, isn't paid, or doesn't belong to this user."""
+    conn = sqlite3.connect(DB_PATH)
+    placeholders = ",".join("?" * len(UNPAID_EXCLUDED_STATUSES))
+    row = conn.execute(
+        f"SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state, f.info_json, "
+        f"o.created_at, o.status "
+        f"FROM fulfilment f JOIN orders o ON o.id = f.order_id "
+        f"WHERE f.id = ? AND f.user_id = ? AND o.status NOT IN ({placeholders})",
+        (fulfilment_id, user_id, *UNPAID_EXCLUDED_STATUSES),
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def db_user_purchase_history(user_id: int):
+    """Count + total spent for this customer, bucketed into today, this
+    month, this year, and lifetime — the data behind the Orders tab's
+    history icon. Uses the same local-offset convention as the admin
+    sales report (REPORT_UTC_OFFSET) so 'today'/'this month' line up
+    with what the admin sees."""
+    offset = timedelta(hours=REPORT_UTC_OFFSET)
+    local_now = datetime.utcnow() + offset
+    day_start = (local_now.replace(hour=0, minute=0, second=0, microsecond=0) - offset).isoformat()
+    month_start = (local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) - offset).isoformat()
+    year_start = (local_now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0) - offset).isoformat()
+
+    conn = sqlite3.connect(DB_PATH)
+    placeholders = ",".join("?" * len(UNPAID_EXCLUDED_STATUSES))
+
+    def _bucket(since_iso):
+        row = conn.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(total), 0) FROM orders WHERE user_id = ? "
+            f"AND created_at >= ? AND status NOT IN ({placeholders})",
+            (user_id, since_iso, *UNPAID_EXCLUDED_STATUSES),
+        ).fetchone()
+        return {"count": row[0], "total": round(float(row[1] or 0), 2)}
+
+    result = {
+        "day": _bucket(day_start),
+        "month": _bucket(month_start),
+        "year": _bucket(year_start),
+        "lifetime": _bucket("0000-01-01T00:00:00"),
+    }
+    conn.close()
+    return result
+
+
 # ------------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------------
@@ -2403,6 +2651,7 @@ A_IMD_CATALOG = "🔬 Update iMD Catalog"
 A_CUSTOMER_VIEW = "🛍 Customer Menu"
 A_BACKUP = "🗄 Backup"
 A_DISCOUNT_CODES = "🏷 Discount Codes"
+A_COWORKERS = "👥 Coworkers"
 
 # Kept as internal labels for the Orders submenu buttons — no longer
 # top-level keyboard buttons, but still used as inline button text and
@@ -2416,7 +2665,7 @@ ADMIN_LABELS = [
     A_SERIALS, A_ORDERS, A_INPUT, A_INBOX, A_BROADCAST,
     A_FIND_CUSTOMER, A_STOCK, A_TICKETS, A_CREDITS,
     A_ADD_SUBSCRIPTION, A_BOOK_REQUESTS, A_IMD_CATALOG, A_CUSTOMER_VIEW,
-    A_BACKUP, A_DISCOUNT_CODES,
+    A_BACKUP, A_DISCOUNT_CODES, A_COWORKERS,
 ]
 
 # Every key the admin's text_state_router uses. clear_admin_flow_state()
@@ -2440,6 +2689,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_restore_file", "restore_staged_path",
     "awaiting_discount_field", "discount_data",
     "awaiting_resend_message_for_fulfilment",
+    "awaiting_coworker_add_field", "coworker_add_data",
 ]
 
 def clear_admin_flow_state(user_data: dict):
@@ -2544,6 +2794,15 @@ def _shop_url(user_id: int = 0) -> str:
         credits_balance = db_get_credits(user_id)
         active_codes = db_active_discount_codes()
 
+        # Coworker discount — if this Telegram account is logged in via
+        # /coworker, embed their admin-set rate so the Mini App can show
+        # discounted prices directly on the catalog tiles, not just at
+        # checkout. Same point-in-time-snapshot tradeoff as credits/discount
+        # codes above: the server re-applies the real rate authoritatively
+        # at checkout regardless of what the client displayed.
+        coworker_login = db_get_user_coworker(user_id)
+        coworker_pct = coworker_login[2] if coworker_login else 0
+
         data = {
             "d": delivered,
             "p": pending,
@@ -2552,6 +2811,7 @@ def _shop_url(user_id: int = 0) -> str:
             "cr": credits_balance,
             "dc": active_codes,
             "api": BOT_API_URL,
+            "cw": coworker_pct,
         }
         return f"{MINI_APP_URL}?v={MINI_APP_VERSION}&subs={_encode(data)}"
     except Exception:
@@ -2614,7 +2874,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [A_BOOK_REQUESTS],
             [A_IMD_CATALOG],
             [A_CUSTOMER_VIEW, A_BACKUP],
-            [A_DISCOUNT_CODES],
+            [A_DISCOUNT_CODES, A_COWORKERS],
         ],
         resize_keyboard=True,
     )
@@ -5295,6 +5555,55 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Your recent orders:\n" + "\n".join(lines))
 
 
+async def coworker_login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/coworker — logs this Telegram account in with an admin-issued
+    coworker username/password, unlocking that coworker's discounted
+    pricing in the Mini App from then on."""
+    existing = db_get_user_coworker(update.effective_user.id)
+    if existing:
+        _, name, discount_pct = existing
+        await update.message.reply_text(
+            f"You're already logged in as coworker *{md_escape(name)}* ({discount_pct:.0f}% off).",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    context.user_data.pop("coworker_login_username", None)
+    context.user_data["awaiting_coworker_field"] = "username"
+    await update.message.reply_text("Enter your coworker username:")
+
+
+async def coworker_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Walks username -> password, then verifies against the coworkers
+    table set up by the admin and, on a match, logs this Telegram account
+    in as that coworker."""
+    field = context.user_data.get("awaiting_coworker_field")
+    if not field:
+        return
+    text = update.message.text.strip()
+
+    if field == "username":
+        context.user_data["coworker_login_username"] = text
+        context.user_data["awaiting_coworker_field"] = "password"
+        await update.message.reply_text("Enter your coworker password:")
+        return
+
+    # field == "password"
+    username = context.user_data.pop("coworker_login_username", "")
+    context.user_data.pop("awaiting_coworker_field", None)
+    result = db_verify_coworker_login(username, text)
+    if not result:
+        await update.message.reply_text("❌ Username or password incorrect. Send /coworker to try again.")
+        return
+
+    coworker_id, name, discount_pct = result
+    db_set_user_coworker(update.effective_user.id, coworker_id)
+    await update.message.reply_text(
+        f"✅ Logged in as coworker *{md_escape(name)}*. You now get {discount_pct:.0f}% off every "
+        "subscription — open the shop to see the discounted prices.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
 # ------------------------------------------------------------------
 # HANDLERS — admin side
 # ------------------------------------------------------------------
@@ -5648,6 +5957,9 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_discount_field"] = "percentage"
         context.user_data["discount_data"] = {}
         await update.message.reply_text("What discount percentage? (e.g. 20 for 20% off):")
+
+    elif text == A_COWORKERS:
+        await coworkers_menu(update, context)
 
 
 def format_fulfilment_info(item_id: str, info_json: str) -> str:
@@ -7780,6 +8092,132 @@ async def http_health(request):
     return web.json_response({"ok": True})
 
 
+def _verify_telegram_init_data(init_data: str, max_age_seconds: int = 86400):
+    """Validates a Telegram WebApp `initData` string against BOT_TOKEN,
+    per Telegram's documented algorithm, and returns the authenticated
+    user dict on success or None on any failure (missing/bad hash,
+    tampered data, stale auth_date).
+
+    This is the only safe way to know which Telegram user a Mini App API
+    request is really from. Unlike the open, read-only /api/imd_search
+    endpoint, these endpoints return a customer's own order history and
+    account credentials, so a plain ?user_id= query param would let
+    anyone read anyone else's data just by changing the number."""
+    if not init_data:
+        return None
+    try:
+        pairs = dict(parse_qsl(init_data, strict_parsing=True))
+    except ValueError:
+        return None
+
+    received_hash = pairs.pop("hash", None)
+    if not received_hash:
+        return None
+
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+    computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(computed_hash, received_hash):
+        return None
+
+    try:
+        auth_date = int(pairs.get("auth_date", "0"))
+    except ValueError:
+        return None
+    if auth_date <= 0 or time.time() - auth_date > max_age_seconds:
+        return None
+
+    try:
+        user = json.loads(pairs.get("user", "{}"))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(user, dict) or "id" not in user:
+        return None
+    return user
+
+
+async def http_my_orders(request):
+    """Every paid order unit for the authenticated customer — the data
+    behind the Mini App's Orders tab list."""
+    from aiohttp import web
+    user = _verify_telegram_init_data(request.query.get("initData", ""))
+    if not user:
+        return web.json_response({"error": "Unauthorized"}, status=401, headers=_imd_search_cors_headers())
+
+    rows = db_user_paid_fulfilment_items(user["id"])
+    orders = []
+    for fid, order_id, item_id, unit_no, state, created_at in rows:
+        name, price = MENU.get(item_id, (item_id, 0))
+        orders.append({
+            "fulfilment_id": fid,
+            "order_id": order_id,
+            "name": name,
+            "date": created_at,
+            "price": price,
+            "status": "delivered" if state == "delivered" else "pending",
+        })
+    return web.json_response({"orders": orders}, headers=_imd_search_cors_headers())
+
+
+async def http_my_order_detail(request):
+    """One order unit's full detail (credentials included) for the
+    authenticated customer — ownership-checked, so a fulfilment_id that
+    belongs to someone else's order returns 404, never their data."""
+    from aiohttp import web
+    user = _verify_telegram_init_data(request.query.get("initData", ""))
+    if not user:
+        return web.json_response({"error": "Unauthorized"}, status=401, headers=_imd_search_cors_headers())
+
+    try:
+        fulfilment_id = int(request.query.get("fulfilment_id", "0"))
+    except ValueError:
+        fulfilment_id = 0
+
+    row = db_fulfilment_detail_for_user(fulfilment_id, user["id"])
+    if not row:
+        return web.json_response({"error": "Not found"}, status=404, headers=_imd_search_cors_headers())
+
+    fid, order_id, item_id, unit_no, state, info_json, created_at, order_status = row
+    name, price = MENU.get(item_id, (item_id, 0))
+
+    credentials = None
+    if state == "delivered":
+        # The real delivered message, not the originally-submitted form
+        # data — iMD auto-registration in particular can end up with a
+        # different username than what the customer first typed.
+        for _, d_order_id, d_item_id, message, _delivered_at in db_user_deliveries(user["id"]):
+            if d_order_id == order_id and d_item_id == item_id:
+                credentials = message
+                break
+    if credentials is None:
+        credentials = (
+            format_fulfilment_info(item_id, info_json) if info_json
+            else "Not delivered yet — we'll notify you here as soon as it's ready."
+        )
+
+    return web.json_response({
+        "fulfilment_id": fid,
+        "order_id": order_id,
+        "name": name,
+        "date": created_at,
+        "price": price,
+        "status": "delivered" if state == "delivered" else "pending",
+        "credentials": credentials,
+    }, headers=_imd_search_cors_headers())
+
+
+async def http_my_purchase_history(request):
+    """Day/month/year/lifetime order count + spend for the authenticated
+    customer — the data behind the Orders tab's history icon."""
+    from aiohttp import web
+    user = _verify_telegram_init_data(request.query.get("initData", ""))
+    if not user:
+        return web.json_response({"error": "Unauthorized"}, status=401, headers=_imd_search_cors_headers())
+
+    history = db_user_purchase_history(user["id"])
+    return web.json_response(history, headers=_imd_search_cors_headers())
+
+
 async def start_api_server(application):
     """Starts the aiohttp API server in the background. Called from
     post_init so it runs in the same event loop as the bot's polling —
@@ -7791,6 +8229,12 @@ async def start_api_server(application):
     api_app = web.Application()
     api_app.router.add_get("/api/imd_search", http_imd_search)
     api_app.router.add_options("/api/imd_search", http_imd_search_options)
+    api_app.router.add_get("/api/my_orders", http_my_orders)
+    api_app.router.add_options("/api/my_orders", http_imd_search_options)
+    api_app.router.add_get("/api/my_order_detail", http_my_order_detail)
+    api_app.router.add_options("/api/my_order_detail", http_imd_search_options)
+    api_app.router.add_get("/api/my_purchase_history", http_my_purchase_history)
+    api_app.router.add_options("/api/my_purchase_history", http_imd_search_options)
     api_app.router.add_get("/health", http_health)
 
     runner = web.AppRunner(api_app)
@@ -8132,6 +8576,184 @@ def _paid_label(status: str, paid_at: str) -> str:
     if status in ("paid", "delivered"):
         return "unknown (predates tracking)"
     return "not yet"
+
+
+def _coworkers_list_text_and_buttons():
+    rows = db_list_coworkers()
+    buttons = []
+    for coworker_id, name, username, discount_pct, created_at in rows:
+        orders_count, revenue, pending_count = db_coworker_stats(coworker_id)
+        label = f"{name} — {discount_pct:.0f}% off · {orders_count} orders"
+        if pending_count:
+            label += f" · {pending_count} pending"
+        buttons.append([InlineKeyboardButton(label[:64], callback_data=f"coworker:{coworker_id}")])
+    buttons.append([InlineKeyboardButton("➕ Add Coworker", callback_data="coworker_add")])
+    text = "👥 Coworkers:" if rows else "👥 No coworkers yet — add one below."
+    return text, InlineKeyboardMarkup(buttons)
+
+
+async def coworkers_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '👥 Coworkers' — lists every coworker with a quick
+    stat line, plus an Add Coworker button."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    text, markup = _coworkers_list_text_and_buttons()
+    await update.message.reply_text(text, reply_markup=markup)
+
+
+async def coworker_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    text, markup = _coworkers_list_text_and_buttons()
+    await query.edit_message_text(text, reply_markup=markup)
+
+
+async def coworker_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '➕ Add Coworker' — starts the name -> username ->
+    password -> discount% sequence."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    clear_admin_flow_state(context.user_data)
+    context.user_data["awaiting_coworker_add_field"] = "name"
+    context.user_data["coworker_add_data"] = {}
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="Coworker's name:")
+
+
+async def coworker_add_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Walks name -> username (uniqueness-checked) -> password ->
+    discount percentage, one message at a time, then creates the
+    coworker account."""
+    field = context.user_data.get("awaiting_coworker_add_field")
+    data = context.user_data.get("coworker_add_data", {})
+    if not field:
+        return
+    text = update.message.text.strip()
+
+    if field == "name":
+        if not text:
+            await update.message.reply_text("Send a name:")
+            return
+        data["name"] = text
+        context.user_data["coworker_add_data"] = data
+        context.user_data["awaiting_coworker_add_field"] = "username"
+        await update.message.reply_text("Coworker's login username:")
+        return
+
+    if field == "username":
+        if db_coworker_username_taken(text):
+            await update.message.reply_text("That username is already taken — send another one:")
+            return
+        data["username"] = text
+        context.user_data["coworker_add_data"] = data
+        context.user_data["awaiting_coworker_add_field"] = "password"
+        await update.message.reply_text("Coworker's login password:")
+        return
+
+    if field == "password":
+        data["password"] = text
+        context.user_data["coworker_add_data"] = data
+        context.user_data["awaiting_coworker_add_field"] = "discount_pct"
+        await update.message.reply_text("Discount percentage for this coworker (e.g. 15 for 15% off):")
+        return
+
+    # field == "discount_pct"
+    try:
+        pct = float(text)
+        if not (0 < pct <= 100):
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Send a number between 1 and 100:")
+        return
+
+    coworker_id = db_create_coworker(data["name"], data["username"], data["password"], pct)
+    context.user_data.pop("awaiting_coworker_add_field", None)
+    context.user_data.pop("coworker_add_data", None)
+    await update.message.reply_text(
+        f"✅ Coworker *{md_escape(data['name'])}* created with {pct:.0f}% off.\n\n"
+        f"Username: `{data['username']}`\nPassword: `{data['password']}`\n\n"
+        "Share these with them — they log in from the bot with /coworker.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def coworker_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows one coworker's stats and, if they have any, a button into
+    their own pending-orders queue."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    coworker_id = int(query.data.split(":", 1)[1])
+    coworker = db_get_coworker(coworker_id)
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="coworker_back")]])
+    if not coworker:
+        await query.edit_message_text("That coworker no longer exists.", reply_markup=back)
+        return
+
+    _, name, username, discount_pct, created_at = coworker
+    orders_count, revenue, pending_count = db_coworker_stats(coworker_id)
+    text = (
+        f"👥 {name}\n"
+        f"Username: {username}\n"
+        f"Discount: {discount_pct:.0f}% off\n"
+        f"Added: {created_at[:10]}\n\n"
+        f"Orders: {orders_count}\n"
+        f"Revenue: {CURRENCY}{revenue:.2f}\n"
+        f"Pending: {pending_count}"
+    )
+    buttons = []
+    if pending_count:
+        buttons.append(
+            [InlineKeyboardButton(f"⏳ Pending Orders ({pending_count})", callback_data=f"coworker_pending:{coworker_id}")]
+        )
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="coworker_back")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def coworker_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """This coworker's own pending-orders queue — same row format and the
+    exact same apend: callback as the global Pending Orders list, so
+    tapping an item lands on the same, unmodified detail/delivery view."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    coworker_id = int(query.data.split(":", 1)[1])
+    coworker = db_get_coworker(coworker_id)
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"coworker:{coworker_id}")]])
+    if not coworker:
+        await query.edit_message_text("That coworker no longer exists.", reply_markup=back)
+        return
+
+    rows = db_coworker_pending_items(coworker_id)
+    if not rows:
+        await query.edit_message_text("No pending orders for this coworker.", reply_markup=back)
+        return
+
+    buttons = []
+    for fid, order_id, user_id, username, item_id, unit_no, state, created_at in rows:
+        name = MENU.get(item_id, (item_id,))[0]
+        suffix = f" #{unit_no}" if unit_no > 1 else ""
+        flag = "📝" if state == "awaiting_delivery" else "⌛"
+        who = f"@{username}" if username else str(user_id)
+        label = f"{flag} {name}{suffix} — {who} (#{order_id})"
+        buttons.append([InlineKeyboardButton(label[:64], callback_data=f"apend:{fid}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"coworker:{coworker_id}")])
+
+    await query.edit_message_text(
+        f"{coworker[1]}'s pending orders:\n📝 = ready to deliver   ⌛ = waiting on customer",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 
 async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -9295,6 +9917,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get("awaiting_resend_message_for_fulfilment"):
             await ask_resend_message_reply(update, context)
             return
+        if context.user_data.get("awaiting_coworker_add_field"):
+            await coworker_add_field_reply(update, context)
+            return
         if context.user_data.get("awaiting_edit_delivery"):
             await edit_delivery_reply(update, context)
             return
@@ -9335,6 +9960,10 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get("awaiting_generic_field"):
         await generic_field_reply(update, context)
+        return
+
+    if context.user_data.get("awaiting_coworker_field"):
+        await coworker_field_reply(update, context)
         return
 
 
@@ -11009,6 +11638,26 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         return
 
+    if action == "order_ticket":
+        # Tapped from the Mini App's Orders tab, on one specific order's
+        # detail view — reuses the exact same ticket message/screenshot
+        # collection as every other ticket, just pre-tagged to that order
+        # instead of asking the customer to pick a category first.
+        fulfilment_id = data.get("fulfilment_id")
+        row = db_get_fulfilment(fulfilment_id) if fulfilment_id else None
+        if not row or row[2] != user_id:
+            await update.message.reply_text("Could not find that order. Please contact support.")
+            return
+        _, order_id, _, item_id, unit_no, state, info_json = row
+        item_name = MENU.get(item_id, (item_id,))[0]
+        ticket_id = db_create_ticket(
+            user_id, username, category="order",
+            subscription_item_id=item_id,
+            subscription_label=f"{item_name} (Order #{order_id})",
+        )
+        await start_ticket_message_collection(context, user_id, ticket_id, update.effective_chat.id)
+        return
+
     if action not in ("cart_checkout", "full_order"):
         return
 
@@ -11041,6 +11690,17 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     total = sum(MENU[i][1] * q for i, q in order_items.items())
 
+    # ── Apply the coworker discount server-side, before anything else —
+    # never trust a client-sent discount; look up whether THIS Telegram
+    # account is currently logged in as a coworker (via /coworker) and, if
+    # so, apply their admin-set rate. Stacks with a discount code/credits
+    # entered on top, same as those already stack with each other below.
+    coworker_login = db_get_user_coworker(user_id)
+    coworker_id = None
+    if coworker_login:
+        coworker_id, _coworker_name, coworker_pct = coworker_login
+        total = round(total * (1 - coworker_pct / 100), 2)
+
     # ── Apply discount code + credits server-side (authoritative — never
     # trust client-computed amounts for the actual charge) ─────────────
     discount_code_raw = (data.get("discount_code") or "").strip()
@@ -11064,11 +11724,11 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 total = round(total - credit_value, 2)
 
     order_id = db_create_order(user_id, username, order_items, total)
-    if credits_applied or applied_discount_code:
+    if credits_applied or applied_discount_code or coworker_id:
         conn = sqlite3.connect(DB_PATH)
         conn.execute(
-            "UPDATE orders SET credits_applied = ?, discount_code = ? WHERE id = ?",
-            (credits_applied or None, applied_discount_code, order_id),
+            "UPDATE orders SET credits_applied = ?, discount_code = ?, coworker_id = ? WHERE id = ?",
+            (credits_applied or None, applied_discount_code, coworker_id, order_id),
         )
         conn.commit()
         conn.close()
@@ -11663,6 +12323,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myorders", my_orders))
+    app.add_handler(CommandHandler("coworker", coworker_login_start))
     app.add_handler(CommandHandler("backupdb", backup_db))
     app.add_handler(CommandHandler("restore", restore_start))
     app.add_handler(CommandHandler("exportimd", export_imd_catalog))
@@ -11768,6 +12429,10 @@ def main():
     app.add_handler(CallbackQueryHandler(ask_resend_start, pattern=r"^askresend:"))
     app.add_handler(CallbackQueryHandler(ask_resend_skip, pattern=r"^askresend_skip:"))
     app.add_handler(CallbackQueryHandler(resend_cred_tap, pattern=r"^resendcred:"))
+    app.add_handler(CallbackQueryHandler(coworker_add_start, pattern=r"^coworker_add$"))
+    app.add_handler(CallbackQueryHandler(coworker_back, pattern=r"^coworker_back$"))
+    app.add_handler(CallbackQueryHandler(coworker_pending_list, pattern=r"^coworker_pending:"))
+    app.add_handler(CallbackQueryHandler(coworker_detail, pattern=r"^coworker:"))
     app.add_handler(CallbackQueryHandler(imd_manual_deliver, pattern=r"^imddeliver:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_start, pattern=r"^imdmancred:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_type_choice, pattern=r"^imdmantype:"))
