@@ -284,6 +284,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
       <button class="ico-btn" title="My Subscriptions" onclick="openOrders()">
         📋<div class="ico-badge vis" id="subsBadge" style="display:none">!</div>
       </button>
+      <button class="ico-btn" title="My Orders" onclick="openMyOrders()">📦</button>
       <button class="ico-btn acc" title="Basket" onclick="openBasket()">
         🧺<div class="ico-badge" id="bc">0</div>
       </button>
@@ -391,6 +392,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
       </div>
     </div>
     <div id="imdSearchResults" style="padding:11px 15px 0"></div>
+  </div>
+</div>
+
+<!-- My Orders sheet (header icon, next to My Subscriptions / Basket) -->
+<div class="overlay" id="myOrdersOverlay" onclick="if(event.target===this)closeMyOrders()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" style="display:flex;align-items:center;justify-content:space-between">
+      <span>📦 My Orders</span>
+      <button class="ico-btn" title="Purchase history" onclick="openPurchaseHistory()" style="width:34px;height:34px;font-size:15px">📊</button>
+    </div>
+    <div id="ordersListContent" style="padding:0 15px 15px"></div>
   </div>
 </div>
 
@@ -1043,14 +1056,9 @@ function switchCat(id){
   catalogLandingDismissed=true;
   const landing=document.getElementById('catLanding'); if(landing) landing.style.display='none';
   CATALOG.forEach(c=>{const el=document.getElementById('cat-'+c.id); if(el) el.style.display='none';});
-  // Orders isn't a CATALOG entry, so the loop above never touches it —
-  // hide it explicitly on every switch, then the block below re-shows it
-  // only when it's actually the target.
-  const ordersEl=document.getElementById('cat-orders'); if(ordersEl) ordersEl.style.display='none';
   document.querySelectorAll('.tabs .tab').forEach(t=>t.classList.toggle('active',t.dataset.catid===id));
   const el=document.getElementById('cat-'+id); if(el) el.style.display='block';
   window.scrollTo(0,0);
-  if(id==='orders') loadOrdersTab();
 }
 
 // ── Orders tab ───────────────────────────────────────────────────────
@@ -1066,33 +1074,30 @@ function withInitData(pathAndQuery){
   const sep = pathAndQuery.includes('?') ? '&' : '?';
   return apiBase()+pathAndQuery+sep+'initData='+encodeURIComponent(tg.initData||'');
 }
-
-function buildOrdersTab(){
-  const tab=document.createElement('button');
-  tab.className='tab';
-  tab.dataset.catid='orders';
-  tab.textContent='📦 Orders';
-  tab.onclick=()=>switchCat('orders');
-  document.getElementById('tabsMore').appendChild(tab);
-
-  const sec=document.createElement('div');
-  sec.id='cat-orders';
-  sec.style.display='none';
-  sec.innerHTML=
-    '<div class="sl" style="display:flex;align-items:center;justify-content:space-between">'+
-      '<span>📦 My Orders</span>'+
-      '<button class="ico-btn" title="Purchase history" onclick="openPurchaseHistory()">📊</button>'+
-    '</div>'+
-    '<div id="ordersListContent"></div>';
-  document.getElementById('catSec').appendChild(sec);
+// Some Telegram clients (older Desktop/Web builds in particular) don't
+// populate the signed initData string the way the mobile apps do, even
+// though the Mini App itself loads fine — without it the server can't
+// safely verify who's asking, so check for it up front with a clear
+// message instead of a bare "Unauthorized" from the API.
+function ordersUnavailableReason(){
+  if(!apiBase()) return "Orders aren't available right now — please try again later.";
+  if(!tg.initData) return "Live order details aren't supported in this version of Telegram — please try again from the Telegram mobile app.";
+  return null;
 }
+
+function openMyOrders(){
+  document.getElementById('myOrdersOverlay').classList.add('on');
+  loadOrdersTab(true); // always refresh on open -- this is live account state, not a catalog tab
+}
+function closeMyOrders(){document.getElementById('myOrdersOverlay').classList.remove('on')}
 
 let ordersLoaded=false;
 async function loadOrdersTab(force){
   if(ordersLoaded && !force) return;
   const el=document.getElementById('ordersListContent');
-  if(!apiBase()){
-    el.innerHTML='<div class="search-empty">Orders aren\'t available right now — please try again later.</div>';
+  const reason=ordersUnavailableReason();
+  if(reason){
+    el.innerHTML='<div class="search-empty">'+escHtml(reason)+'</div>';
     return;
   }
   el.innerHTML='<div class="search-empty">Loading your orders…</div>';
@@ -1135,6 +1140,11 @@ function renderOrdersList(orders){
 async function openOrderDetail(fulfilmentId){
   document.getElementById('orderDetailOverlay').classList.add('on');
   const content=document.getElementById('orderDetailContent');
+  const reason=ordersUnavailableReason();
+  if(reason){
+    content.innerHTML='<div class="search-empty">'+escHtml(reason)+'</div>';
+    return;
+  }
   content.innerHTML='<div class="search-empty">Loading…</div>';
   try{
     const resp=await fetch(withInitData('/api/my_order_detail?fulfilment_id='+fulfilmentId));
@@ -1170,8 +1180,9 @@ function orderTicket(fulfilmentId){
 async function openPurchaseHistory(){
   document.getElementById('historyOverlay').classList.add('on');
   const content=document.getElementById('historyContent');
-  if(!apiBase()){
-    content.innerHTML='<div class="search-empty">History isn\'t available right now — please try again later.</div>';
+  const reason=ordersUnavailableReason();
+  if(reason){
+    content.innerHTML='<div class="search-empty">'+escHtml(reason)+'</div>';
     return;
   }
   content.innerHTML='<div class="search-empty">Loading…</div>';
@@ -1704,7 +1715,6 @@ function buildAdBanner(){
 // ── Init ──────────────────────────────────────────────────────────────
 buildCatalog();
 buildAdBanner();
-buildOrdersTab();
 document.getElementById('landingImg').src=LOGOS.landing;
 document.getElementById('headerLogo').src=LOGOS.landing;
 
