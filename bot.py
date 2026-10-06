@@ -94,7 +94,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "4"
+MINI_APP_VERSION = "5"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -8104,32 +8104,51 @@ def _verify_telegram_init_data(init_data: str, max_age_seconds: int = 86400):
     account credentials, so a plain ?user_id= query param would let
     anyone read anyone else's data just by changing the number."""
     if not init_data:
+        logger.warning("_verify_telegram_init_data: empty initData string")
         return None
+    # Non-strict: a stray/empty segment in a real client's initData must
+    # never nuke the whole check — the hash comparison below is what
+    # actually guarantees authenticity, this is just splitting key=value
+    # pairs out of it.
     try:
-        pairs = dict(parse_qsl(init_data, strict_parsing=True))
+        pairs = dict(parse_qsl(init_data, strict_parsing=False))
     except ValueError:
+        logger.warning("_verify_telegram_init_data: parse_qsl raised on initData (len=%d)", len(init_data))
+        return None
+    if not pairs:
+        logger.warning("_verify_telegram_init_data: initData parsed to zero pairs (len=%d, head=%r)",
+                        len(init_data), init_data[:40])
         return None
 
     received_hash = pairs.pop("hash", None)
     if not received_hash:
+        logger.warning("_verify_telegram_init_data: no hash field — fields present: %s", sorted(pairs.keys()))
         return None
 
     data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
     secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
     computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(computed_hash, received_hash):
+        logger.warning(
+            "_verify_telegram_init_data: hash mismatch — fields present: %s, bot_token_len=%d",
+            sorted(pairs.keys()), len(BOT_TOKEN),
+        )
         return None
 
     try:
         auth_date = int(pairs.get("auth_date", "0"))
     except ValueError:
+        logger.warning("_verify_telegram_init_data: non-numeric auth_date %r", pairs.get("auth_date"))
         return None
     if auth_date <= 0 or time.time() - auth_date > max_age_seconds:
+        logger.warning("_verify_telegram_init_data: stale auth_date (%s, age=%.0fs)",
+                        auth_date, time.time() - auth_date)
         return None
 
     try:
         user = json.loads(pairs.get("user", "{}"))
     except (TypeError, ValueError):
+        logger.warning("_verify_telegram_init_data: could not parse user field %r", pairs.get("user"))
         return None
     if not isinstance(user, dict) or "id" not in user:
         return None
