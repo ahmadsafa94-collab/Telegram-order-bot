@@ -11133,6 +11133,17 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
     duration = data.get("duration")
     is_renew = data.get("is_renew")
 
+    # Sanitize in place — the SAME cleaned values must be used both to fill
+    # the registration form and to build the delivery message sent to the
+    # customer below. Sanitizing only one of those would make them diverge:
+    # the account gets created with one value while the customer is told a
+    # different (if invisibly different) one, so a later login with the
+    # exact text they were given would fail as 'invalid' even though the
+    # registration itself succeeded — which is exactly what happened here.
+    for field in ("username", "password", "email", "prev_username"):
+        if data.get(field) is not None:
+            data[field] = sanitize_imd_field(data[field])
+
     popped = db_pop_serial(duration)
     if not popped:
         duration_label = "1 Year" if duration == "1y" else "6 Months"
@@ -11169,7 +11180,7 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
                 "username": data.get("username"),
                 "password": data.get("password"),
                 "verify_password": data.get("password"),
-                "email": sanitize_imd_email(data.get("email")),
+                "email": data.get("email"),
                 "serial": serial_code,
             },
         )
@@ -11407,22 +11418,26 @@ async def wait_for_challenge(page, attempts: int = 15, interval_ms: int = 3000) 
     return await page.title()
 
 
-def sanitize_imd_email(email: str):
+def sanitize_imd_field(value: str):
     """Strips whitespace AND invisible Unicode format/control characters —
     e.g. the RTL/LTR directional marks (U+200E, U+200F, U+061C, ...) that
     Arabic-locale mobile keyboards commonly insert when switching between
     Arabic and Latin-script text. None of these render visibly, a plain
     .strip() only trims the ends of the string (these can land anywhere,
-    e.g. right before the '@'), and Python's \\s doesn't match most of
-    them either — but Chromium's native HTML5 email validation still
-    rejects them, silently blocking iMD's #submit click from ever posting.
-    The page just sits there re-showing the filled form with no error
-    text, which is exactly what made this look like an unclassifiable
-    "unknown" result."""
-    if not email:
-        return email
+    e.g. right before an email's '@'), and Python's \\s doesn't match most
+    of them either.
+
+    Applied to username/password/email alike before they're used to fill
+    iMD's registration form: a contaminated email just blocks the #submit
+    click (Chromium's native HTML5 validation rejects it outright), but a
+    contaminated username or password is worse — the account still gets
+    created, just with a stored value that silently differs from the
+    clean text the customer was actually told, so every later login
+    attempt with the real (clean) credentials fails as 'invalid'."""
+    if not value:
+        return value
     return "".join(
-        ch for ch in email
+        ch for ch in value
         if not ch.isspace() and unicodedata.category(ch) not in ("Cf", "Cc")
     )
 
