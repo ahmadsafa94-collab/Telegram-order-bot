@@ -461,7 +461,17 @@ const CREDIT_VALUE_USD = 4;
 // on every catalog tile and the cart/checkout total; the server re-applies
 // the real rate authoritatively at checkout regardless.
 const COWORKER_PCT = (SUBS_DATA && SUBS_DATA.cw) || 0;
-const coworkerPrice = (price) => Math.round(price * (1 - COWORKER_PCT / 100) * 100) / 100;
+// Per-item fixed-$ overrides (currently just iMD, keyed by item id) — set
+// from the admin's Coworkers panel instead of the percentage above, since
+// iMD's resale margin doesn't scale the same way a % discount does.
+const COWORKER_ITEM_PRICES = (SUBS_DATA && SUBS_DATA.cwp) || {};
+function hasCoworkerDiscount(itemId){
+  return COWORKER_PCT>0 || (itemId && COWORKER_ITEM_PRICES[itemId]!=null);
+}
+function coworkerPrice(price, itemId){
+  if(itemId && COWORKER_ITEM_PRICES[itemId]!=null) return COWORKER_ITEM_PRICES[itemId];
+  return COWORKER_PCT>0 ? Math.round(price * (1 - COWORKER_PCT / 100) * 100) / 100 : price;
+}
 // Out-of-stock item ids — read once here so makeRow() can render every
 // row (catalog tabs, search results, "Additional Subscriptions") with
 // the correct disabled/✕ state from the moment it's created, not just
@@ -729,8 +739,8 @@ const USA_APPS={
 let cart={};
 let selPay=null,selCountry=null,selApp=null;
 const cartTotal=()=>{
-  const raw=Object.values(cart).reduce((s,i)=>s+i.price*i.qty,0);
-  return COWORKER_PCT>0 ? Math.round(raw*(1-COWORKER_PCT/100)*100)/100 : raw;
+  return Math.round(Object.entries(cart).reduce((s,[id,i])=>
+    s+(hasCoworkerDiscount(id)?coworkerPrice(i.price,id):i.price)*i.qty, 0)*100)/100;
 };
 const cartSize =()=>Object.values(cart).reduce((s,i)=>s+i.qty,0);
 
@@ -979,7 +989,7 @@ function renderBasket(){
   el.innerHTML=items.map(([id,{name,price,qty}])=>
     `<div class="ci">
       <div class="ci-name">${name}${qty>1?` ×${qty}`:''}</div>
-      <div class="ci-price">$${((COWORKER_PCT>0?coworkerPrice(price):price)*qty).toFixed(2)}</div>
+      <div class="ci-price">$${((hasCoworkerDiscount(id)?coworkerPrice(price,id):price)*qty).toFixed(2)}</div>
       <button class="rm" onclick="removeItem('${id}')">×</button>
     </div>`
   ).join('')+
@@ -1040,8 +1050,8 @@ function buildCatalog(){
 function makeRow(itm,solo){
   const d=document.createElement('div'); d.className=solo?'solo':'row';
   const oos=OOS_IDS.has(itm.id);
-  const priceHtml = COWORKER_PCT>0
-    ? `<span style="text-decoration:line-through;color:var(--hint);font-weight:400;font-size:11px;margin-right:3px">$${itm.price}</span>$${coworkerPrice(itm.price)}`
+  const priceHtml = hasCoworkerDiscount(itm.id)
+    ? `<span style="text-decoration:line-through;color:var(--hint);font-weight:400;font-size:11px;margin-right:3px">$${itm.price}</span>$${coworkerPrice(itm.price,itm.id)}`
     : `$${itm.price}`;
   d.innerHTML=`${solo?`<div style="font-size:21px">${itm.e||'📦'}</div>`:''}
     <div class="ri"><div class="rn">${itm.name}</div><div class="rs">${itm.sub||''}</div></div>
@@ -1065,23 +1075,22 @@ function switchCat(id){
 // Live order history, fetched from the bot's own HTTP API (same server
 // that powers the iMD catalog search) rather than embedded in SUBS_DATA —
 // credentials and delivery status need to be current, not a stale
-// snapshot from whenever this page's URL was last generated. Every call
-// is authenticated with Telegram's own initData (validated server-side
-// against the bot token), so one customer can never read another's data
-// by guessing a fulfilment id.
+// snapshot from whenever this page's URL was last generated. Authenticated
+// with a token the BOT itself signed for this user (SUBS_DATA.uid/.tok,
+// see _mini_app_token in bot.py) rather than Telegram's own WebApp
+// initData — that turned out to be unreliable across real clients
+// (customers on the actual mobile app were still hitting "Unauthorized"),
+// while this has no dependency on the client populating anything: the
+// bot already knows who it built this URL for.
 function apiBase(){ return (SUBS_DATA&&SUBS_DATA.api)||''; }
-function withInitData(pathAndQuery){
+function withAuth(pathAndQuery){
   const sep = pathAndQuery.includes('?') ? '&' : '?';
-  return apiBase()+pathAndQuery+sep+'initData='+encodeURIComponent(tg.initData||'');
+  return apiBase()+pathAndQuery+sep+'uid='+encodeURIComponent((SUBS_DATA&&SUBS_DATA.uid)||'')+
+    '&tok='+encodeURIComponent((SUBS_DATA&&SUBS_DATA.tok)||'');
 }
-// Some Telegram clients (older Desktop/Web builds in particular) don't
-// populate the signed initData string the way the mobile apps do, even
-// though the Mini App itself loads fine — without it the server can't
-// safely verify who's asking, so check for it up front with a clear
-// message instead of a bare "Unauthorized" from the API.
 function ordersUnavailableReason(){
   if(!apiBase()) return "Orders aren't available right now — please try again later.";
-  if(!tg.initData) return "Live order details aren't supported in this version of Telegram — please try again from the Telegram mobile app.";
+  if(!(SUBS_DATA&&SUBS_DATA.uid&&SUBS_DATA.tok)) return "Orders aren't available right now — please reopen the Shop from the bot and try again.";
   return null;
 }
 
@@ -1102,7 +1111,7 @@ async function loadOrdersTab(force){
   }
   el.innerHTML='<div class="search-empty">Loading your orders…</div>';
   try{
-    const resp=await fetch(withInitData('/api/my_orders'));
+    const resp=await fetch(withAuth('/api/my_orders'));
     const data=await resp.json();
     if(!resp.ok){
       el.innerHTML='<div class="search-empty">'+escHtml(data.error||'Could not load your orders.')+'</div>';
@@ -1147,7 +1156,7 @@ async function openOrderDetail(fulfilmentId){
   }
   content.innerHTML='<div class="search-empty">Loading…</div>';
   try{
-    const resp=await fetch(withInitData('/api/my_order_detail?fulfilment_id='+fulfilmentId));
+    const resp=await fetch(withAuth('/api/my_order_detail?fulfilment_id='+fulfilmentId));
     const data=await resp.json();
     if(!resp.ok){
       content.innerHTML='<div class="search-empty">'+escHtml(data.error||'Could not load this order.')+'</div>';
@@ -1187,7 +1196,7 @@ async function openPurchaseHistory(){
   }
   content.innerHTML='<div class="search-empty">Loading…</div>';
   try{
-    const resp=await fetch(withInitData('/api/my_purchase_history'));
+    const resp=await fetch(withAuth('/api/my_purchase_history'));
     const data=await resp.json();
     if(!resp.ok){
       content.innerHTML='<div class="search-empty">'+escHtml(data.error||'Could not load your history.')+'</div>';
@@ -1509,7 +1518,7 @@ function buildPaymentPage(){
     });
   const sc=document.getElementById('sumCard');
   sc.innerHTML=Object.entries(cart).map(([id,{name,price,qty}])=>
-    `<div class="sumrow"><div>${name}${qty>1?` ×${qty}`:''}</div><div class="r">$${((COWORKER_PCT>0?coworkerPrice(price):price)*qty).toFixed(2)}</div></div>`
+    `<div class="sumrow"><div>${name}${qty>1?` ×${qty}`:''}</div><div class="r">$${((hasCoworkerDiscount(id)?coworkerPrice(price,id):price)*qty).toFixed(2)}</div></div>`
   ).join('')+`<div class="sumrow"><div>Total</div><div class="r">$${total.toFixed(2)}</div></div>`;
   // (state already reset at top of buildPaymentPage)
 }
