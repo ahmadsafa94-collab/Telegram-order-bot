@@ -39,9 +39,7 @@ import os
 import math
 import re
 import sqlite3
-import time
 from datetime import datetime, timedelta, time as dt_time
-from urllib.parse import parse_qsl
 
 from telegram import (
     InlineKeyboardButton,
@@ -94,7 +92,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "5"
+MINI_APP_VERSION = "6"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -1071,6 +1069,17 @@ def db_init():
         )
         """
     )
+    # iMD is sold at a fixed $ price per coworker instead of their usual
+    # percentage — iMD's real cost doesn't scale the same way the other
+    # subscriptions' resale margin does, so a % discount isn't the right
+    # model there. NULL means "no override set — fall back to the regular
+    # percentage discount", so this is backward compatible with coworkers
+    # created before this existed.
+    for column, coltype in [("imd_6m_price", "REAL"), ("imd_1y_price", "REAL")]:
+        try:
+            conn.execute(f"ALTER TABLE coworkers ADD COLUMN {column} {coltype}")
+        except sqlite3.OperationalError:
+            pass
 
     # coworker_id on orders/users is added later — ALTER TABLE is skipped
     # if the column already exists, same pattern as every other late column
@@ -1617,17 +1626,36 @@ def _hash_coworker_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
-def db_create_coworker(name: str, username: str, password: str, discount_pct: float) -> int:
+def db_create_coworker(name: str, username: str, password: str, discount_pct: float,
+                        imd_6m_price: float = None, imd_1y_price: float = None) -> int:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute(
-        "INSERT INTO coworkers (name, username, password_hash, discount_pct, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (name, username, _hash_coworker_password(password), discount_pct, datetime.utcnow().isoformat()),
+        "INSERT INTO coworkers (name, username, password_hash, discount_pct, created_at, "
+        "imd_6m_price, imd_1y_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (name, username, _hash_coworker_password(password), discount_pct, datetime.utcnow().isoformat(),
+         imd_6m_price, imd_1y_price),
     )
     conn.commit()
     coworker_id = cur.lastrowid
     conn.close()
     return coworker_id
+
+
+_KEEP = object()  # sentinel: "leave this field as it currently is" (vs. None, which means "clear it")
+
+
+def db_set_coworker_imd_prices(coworker_id: int, imd_6m_price, imd_1y_price):
+    """Either argument can be left unchanged by passing the _KEEP sentinel
+    (see coworker_imdprice_field_reply) — only the fields actually being
+    updated are written. Passing None clears that field (reverting that
+    duration back to the regular percentage discount)."""
+    conn = sqlite3.connect(DB_PATH)
+    if imd_6m_price is not _KEEP:
+        conn.execute("UPDATE coworkers SET imd_6m_price = ? WHERE id = ?", (imd_6m_price, coworker_id))
+    if imd_1y_price is not _KEEP:
+        conn.execute("UPDATE coworkers SET imd_1y_price = ? WHERE id = ?", (imd_1y_price, coworker_id))
+    conn.commit()
+    conn.close()
 
 
 def db_coworker_username_taken(username: str) -> bool:
@@ -1655,21 +1683,24 @@ def db_verify_coworker_login(username: str, password: str):
 
 
 def db_list_coworkers():
-    """Returns (id, name, username, discount_pct, created_at) for every
-    coworker, newest first."""
+    """Returns (id, name, username, discount_pct, created_at, imd_6m_price,
+    imd_1y_price) for every coworker, newest first."""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT id, name, username, discount_pct, created_at FROM coworkers ORDER BY id DESC"
+        "SELECT id, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price "
+        "FROM coworkers ORDER BY id DESC"
     ).fetchall()
     conn.close()
     return rows
 
 
 def db_get_coworker(coworker_id: int):
-    """Returns (id, name, username, discount_pct, created_at) or None."""
+    """Returns (id, name, username, discount_pct, created_at, imd_6m_price,
+    imd_1y_price) or None."""
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
-        "SELECT id, name, username, discount_pct, created_at FROM coworkers WHERE id = ?",
+        "SELECT id, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price "
+        "FROM coworkers WHERE id = ?",
         (coworker_id,),
     ).fetchone()
     conn.close()
@@ -1693,12 +1724,12 @@ def db_set_user_coworker(user_id: int, coworker_id: int):
 
 
 def db_get_user_coworker(user_id: int):
-    """Returns (coworker_id, name, discount_pct) if this Telegram user is
-    currently logged in as a coworker, else None."""
+    """Returns (coworker_id, name, discount_pct, imd_6m_price, imd_1y_price)
+    if this Telegram user is currently logged in as a coworker, else None."""
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
-        "SELECT c.id, c.name, c.discount_pct FROM users u JOIN coworkers c ON c.id = u.coworker_id "
-        "WHERE u.user_id = ?",
+        "SELECT c.id, c.name, c.discount_pct, c.imd_6m_price, c.imd_1y_price "
+        "FROM users u JOIN coworkers c ON c.id = u.coworker_id WHERE u.user_id = ?",
         (user_id,),
     ).fetchone()
     conn.close()
@@ -2690,6 +2721,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_discount_field", "discount_data",
     "awaiting_resend_message_for_fulfilment",
     "awaiting_coworker_add_field", "coworker_add_data",
+    "awaiting_coworker_imdprice_field", "coworker_imdprice_coworker_id", "coworker_imdprice_6m",
 ]
 
 def clear_admin_flow_state(user_data: dict):
@@ -2802,6 +2834,15 @@ def _shop_url(user_id: int = 0) -> str:
         # at checkout regardless of what the client displayed.
         coworker_login = db_get_user_coworker(user_id)
         coworker_pct = coworker_login[2] if coworker_login else 0
+        # Per-item iMD price overrides (fixed $, not a %) — iMD's resale
+        # margin doesn't work the same way as the other subscriptions', so
+        # coworkers get a flat price there instead when the admin sets one.
+        coworker_imd_prices = {}
+        if coworker_login:
+            if coworker_login[3] is not None:
+                coworker_imd_prices["imd_6m"] = coworker_login[3]
+            if coworker_login[4] is not None:
+                coworker_imd_prices["imd_1y"] = coworker_login[4]
 
         data = {
             "d": delivered,
@@ -2812,6 +2853,12 @@ def _shop_url(user_id: int = 0) -> str:
             "dc": active_codes,
             "api": BOT_API_URL,
             "cw": coworker_pct,
+            "cwp": coworker_imd_prices,
+            # Self-signed identity for the Mini App's Orders-tab API calls —
+            # see _verify_mini_app_token. Not Telegram's own initData, which
+            # turned out to be unreliable across real clients.
+            "uid": user_id,
+            "tok": _mini_app_token(user_id),
         }
         return f"{MINI_APP_URL}?v={MINI_APP_VERSION}&subs={_encode(data)}"
     except Exception:
@@ -5561,7 +5608,7 @@ async def coworker_login_start(update: Update, context: ContextTypes.DEFAULT_TYP
     pricing in the Mini App from then on."""
     existing = db_get_user_coworker(update.effective_user.id)
     if existing:
-        _, name, discount_pct = existing
+        _, name, discount_pct = existing[0], existing[1], existing[2]
         await update.message.reply_text(
             f"You're already logged in as coworker *{md_escape(name)}* ({discount_pct:.0f}% off).",
             parse_mode=ParseMode.MARKDOWN,
@@ -8099,78 +8146,46 @@ async def http_health(request):
     return web.json_response({"ok": True})
 
 
-def _verify_telegram_init_data(init_data: str, max_age_seconds: int = 86400):
-    """Validates a Telegram WebApp `initData` string against BOT_TOKEN,
-    per Telegram's documented algorithm, and returns the authenticated
-    user dict on success or None on any failure (missing/bad hash,
-    tampered data, stale auth_date).
+def _mini_app_token(user_id: int) -> str:
+    """A short token the bot signs for one specific user, embedded in
+    _shop_url()'s subs= payload alongside everything else already trusted
+    there (credits, discount codes, ...). Used instead of validating
+    Telegram's own WebApp `initData`: that depends on the client actually
+    populating it correctly, which turned out to be unreliable in practice
+    (customers on the real mobile app were still getting "Unauthorized").
+    This has no such dependency — the bot already knows the real user_id
+    for certain (it's building their personal Mini App URL), so it just
+    signs that fact with BOT_TOKEN as the secret."""
+    return hmac.new(BOT_TOKEN.encode(), str(user_id).encode(), hashlib.sha256).hexdigest()
 
-    This is the only safe way to know which Telegram user a Mini App API
-    request is really from. Unlike the open, read-only /api/imd_search
-    endpoint, these endpoints return a customer's own order history and
-    account credentials, so a plain ?user_id= query param would let
-    anyone read anyone else's data just by changing the number."""
-    if not init_data:
-        logger.warning("_verify_telegram_init_data: empty initData string")
+
+def _verify_mini_app_token(uid_str: str, token: str):
+    """Returns the verified user_id (int) if token matches uid_str, else
+    None. The only safe way to know which customer a Mini App API request
+    is really from — these endpoints return a customer's own order
+    history and account credentials, so a plain ?user_id= with no proof
+    would let anyone read anyone else's data just by changing the number."""
+    if not uid_str or not token:
         return None
-    # Non-strict: a stray/empty segment in a real client's initData must
-    # never nuke the whole check — the hash comparison below is what
-    # actually guarantees authenticity, this is just splitting key=value
-    # pairs out of it.
     try:
-        pairs = dict(parse_qsl(init_data, strict_parsing=False))
+        user_id = int(uid_str)
     except ValueError:
-        logger.warning("_verify_telegram_init_data: parse_qsl raised on initData (len=%d)", len(init_data))
         return None
-    if not pairs:
-        logger.warning("_verify_telegram_init_data: initData parsed to zero pairs (len=%d, head=%r)",
-                        len(init_data), init_data[:40])
+    expected = _mini_app_token(user_id)
+    if not hmac.compare_digest(expected, token):
         return None
-
-    received_hash = pairs.pop("hash", None)
-    if not received_hash:
-        logger.warning("_verify_telegram_init_data: no hash field — fields present: %s", sorted(pairs.keys()))
-        return None
-
-    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
-    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-    computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(computed_hash, received_hash):
-        logger.warning(
-            "_verify_telegram_init_data: hash mismatch — fields present: %s, bot_token_len=%d",
-            sorted(pairs.keys()), len(BOT_TOKEN),
-        )
-        return None
-
-    try:
-        auth_date = int(pairs.get("auth_date", "0"))
-    except ValueError:
-        logger.warning("_verify_telegram_init_data: non-numeric auth_date %r", pairs.get("auth_date"))
-        return None
-    if auth_date <= 0 or time.time() - auth_date > max_age_seconds:
-        logger.warning("_verify_telegram_init_data: stale auth_date (%s, age=%.0fs)",
-                        auth_date, time.time() - auth_date)
-        return None
-
-    try:
-        user = json.loads(pairs.get("user", "{}"))
-    except (TypeError, ValueError):
-        logger.warning("_verify_telegram_init_data: could not parse user field %r", pairs.get("user"))
-        return None
-    if not isinstance(user, dict) or "id" not in user:
-        return None
-    return user
+    return user_id
 
 
 async def http_my_orders(request):
     """Every paid order unit for the authenticated customer — the data
     behind the Mini App's Orders tab list."""
     from aiohttp import web
-    user = _verify_telegram_init_data(request.query.get("initData", ""))
-    if not user:
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
         return web.json_response({"error": "Unauthorized"}, status=401, headers=_imd_search_cors_headers())
 
-    rows = db_user_paid_fulfilment_items(user["id"])
+    rows = db_user_paid_fulfilment_items(user_id)
     orders = []
     for fid, order_id, item_id, unit_no, state, created_at in rows:
         name, price = MENU.get(item_id, (item_id, 0))
@@ -8190,8 +8205,8 @@ async def http_my_order_detail(request):
     authenticated customer — ownership-checked, so a fulfilment_id that
     belongs to someone else's order returns 404, never their data."""
     from aiohttp import web
-    user = _verify_telegram_init_data(request.query.get("initData", ""))
-    if not user:
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
         return web.json_response({"error": "Unauthorized"}, status=401, headers=_imd_search_cors_headers())
 
     try:
@@ -8199,7 +8214,7 @@ async def http_my_order_detail(request):
     except ValueError:
         fulfilment_id = 0
 
-    row = db_fulfilment_detail_for_user(fulfilment_id, user["id"])
+    row = db_fulfilment_detail_for_user(fulfilment_id, user_id)
     if not row:
         return web.json_response({"error": "Not found"}, status=404, headers=_imd_search_cors_headers())
 
@@ -8211,7 +8226,7 @@ async def http_my_order_detail(request):
         # The real delivered message, not the originally-submitted form
         # data — iMD auto-registration in particular can end up with a
         # different username than what the customer first typed.
-        for _, d_order_id, d_item_id, message, _delivered_at in db_user_deliveries(user["id"]):
+        for _, d_order_id, d_item_id, message, _delivered_at in db_user_deliveries(user_id):
             if d_order_id == order_id and d_item_id == item_id:
                 credentials = message
                 break
@@ -8236,11 +8251,11 @@ async def http_my_purchase_history(request):
     """Day/month/year/lifetime order count + spend for the authenticated
     customer — the data behind the Orders tab's history icon."""
     from aiohttp import web
-    user = _verify_telegram_init_data(request.query.get("initData", ""))
-    if not user:
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
         return web.json_response({"error": "Unauthorized"}, status=401, headers=_imd_search_cors_headers())
 
-    history = db_user_purchase_history(user["id"])
+    history = db_user_purchase_history(user_id)
     return web.json_response(history, headers=_imd_search_cors_headers())
 
 
@@ -8607,7 +8622,7 @@ def _paid_label(status: str, paid_at: str) -> str:
 def _coworkers_list_text_and_buttons():
     rows = db_list_coworkers()
     buttons = []
-    for coworker_id, name, username, discount_pct, created_at in rows:
+    for coworker_id, name, username, discount_pct, created_at, _imd6, _imd1 in rows:
         orders_count, revenue, pending_count = db_coworker_stats(coworker_id)
         label = f"{name} — {discount_pct:.0f}% off · {orders_count} orders"
         if pending_count:
@@ -8688,21 +8703,69 @@ async def coworker_add_field_reply(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("Discount percentage for this coworker (e.g. 15 for 15% off):")
         return
 
-    # field == "discount_pct"
-    try:
-        pct = float(text)
-        if not (0 < pct <= 100):
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("Send a number between 1 and 100:")
+    if field == "discount_pct":
+        try:
+            pct = float(text)
+            if not (0 < pct <= 100):
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Send a number between 1 and 100:")
+            return
+        data["discount_pct"] = pct
+        context.user_data["coworker_add_data"] = data
+        context.user_data["awaiting_coworker_add_field"] = "imd_6m_price"
+        await update.message.reply_text(
+            f"{CURRENCY} iMD 6-Month price for this coworker (iMD uses a fixed price per coworker, "
+            "not the percentage above) — send a number, or /skip to use the percentage instead:"
+        )
         return
 
-    coworker_id = db_create_coworker(data["name"], data["username"], data["password"], pct)
+    if field == "imd_6m_price":
+        if text != "/skip":
+            try:
+                price = float(text)
+                if price < 0:
+                    raise ValueError
+            except ValueError:
+                await update.message.reply_text("Send a number, or /skip:")
+                return
+            data["imd_6m_price"] = price
+        context.user_data["coworker_add_data"] = data
+        context.user_data["awaiting_coworker_add_field"] = "imd_1y_price"
+        await update.message.reply_text(
+            f"{CURRENCY} iMD 1-Year price for this coworker — send a number, or /skip to use the percentage instead:"
+        )
+        return
+
+    # field == "imd_1y_price"
+    if text != "/skip":
+        try:
+            price = float(text)
+            if price < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Send a number, or /skip:")
+            return
+        data["imd_1y_price"] = price
+
+    pct = data["discount_pct"]
+    coworker_id = db_create_coworker(
+        data["name"], data["username"], data["password"], pct,
+        imd_6m_price=data.get("imd_6m_price"), imd_1y_price=data.get("imd_1y_price"),
+    )
     context.user_data.pop("awaiting_coworker_add_field", None)
     context.user_data.pop("coworker_add_data", None)
+
+    imd_lines = []
+    imd_lines.append(f"iMD 6-Month: {CURRENCY}{data['imd_6m_price']:.2f}" if "imd_6m_price" in data
+                      else f"iMD 6-Month: {pct:.0f}% off (no override set)")
+    imd_lines.append(f"iMD 1-Year: {CURRENCY}{data['imd_1y_price']:.2f}" if "imd_1y_price" in data
+                      else f"iMD 1-Year: {pct:.0f}% off (no override set)")
+
     await update.message.reply_text(
-        f"✅ Coworker *{md_escape(data['name'])}* created with {pct:.0f}% off.\n\n"
-        f"Username: `{data['username']}`\nPassword: `{data['password']}`\n\n"
+        f"✅ Coworker *{md_escape(data['name'])}* created with {pct:.0f}% off.\n"
+        + "\n".join(imd_lines) +
+        f"\n\nUsername: `{data['username']}`\nPassword: `{data['password']}`\n\n"
         "Share these with them — they log in from the bot with /coworker.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -8724,12 +8787,16 @@ async def coworker_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("That coworker no longer exists.", reply_markup=back)
         return
 
-    _, name, username, discount_pct, created_at = coworker
+    _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price = coworker
     orders_count, revenue, pending_count = db_coworker_stats(coworker_id)
+    imd_6m_label = f"{CURRENCY}{imd_6m_price:.2f}" if imd_6m_price is not None else f"{discount_pct:.0f}% off (no override)"
+    imd_1y_label = f"{CURRENCY}{imd_1y_price:.2f}" if imd_1y_price is not None else f"{discount_pct:.0f}% off (no override)"
     text = (
         f"👥 {name}\n"
         f"Username: {username}\n"
         f"Discount: {discount_pct:.0f}% off\n"
+        f"iMD 6-Month: {imd_6m_label}\n"
+        f"iMD 1-Year: {imd_1y_label}\n"
         f"Added: {created_at[:10]}\n\n"
         f"Orders: {orders_count}\n"
         f"Revenue: {CURRENCY}{revenue:.2f}\n"
@@ -8740,6 +8807,9 @@ async def coworker_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append(
             [InlineKeyboardButton(f"⏳ Pending Orders ({pending_count})", callback_data=f"coworker_pending:{coworker_id}")]
         )
+    buttons.append(
+        [InlineKeyboardButton("✏️ Edit iMD Prices", callback_data=f"coworker_imdprice:{coworker_id}")]
+    )
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="coworker_back")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -8779,6 +8849,88 @@ async def coworker_pending_list(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(
         f"{coworker[1]}'s pending orders:\n📝 = ready to deliver   ⌛ = waiting on customer",
         reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def coworker_imdprice_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '✏️ Edit iMD Prices' — walks 6-Month then 1-Year,
+    each either a new fixed price, /clear to remove the override
+    (reverting that duration back to the percentage discount), or /skip
+    to leave it unchanged."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    coworker_id = int(query.data.split(":", 1)[1])
+    coworker = db_get_coworker(coworker_id)
+    if not coworker:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That coworker no longer exists.")
+        return
+
+    clear_admin_flow_state(context.user_data)
+    context.user_data["awaiting_coworker_imdprice_field"] = "imd_6m_price"
+    context.user_data["coworker_imdprice_coworker_id"] = coworker_id
+
+    _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price = coworker
+    current = f"{CURRENCY}{imd_6m_price:.2f}" if imd_6m_price is not None else f"not set (using {discount_pct:.0f}% off)"
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=(
+            f"iMD 6-Month price for {name} — currently {current}.\n"
+            "Send a new price, /clear to remove the override, or /skip to leave unchanged:"
+        ),
+    )
+
+
+async def coworker_imdprice_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Walks imd_6m_price -> imd_1y_price, one message at a time, then
+    saves whichever fields weren't left as /skip."""
+    field = context.user_data.get("awaiting_coworker_imdprice_field")
+    coworker_id = context.user_data.get("coworker_imdprice_coworker_id")
+    if not field or not coworker_id:
+        return
+    text = update.message.text.strip()
+
+    if text == "/skip":
+        value = _KEEP
+    elif text == "/clear":
+        value = None
+    else:
+        try:
+            value = float(text)
+            if value < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Send a number, /clear, or /skip:")
+            return
+
+    if field == "imd_6m_price":
+        context.user_data["coworker_imdprice_6m"] = value
+        context.user_data["awaiting_coworker_imdprice_field"] = "imd_1y_price"
+        coworker = db_get_coworker(coworker_id)
+        _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price = coworker
+        current = f"{CURRENCY}{imd_1y_price:.2f}" if imd_1y_price is not None else f"not set (using {discount_pct:.0f}% off)"
+        await update.message.reply_text(
+            f"iMD 1-Year price for {name} — currently {current}.\n"
+            "Send a new price, /clear to remove the override, or /skip to leave unchanged:"
+        )
+        return
+
+    # field == "imd_1y_price"
+    imd_6m_value = context.user_data.pop("coworker_imdprice_6m", _KEEP)
+    context.user_data.pop("awaiting_coworker_imdprice_field", None)
+    context.user_data.pop("coworker_imdprice_coworker_id", None)
+
+    db_set_coworker_imd_prices(coworker_id, imd_6m_value, value)
+
+    coworker = db_get_coworker(coworker_id)
+    _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price = coworker
+    imd_6m_label = f"{CURRENCY}{imd_6m_price:.2f}" if imd_6m_price is not None else f"{discount_pct:.0f}% off (no override)"
+    imd_1y_label = f"{CURRENCY}{imd_1y_price:.2f}" if imd_1y_price is not None else f"{discount_pct:.0f}% off (no override)"
+    await update.message.reply_text(
+        f"✅ Updated {name}'s iMD pricing.\niMD 6-Month: {imd_6m_label}\niMD 1-Year: {imd_1y_label}"
     )
 
 
@@ -9945,6 +10097,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if context.user_data.get("awaiting_coworker_add_field"):
             await coworker_add_field_reply(update, context)
+            return
+        if context.user_data.get("awaiting_coworker_imdprice_field"):
+            await coworker_imdprice_field_reply(update, context)
             return
         if context.user_data.get("awaiting_edit_delivery"):
             await edit_delivery_reply(update, context)
@@ -11714,18 +11869,27 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("None of your items are available right now.\n" + "\n".join(skipped))
         return
 
-    total = sum(MENU[i][1] * q for i, q in order_items.items())
-
     # ── Apply the coworker discount server-side, before anything else —
     # never trust a client-sent discount; look up whether THIS Telegram
     # account is currently logged in as a coworker (via /coworker) and, if
-    # so, apply their admin-set rate. Stacks with a discount code/credits
-    # entered on top, same as those already stack with each other below.
+    # so, price each item individually: iMD uses the coworker's fixed $
+    # price when the admin set one (its resale margin doesn't work the
+    # same way as a % discount), everything else uses their percentage.
+    # Stacks with a discount code/credits entered on top, same as those
+    # already stack with each other below.
     coworker_login = db_get_user_coworker(user_id)
     coworker_id = None
     if coworker_login:
-        coworker_id, _coworker_name, coworker_pct = coworker_login
-        total = round(total * (1 - coworker_pct / 100), 2)
+        coworker_id, _coworker_name, coworker_pct, imd_6m_price, imd_1y_price = coworker_login
+        imd_fixed_prices = {"imd_6m": imd_6m_price, "imd_1y": imd_1y_price}
+        total = 0.0
+        for item_id, qty in order_items.items():
+            fixed = imd_fixed_prices.get(item_id)
+            unit_price = fixed if fixed is not None else round(MENU[item_id][1] * (1 - coworker_pct / 100), 2)
+            total += unit_price * qty
+        total = round(total, 2)
+    else:
+        total = sum(MENU[i][1] * q for i, q in order_items.items())
 
     # ── Apply discount code + credits server-side (authoritative — never
     # trust client-computed amounts for the actual charge) ─────────────
@@ -12458,6 +12622,7 @@ def main():
     app.add_handler(CallbackQueryHandler(coworker_add_start, pattern=r"^coworker_add$"))
     app.add_handler(CallbackQueryHandler(coworker_back, pattern=r"^coworker_back$"))
     app.add_handler(CallbackQueryHandler(coworker_pending_list, pattern=r"^coworker_pending:"))
+    app.add_handler(CallbackQueryHandler(coworker_imdprice_start, pattern=r"^coworker_imdprice:"))
     app.add_handler(CallbackQueryHandler(coworker_detail, pattern=r"^coworker:"))
     app.add_handler(CallbackQueryHandler(imd_manual_deliver, pattern=r"^imddeliver:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_start, pattern=r"^imdmancred:"))
