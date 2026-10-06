@@ -11168,7 +11168,7 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
                 "username": data.get("username"),
                 "password": data.get("password"),
                 "verify_password": data.get("password"),
-                "email": data.get("email"),
+                "email": sanitize_imd_email(data.get("email")),
                 "serial": serial_code,
             },
         )
@@ -11397,6 +11397,20 @@ async def wait_for_challenge(page, attempts: int = 15, interval_ms: int = 3000) 
             return title
         await page.wait_for_timeout(interval_ms)
     return await page.title()
+
+
+def sanitize_imd_email(email: str):
+    """Strips ALL whitespace, not just leading/trailing — a stray space
+    from a mobile keyboard's autocomplete (e.g. "name @gmail.com") passes
+    through a plain .strip() untouched (it's not at either end of the
+    string) but still fails Chromium's native HTML5 email validation when
+    filled into iMD's registration form. That blocks the #submit click
+    from ever posting, with no error text for classify_imd_result to read
+    — the page just sits there re-showing the filled form, which is
+    exactly what made this look like an unclassifiable "unknown" result."""
+    if not email:
+        return email
+    return re.sub(r"\s+", "", email)
 
 
 async def attempt_imd_action(url: str, field_map: dict, values: dict, warmup_url: str = None):
