@@ -5597,10 +5597,17 @@ async def coworker_field_reply(update: Update, context: ContextTypes.DEFAULT_TYP
 
     coworker_id, name, discount_pct = result
     db_set_user_coworker(update.effective_user.id, coworker_id)
+    # The SHOP button's Mini App URL is baked in at send time (ReplyKeyboardMarkup
+    # buttons are static), so without resending the keyboard here the customer's
+    # existing button would keep pointing at the pre-login URL — no coworker_pct
+    # embedded, no discount shown — until some unrelated message happened to
+    # refresh it. Sending a fresh keyboard right now makes the discount show up
+    # the moment they tap Shop, matching what the message below promises.
     await update.message.reply_text(
         f"✅ Logged in as coworker *{md_escape(name)}*. You now get {discount_pct:.0f}% off every "
         "subscription — open the shop to see the discounted prices.",
         parse_mode=ParseMode.MARKDOWN,
+        reply_markup=main_menu_keyboard(update.effective_user.id),
     )
 
 
