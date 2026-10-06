@@ -38,6 +38,7 @@ import logging
 import os
 import math
 import re
+import unicodedata
 import sqlite3
 from datetime import datetime, timedelta, time as dt_time
 
@@ -11336,12 +11337,19 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
     )
 
     who = data.get("prev_username") if is_renew else data.get("username")
+    # Shows the RAW stored value's exact characters (repr escapes anything
+    # invisible — directional marks, zero-width spaces, etc. — as \uXXXX)
+    # so a future case outside what sanitize_imd_email already strips is
+    # diagnosable straight from this message, without another screenshot
+    # round-trip.
+    raw_email_line = f"Raw email (exact chars): {data.get('email')!r}\n" if not is_renew else ""
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
         text=(
             f"⚠️ COULD NOT CONFIRM — Order #{order_id} ({action_label})\n\n"
             f"Nothing was sent to the customer and serial {serial_code} went back to the pool.\n\n"
             f"Username: {who}\n"
+            f"{raw_email_line}"
             f"Serial to use: {serial_code} (still available in the pool)\n\n"
             f"Register this manually on iMD, then tap 📤 Send iMD Details Now to deliver it.\n\n{detail}"
         ),
@@ -11400,17 +11408,23 @@ async def wait_for_challenge(page, attempts: int = 15, interval_ms: int = 3000) 
 
 
 def sanitize_imd_email(email: str):
-    """Strips ALL whitespace, not just leading/trailing — a stray space
-    from a mobile keyboard's autocomplete (e.g. "name @gmail.com") passes
-    through a plain .strip() untouched (it's not at either end of the
-    string) but still fails Chromium's native HTML5 email validation when
-    filled into iMD's registration form. That blocks the #submit click
-    from ever posting, with no error text for classify_imd_result to read
-    — the page just sits there re-showing the filled form, which is
-    exactly what made this look like an unclassifiable "unknown" result."""
+    """Strips whitespace AND invisible Unicode format/control characters —
+    e.g. the RTL/LTR directional marks (U+200E, U+200F, U+061C, ...) that
+    Arabic-locale mobile keyboards commonly insert when switching between
+    Arabic and Latin-script text. None of these render visibly, a plain
+    .strip() only trims the ends of the string (these can land anywhere,
+    e.g. right before the '@'), and Python's \\s doesn't match most of
+    them either — but Chromium's native HTML5 email validation still
+    rejects them, silently blocking iMD's #submit click from ever posting.
+    The page just sits there re-showing the filled form with no error
+    text, which is exactly what made this look like an unclassifiable
+    "unknown" result."""
     if not email:
         return email
-    return re.sub(r"\s+", "", email)
+    return "".join(
+        ch for ch in email
+        if not ch.isspace() and unicodedata.category(ch) not in ("Cf", "Cc")
+    )
 
 
 async def attempt_imd_action(url: str, field_map: dict, values: dict, warmup_url: str = None):
