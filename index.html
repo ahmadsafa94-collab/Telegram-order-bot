@@ -394,6 +394,24 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   </div>
 </div>
 
+<!-- Order detail sheet (Orders tab) -->
+<div class="overlay" id="orderDetailOverlay" onclick="if(event.target===this)closeOrderDetail()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">📦 Order Details</div>
+    <div id="orderDetailContent" style="padding:0 15px 15px"></div>
+  </div>
+</div>
+
+<!-- Purchase history sheet (Orders tab) -->
+<div class="overlay" id="historyOverlay" onclick="if(event.target===this)closePurchaseHistory()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">📊 Purchase History</div>
+    <div id="historyContent" style="padding:0 15px 15px"></div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -425,6 +443,12 @@ try {
 const CREDITS_BALANCE = (SUBS_DATA && SUBS_DATA.cr) || 0;
 const DISCOUNT_CODES = (SUBS_DATA && SUBS_DATA.dc) || {};
 const CREDIT_VALUE_USD = 4;
+// Coworker discount — set when this Telegram account is logged in via
+// /coworker (bot.py's _shop_url). Applied to both the per-item price shown
+// on every catalog tile and the cart/checkout total; the server re-applies
+// the real rate authoritatively at checkout regardless.
+const COWORKER_PCT = (SUBS_DATA && SUBS_DATA.cw) || 0;
+const coworkerPrice = (price) => Math.round(price * (1 - COWORKER_PCT / 100) * 100) / 100;
 // Out-of-stock item ids — read once here so makeRow() can render every
 // row (catalog tabs, search results, "Additional Subscriptions") with
 // the correct disabled/✕ state from the moment it's created, not just
@@ -691,7 +715,10 @@ const USA_APPS={
 // ── Cart ──────────────────────────────────────────────────────────────
 let cart={};
 let selPay=null,selCountry=null,selApp=null;
-const cartTotal=()=>Object.values(cart).reduce((s,i)=>s+i.price*i.qty,0);
+const cartTotal=()=>{
+  const raw=Object.values(cart).reduce((s,i)=>s+i.price*i.qty,0);
+  return COWORKER_PCT>0 ? Math.round(raw*(1-COWORKER_PCT/100)*100)/100 : raw;
+};
 const cartSize =()=>Object.values(cart).reduce((s,i)=>s+i.qty,0);
 
 function addItem(id){
@@ -939,7 +966,7 @@ function renderBasket(){
   el.innerHTML=items.map(([id,{name,price,qty}])=>
     `<div class="ci">
       <div class="ci-name">${name}${qty>1?` ×${qty}`:''}</div>
-      <div class="ci-price">$${(price*qty).toFixed(2)}</div>
+      <div class="ci-price">$${((COWORKER_PCT>0?coworkerPrice(price):price)*qty).toFixed(2)}</div>
       <button class="rm" onclick="removeItem('${id}')">×</button>
     </div>`
   ).join('')+
@@ -1000,9 +1027,12 @@ function buildCatalog(){
 function makeRow(itm,solo){
   const d=document.createElement('div'); d.className=solo?'solo':'row';
   const oos=OOS_IDS.has(itm.id);
+  const priceHtml = COWORKER_PCT>0
+    ? `<span style="text-decoration:line-through;color:var(--hint);font-weight:400;font-size:11px;margin-right:3px">$${itm.price}</span>$${coworkerPrice(itm.price)}`
+    : `$${itm.price}`;
   d.innerHTML=`${solo?`<div style="font-size:21px">${itm.e||'📦'}</div>`:''}
     <div class="ri"><div class="rn">${itm.name}</div><div class="rs">${itm.sub||''}</div></div>
-    <div class="rp">$${itm.price}</div>
+    <div class="rp">${priceHtml}</div>
     <button class="add-btn${oos?' oos':''}" id="ab-${itm.id}" ${oos?'disabled':''} onclick="${oos?"event.stopPropagation();showToast('Out of stock')":`addItem('${itm.id}')`}">${oos?'✕':'+'}</button>`;
   return d;
 }
@@ -1013,10 +1043,154 @@ function switchCat(id){
   catalogLandingDismissed=true;
   const landing=document.getElementById('catLanding'); if(landing) landing.style.display='none';
   CATALOG.forEach(c=>{const el=document.getElementById('cat-'+c.id); if(el) el.style.display='none';});
+  // Orders isn't a CATALOG entry, so the loop above never touches it —
+  // hide it explicitly on every switch, then the block below re-shows it
+  // only when it's actually the target.
+  const ordersEl=document.getElementById('cat-orders'); if(ordersEl) ordersEl.style.display='none';
   document.querySelectorAll('.tabs .tab').forEach(t=>t.classList.toggle('active',t.dataset.catid===id));
   const el=document.getElementById('cat-'+id); if(el) el.style.display='block';
   window.scrollTo(0,0);
+  if(id==='orders') loadOrdersTab();
 }
+
+// ── Orders tab ───────────────────────────────────────────────────────
+// Live order history, fetched from the bot's own HTTP API (same server
+// that powers the iMD catalog search) rather than embedded in SUBS_DATA —
+// credentials and delivery status need to be current, not a stale
+// snapshot from whenever this page's URL was last generated. Every call
+// is authenticated with Telegram's own initData (validated server-side
+// against the bot token), so one customer can never read another's data
+// by guessing a fulfilment id.
+function apiBase(){ return (SUBS_DATA&&SUBS_DATA.api)||''; }
+function withInitData(pathAndQuery){
+  const sep = pathAndQuery.includes('?') ? '&' : '?';
+  return apiBase()+pathAndQuery+sep+'initData='+encodeURIComponent(tg.initData||'');
+}
+
+function buildOrdersTab(){
+  const tab=document.createElement('button');
+  tab.className='tab';
+  tab.dataset.catid='orders';
+  tab.textContent='📦 Orders';
+  tab.onclick=()=>switchCat('orders');
+  document.getElementById('tabsMore').appendChild(tab);
+
+  const sec=document.createElement('div');
+  sec.id='cat-orders';
+  sec.style.display='none';
+  sec.innerHTML=
+    '<div class="sl" style="display:flex;align-items:center;justify-content:space-between">'+
+      '<span>📦 My Orders</span>'+
+      '<button class="ico-btn" title="Purchase history" onclick="openPurchaseHistory()">📊</button>'+
+    '</div>'+
+    '<div id="ordersListContent"></div>';
+  document.getElementById('catSec').appendChild(sec);
+}
+
+let ordersLoaded=false;
+async function loadOrdersTab(force){
+  if(ordersLoaded && !force) return;
+  const el=document.getElementById('ordersListContent');
+  if(!apiBase()){
+    el.innerHTML='<div class="search-empty">Orders aren\'t available right now — please try again later.</div>';
+    return;
+  }
+  el.innerHTML='<div class="search-empty">Loading your orders…</div>';
+  try{
+    const resp=await fetch(withInitData('/api/my_orders'));
+    const data=await resp.json();
+    if(!resp.ok){
+      el.innerHTML='<div class="search-empty">'+escHtml(data.error||'Could not load your orders.')+'</div>';
+      return;
+    }
+    ordersLoaded=true;
+    renderOrdersList(data.orders||[]);
+  }catch(e){
+    el.innerHTML='<div class="search-empty">Could not load your orders: '+escHtml(e.message||String(e))+'</div>';
+  }
+}
+
+function renderOrdersList(orders){
+  const el=document.getElementById('ordersListContent');
+  if(!orders.length){
+    el.innerHTML='<div class="empty-sheet"><div class="eico">📦</div>You don\'t have any orders yet.</div>';
+    return;
+  }
+  el.innerHTML=orders.map(o=>{
+    const statusLabel = o.status==='delivered' ? '🟢 Delivered' : '🟡 Pending';
+    const date=(o.date||'').slice(0,10);
+    return '<div class="card" style="cursor:pointer" onclick="openOrderDetail('+o.fulfilment_id+')">'+
+      '<div class="row" style="border-bottom:none">'+
+        '<div class="ri"><div class="rn">'+escHtml(o.name)+'</div>'+
+          '<div class="rs">Order #'+o.order_id+' · '+date+'</div></div>'+
+        '<div style="text-align:right;flex-shrink:0">'+
+          '<div class="rp">$'+o.price+'</div>'+
+          '<div style="font-size:11px;color:var(--hint);margin-top:2px">'+statusLabel+'</div>'+
+        '</div>'+
+      '</div>'+
+    '</div>';
+  }).join('');
+}
+
+async function openOrderDetail(fulfilmentId){
+  document.getElementById('orderDetailOverlay').classList.add('on');
+  const content=document.getElementById('orderDetailContent');
+  content.innerHTML='<div class="search-empty">Loading…</div>';
+  try{
+    const resp=await fetch(withInitData('/api/my_order_detail?fulfilment_id='+fulfilmentId));
+    const data=await resp.json();
+    if(!resp.ok){
+      content.innerHTML='<div class="search-empty">'+escHtml(data.error||'Could not load this order.')+'</div>';
+      return;
+    }
+    const statusLabel = data.status==='delivered' ? '🟢 Delivered' : '🟡 Pending';
+    content.innerHTML=
+      '<div class="sumrow"><div>Order</div><div class="r">#'+data.order_id+'</div></div>'+
+      '<div class="sumrow"><div>Subscription</div><div class="r">'+escHtml(data.name)+'</div></div>'+
+      '<div class="sumrow"><div>Date Requested</div><div class="r">'+(data.date||'').slice(0,10)+'</div></div>'+
+      '<div class="sumrow"><div>Price Paid</div><div class="r">$'+data.price+'</div></div>'+
+      '<div class="sumrow"><div>Status</div><div class="r">'+statusLabel+'</div></div>'+
+      '<div class="sl" style="margin-top:14px">Credentials</div>'+
+      '<div class="card" style="padding:11px 13px;white-space:pre-wrap;font-size:13px;line-height:1.6">'+
+        escHtml(data.credentials||'')+
+      '</div>'+
+      '<button class="btn" style="margin-top:12px" onclick="orderTicket('+data.fulfilment_id+')">🎫 Open a Ticket About This Order</button>';
+  }catch(e){
+    content.innerHTML='<div class="search-empty">Could not load this order: '+escHtml(e.message||String(e))+'</div>';
+  }
+}
+function closeOrderDetail(){document.getElementById('orderDetailOverlay').classList.remove('on')}
+
+function orderTicket(fulfilmentId){
+  tg.sendData(JSON.stringify({action:'order_ticket', fulfilment_id: fulfilmentId}));
+  closeOrderDetail();
+  showToast('Opening a ticket in chat…');
+}
+
+async function openPurchaseHistory(){
+  document.getElementById('historyOverlay').classList.add('on');
+  const content=document.getElementById('historyContent');
+  if(!apiBase()){
+    content.innerHTML='<div class="search-empty">History isn\'t available right now — please try again later.</div>';
+    return;
+  }
+  content.innerHTML='<div class="search-empty">Loading…</div>';
+  try{
+    const resp=await fetch(withInitData('/api/my_purchase_history'));
+    const data=await resp.json();
+    if(!resp.ok){
+      content.innerHTML='<div class="search-empty">'+escHtml(data.error||'Could not load your history.')+'</div>';
+      return;
+    }
+    const row=(label,bucket)=>'<div class="sumrow"><div>'+label+'</div><div class="r">'+
+      bucket.count+' order'+(bucket.count!==1?'s':'')+' · $'+bucket.total.toFixed(2)+'</div></div>';
+    content.innerHTML = row('Today', data.day) + row('This Month', data.month) +
+      row('This Year', data.year) + row('Lifetime', data.lifetime);
+  }catch(e){
+    content.innerHTML='<div class="search-empty">Could not load your history: '+escHtml(e.message||String(e))+'</div>';
+  }
+}
+function closePurchaseHistory(){document.getElementById('historyOverlay').classList.remove('on')}
 
 // ── Search ────────────────────────────────────────────────────────────
 // Live filter across every catalog item (built-in and admin-added custom
@@ -1324,7 +1498,7 @@ function buildPaymentPage(){
     });
   const sc=document.getElementById('sumCard');
   sc.innerHTML=Object.entries(cart).map(([id,{name,price,qty}])=>
-    `<div class="sumrow"><div>${name}${qty>1?` ×${qty}`:''}</div><div class="r">$${(price*qty).toFixed(2)}</div></div>`
+    `<div class="sumrow"><div>${name}${qty>1?` ×${qty}`:''}</div><div class="r">$${((COWORKER_PCT>0?coworkerPrice(price):price)*qty).toFixed(2)}</div></div>`
   ).join('')+`<div class="sumrow"><div>Total</div><div class="r">$${total.toFixed(2)}</div></div>`;
   // (state already reset at top of buildPaymentPage)
 }
@@ -1530,6 +1704,7 @@ function buildAdBanner(){
 // ── Init ──────────────────────────────────────────────────────────────
 buildCatalog();
 buildAdBanner();
+buildOrdersTab();
 document.getElementById('landingImg').src=LOGOS.landing;
 document.getElementById('headerLogo').src=LOGOS.landing;
 
