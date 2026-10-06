@@ -11155,13 +11155,13 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
         # was being Cloudflare-challenged harder than the register page.
         # That's been fixed on iMD's side, so this goes back to a direct
         # call, same as registration.
-        status, detail, page_text = await attempt_imd_action(
+        status, detail, page_text, screenshot_bytes = await attempt_imd_action(
             IMD_RENEW_URL,
             IMD_RENEW_FIELD_MAP,
             {"username": data.get("prev_username"), "serial": serial_code},
         )
     else:
-        status, detail, page_text = await attempt_imd_action(
+        status, detail, page_text, screenshot_bytes = await attempt_imd_action(
             IMD_REGISTER_URL,
             IMD_REGISTER_FIELD_MAP,
             {
@@ -11347,6 +11347,19 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
         ),
         reply_markup=InlineKeyboardMarkup(fallback_buttons),
     )
+    # A screenshot of exactly what page the automation landed on — the page
+    # text alone often isn't enough to diagnose an "unknown" result (e.g.
+    # iMD adding a CAPTCHA or a new required field would bounce the form
+    # back to something that looks almost blank in plain text).
+    if screenshot_bytes:
+        try:
+            await context.bot.send_photo(
+                chat_id=ADMIN_CHAT_ID,
+                photo=screenshot_bytes,
+                caption=f"Page after submitting — order #{order_id} ({action_label})",
+            )
+        except Exception:
+            logger.exception("Failed to send iMD diagnostic screenshot for order #%s", order_id)
 
 
 def classify_imd_result(page_text: str) -> str:
@@ -11443,7 +11456,7 @@ async def attempt_imd_action(url: str, field_map: dict, values: dict, warmup_url
             if "Just a moment" in title:
                 content = await page.content()
                 await browser.close()
-                return "error", f"Still blocked by Cloudflare before the form loaded. Title: {title}\n{content[:500]}", ""
+                return "error", f"Still blocked by Cloudflare before the form loaded. Title: {title}\n{content[:500]}", "", None
 
             for key, field_name in field_map.items():
                 if key in values and values[key] is not None:
@@ -11463,18 +11476,31 @@ async def attempt_imd_action(url: str, field_map: dict, values: dict, warmup_url
                     "Could not read the result — still on a Cloudflare challenge page after waiting 45s. "
                     "The action may or may not have gone through; please verify manually.\n"
                     f"Title: {result_title}\n{content[:400]}"
-                ), ""
+                ), "", None
 
             body_text = await page.inner_text("body")
             content = await page.content()
+            status = classify_imd_result(body_text)
+
+            # A screenshot is only worth the extra round-trip when we can't
+            # already tell what happened from the text — this is exactly the
+            # case where the admin has nothing else to go on (e.g. the page
+            # changed to add a CAPTCHA/new field and now just bounces back to
+            # a near-empty form instead of a real result/error message).
+            screenshot_bytes = None
+            if status == "unknown":
+                try:
+                    screenshot_bytes = await page.screenshot(full_page=True)
+                except Exception:
+                    screenshot_bytes = None
+
             await browser.close()
 
-            status = classify_imd_result(body_text)
             snippet = body_text[:600].replace("\n", " ").strip() or content[:600]
-            return status, f"Page title: {result_title}\nPage said:\n{snippet}", body_text
+            return status, f"Page title: {result_title}\nPage said:\n{snippet}", body_text, screenshot_bytes
 
     except Exception as exc:
-        return "error", f"Browser automation failed: {exc}", ""
+        return "error", f"Browser automation failed: {exc}", "", None
 
 
 def extract_valid_until(page_text: str):
