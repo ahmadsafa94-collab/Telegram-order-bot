@@ -1658,11 +1658,35 @@ def db_set_coworker_imd_prices(coworker_id: int, imd_6m_price, imd_1y_price):
     conn.close()
 
 
-def db_coworker_username_taken(username: str) -> bool:
+def db_coworker_username_taken(username: str, exclude_id: int = None) -> bool:
+    """exclude_id lets a coworker keep their own username unchanged when
+    editing — without it, re-saving the same username would look taken."""
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("SELECT 1 FROM coworkers WHERE LOWER(username) = LOWER(?)", (username,)).fetchone()
+    if exclude_id is not None:
+        row = conn.execute(
+            "SELECT 1 FROM coworkers WHERE LOWER(username) = LOWER(?) AND id != ?", (username, exclude_id)
+        ).fetchone()
+    else:
+        row = conn.execute("SELECT 1 FROM coworkers WHERE LOWER(username) = LOWER(?)", (username,)).fetchone()
     conn.close()
     return row is not None
+
+
+def db_update_coworker_username(coworker_id: int, new_username: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE coworkers SET username = ? WHERE id = ?", (new_username, coworker_id))
+    conn.commit()
+    conn.close()
+
+
+def db_update_coworker_password(coworker_id: int, new_password: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE coworkers SET password_hash = ? WHERE id = ?",
+        (_hash_coworker_password(new_password), coworker_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 def db_verify_coworker_login(username: str, password: str):
@@ -2722,6 +2746,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_resend_message_for_fulfilment",
     "awaiting_coworker_add_field", "coworker_add_data",
     "awaiting_coworker_imdprice_field", "coworker_imdprice_coworker_id", "coworker_imdprice_6m",
+    "awaiting_coworker_editlogin_field", "coworker_editlogin_id",
 ]
 
 def clear_admin_flow_state(user_data: dict):
@@ -8810,8 +8835,102 @@ async def coworker_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons.append(
         [InlineKeyboardButton("✏️ Edit iMD Prices", callback_data=f"coworker_imdprice:{coworker_id}")]
     )
+    buttons.append(
+        [InlineKeyboardButton("🔑 Edit Username/Password", callback_data=f"coworker_editlogin:{coworker_id}")]
+    )
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="coworker_back")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def coworker_editlogin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '🔑 Edit Username/Password' — asks which one."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    coworker_id = int(query.data.split(":", 1)[1])
+    coworker = db_get_coworker(coworker_id)
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"coworker:{coworker_id}")]])
+    if not coworker:
+        await query.edit_message_text("That coworker no longer exists.", reply_markup=back)
+        return
+
+    name = coworker[1]
+    await query.edit_message_text(
+        f"Edit login for {name} — change which one?",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("👤 Username", callback_data=f"coworker_editfield:{coworker_id}:username")],
+                [InlineKeyboardButton("🔒 Password", callback_data=f"coworker_editfield:{coworker_id}:password")],
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"coworker:{coworker_id}")],
+            ]
+        ),
+    )
+
+
+async def coworker_editfield_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin picked Username or Password — prompts for the new value."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    _, coworker_id_str, field = query.data.split(":", 2)
+    coworker_id = int(coworker_id_str)
+    coworker = db_get_coworker(coworker_id)
+    if not coworker:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That coworker no longer exists.")
+        return
+
+    clear_admin_flow_state(context.user_data)
+    context.user_data["awaiting_coworker_editlogin_field"] = field
+    context.user_data["coworker_editlogin_id"] = coworker_id
+
+    name = coworker[1]
+    label = "username" if field == "username" else "password"
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"New {label} for {name}:")
+
+
+async def coworker_editlogin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Catches the admin's typed replacement username/password and saves
+    it — username is uniqueness-checked the same way the add-coworker
+    flow checks it, excluding this coworker's own current username."""
+    field = context.user_data.get("awaiting_coworker_editlogin_field")
+    coworker_id = context.user_data.get("coworker_editlogin_id")
+    if not field or not coworker_id:
+        return
+    text = update.message.text.strip()
+
+    coworker = db_get_coworker(coworker_id)
+    if not coworker:
+        context.user_data.pop("awaiting_coworker_editlogin_field", None)
+        context.user_data.pop("coworker_editlogin_id", None)
+        await update.message.reply_text("That coworker no longer exists.")
+        return
+    name = coworker[1]
+
+    if field == "username":
+        if not text:
+            await update.message.reply_text("Send a username:")
+            return
+        if db_coworker_username_taken(text, exclude_id=coworker_id):
+            await update.message.reply_text("That username is already taken — send another one:")
+            return
+        db_update_coworker_username(coworker_id, text)
+        confirm = f"✅ {name}'s username is now `{text}`."
+    else:
+        if not text:
+            await update.message.reply_text("Send a password:")
+            return
+        db_update_coworker_password(coworker_id, text)
+        confirm = f"✅ {name}'s password has been updated."
+
+    context.user_data.pop("awaiting_coworker_editlogin_field", None)
+    context.user_data.pop("coworker_editlogin_id", None)
+    await update.message.reply_text(confirm, parse_mode=ParseMode.MARKDOWN)
 
 
 async def coworker_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -10100,6 +10219,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if context.user_data.get("awaiting_coworker_imdprice_field"):
             await coworker_imdprice_field_reply(update, context)
+            return
+        if context.user_data.get("awaiting_coworker_editlogin_field"):
+            await coworker_editlogin_reply(update, context)
             return
         if context.user_data.get("awaiting_edit_delivery"):
             await edit_delivery_reply(update, context)
@@ -12623,6 +12745,8 @@ def main():
     app.add_handler(CallbackQueryHandler(coworker_back, pattern=r"^coworker_back$"))
     app.add_handler(CallbackQueryHandler(coworker_pending_list, pattern=r"^coworker_pending:"))
     app.add_handler(CallbackQueryHandler(coworker_imdprice_start, pattern=r"^coworker_imdprice:"))
+    app.add_handler(CallbackQueryHandler(coworker_editlogin_start, pattern=r"^coworker_editlogin:"))
+    app.add_handler(CallbackQueryHandler(coworker_editfield_choice, pattern=r"^coworker_editfield:"))
     app.add_handler(CallbackQueryHandler(coworker_detail, pattern=r"^coworker:"))
     app.add_handler(CallbackQueryHandler(imd_manual_deliver, pattern=r"^imddeliver:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_start, pattern=r"^imdmancred:"))
