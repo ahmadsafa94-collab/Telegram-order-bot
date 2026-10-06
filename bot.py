@@ -92,7 +92,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "7"
+MINI_APP_VERSION = "8"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -210,6 +210,7 @@ MENU = {
     "scopus": ("Scopus - 1 Year", 35.00),
     "springerlink": ("SpringerLink - 1 Year", 35.00),
     "sanford_guide": ("Sanford Guide - 1 Year", 35.00),
+    "embase": ("Embase - 1 Year", 35.00),
 
     # Telegram AI bots — no registration details needed; access is granted
     # directly on the relevant Telegram bot after payment.
@@ -220,7 +221,7 @@ MENU = {
 SINGLE_MAIN_ITEMS = [
     "dynamed", "dynamedex", "bmj_best_practice", "bmj_learning", "visualdx",
     "lexicomp", "accessmedicine", "boardvitals", "clinicalkey", "sciencedirect",
-    "statdx", "nejm", "jama_evidence", "scopus", "springerlink", "sanford_guide",
+    "statdx", "nejm", "jama_evidence", "scopus", "springerlink", "sanford_guide", "embase",
 ]
 
 # Admin edits from 📦 Manage Stock → Edit, layered on top of MENU at
