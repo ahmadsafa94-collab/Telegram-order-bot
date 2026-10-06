@@ -1814,6 +1814,28 @@ def db_coworker_pending_items(coworker_id: int):
     return rows
 
 
+def db_coworker_orders(coworker_id: int, limit: int = 30):
+    """Every order ever placed by this coworker, newest first — including
+    unpaid/cancelled ones, since this is meant to be a full audit trail
+    rather than just the revenue-counting view db_coworker_stats uses.
+    Returns (id, username, user_id, items_json, total, status, created_at)."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, username, user_id, items_json, total, status, created_at FROM orders "
+        "WHERE coworker_id = ? ORDER BY id DESC LIMIT ?",
+        (coworker_id, limit),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def db_coworker_order_count(coworker_id: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT COUNT(*) FROM orders WHERE coworker_id = ?", (coworker_id,)).fetchone()
+    conn.close()
+    return row[0]
+
+
 def db_mark_referral_intro_shown(user_id: int):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE users SET referral_intro_shown = 1 WHERE user_id = ?", (user_id,))
@@ -8849,6 +8871,11 @@ async def coworker_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append(
             [InlineKeyboardButton(f"⏳ Pending Orders ({pending_count})", callback_data=f"coworker_pending:{coworker_id}")]
         )
+    total_order_count = db_coworker_order_count(coworker_id)
+    if total_order_count:
+        buttons.append(
+            [InlineKeyboardButton(f"📜 Order History ({total_order_count})", callback_data=f"coworker_history:{coworker_id}")]
+        )
     buttons.append(
         [InlineKeyboardButton("✏️ Edit iMD Prices", callback_data=f"coworker_imdprice:{coworker_id}")]
     )
@@ -8910,6 +8937,68 @@ async def coworker_delete_execute(update: Update, context: ContextTypes.DEFAULT_
 
     back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Coworkers", callback_data="coworker_back")]])
     await query.edit_message_text(f"🗑 Deleted coworker: {name}", reply_markup=back)
+
+
+ORDER_STATUS_ICONS = {
+    "paid": "✅", "delivered": "✅",
+    "awaiting_payment": "⏳", "awaiting_receipt": "⏳", "awaiting_confirmation": "⏳",
+    "cancelled": "❌", "rejected": "❌",
+}
+
+
+async def coworker_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '📜 Order History' — every order this coworker has
+    ever placed, newest first, including unpaid/cancelled ones (a full
+    audit trail, unlike the revenue-only count shown on the detail
+    page)."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    coworker_id = int(query.data.split(":", 1)[1])
+    coworker = db_get_coworker(coworker_id)
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"coworker:{coworker_id}")]])
+    if not coworker:
+        await query.edit_message_text("That coworker no longer exists.", reply_markup=back)
+        return
+    name = coworker[1]
+
+    total_count = db_coworker_order_count(coworker_id)
+    # Capped well under Telegram's 4096-char message limit — a handful of
+    # multi-item orders at 20 rows already runs close to it.
+    rows = db_coworker_orders(coworker_id, limit=20)
+    if not rows:
+        await query.edit_message_text(f"{name} hasn't placed any orders yet.", reply_markup=back)
+        return
+
+    lines = [f"📜 {name}'s order history ({total_count} total):", ""]
+    for order_id, username, user_id, items_json, total, status, created_at in rows:
+        try:
+            items = json.loads(items_json)
+        except (TypeError, ValueError):
+            items = {}
+        item_names = ", ".join(
+            f"{MENU.get(iid, (iid,))[0]}" + (f" x{qty}" if qty > 1 else "") for iid, qty in items.items()
+        )
+        if len(item_names) > 80:
+            item_names = item_names[:77] + "..."
+        who = f"@{username}" if username else str(user_id)
+        icon = ORDER_STATUS_ICONS.get(status, "•")
+        lines.append(
+            f"{icon} #{order_id} — {CURRENCY}{total:.2f} — {status}\n"
+            f"   {item_names or '(no items)'} — {who} — {created_at[:10]}"
+        )
+
+    if total_count > len(rows):
+        lines.append("")
+        lines.append(f"(showing the {len(rows)} most recent — {total_count} total)")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:  # Telegram's message limit is 4096 — stay well clear of it
+        text = text[:3980] + "\n...(truncated)"
+    await query.edit_message_text(text, reply_markup=back)
 
 
 async def coworker_editlogin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -12819,6 +12908,7 @@ def main():
     app.add_handler(CallbackQueryHandler(coworker_editfield_choice, pattern=r"^coworker_editfield:"))
     app.add_handler(CallbackQueryHandler(coworker_delete_confirm, pattern=r"^coworker_del:"))
     app.add_handler(CallbackQueryHandler(coworker_delete_execute, pattern=r"^coworker_del_yes:"))
+    app.add_handler(CallbackQueryHandler(coworker_history, pattern=r"^coworker_history:"))
     app.add_handler(CallbackQueryHandler(coworker_detail, pattern=r"^coworker:"))
     app.add_handler(CallbackQueryHandler(imd_manual_deliver, pattern=r"^imddeliver:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_start, pattern=r"^imdmancred:"))
