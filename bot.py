@@ -1689,6 +1689,19 @@ def db_update_coworker_password(coworker_id: int, new_password: str):
     conn.close()
 
 
+def db_delete_coworker(coworker_id: int):
+    """Deletes the coworker account itself. Past orders keep their
+    coworker_id as historical record (so sales/stats for them stay
+    accurate); any Telegram account currently logged in as this coworker
+    just reverts to regular pricing next time it's checked, since
+    db_get_user_coworker JOINs against this table and will no longer
+    find a match — no separate cleanup needed there."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM coworkers WHERE id = ?", (coworker_id,))
+    conn.commit()
+    conn.close()
+
+
 def db_verify_coworker_login(username: str, password: str):
     """Returns (coworker_id, name, discount_pct) on a correct username +
     password, else None."""
@@ -8842,8 +8855,61 @@ async def coworker_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons.append(
         [InlineKeyboardButton("🔑 Edit Username/Password", callback_data=f"coworker_editlogin:{coworker_id}")]
     )
+    buttons.append(
+        [InlineKeyboardButton("🗑 Delete Coworker", callback_data=f"coworker_del:{coworker_id}")]
+    )
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="coworker_back")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def coworker_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '🗑 Delete Coworker' — ask for confirmation before
+    actually removing it, since this can't be undone."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    coworker_id = int(query.data.split(":", 1)[1])
+    coworker = db_get_coworker(coworker_id)
+    if not coworker:
+        await query.edit_message_text("That coworker no longer exists.")
+        return
+    name = coworker[1]
+
+    await query.edit_message_text(
+        f"Delete coworker {name}?\n\n"
+        "They'll immediately lose their discount and go back to regular pricing "
+        "(their past orders stay on record). This can't be undone.",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✅ Yes, delete it", callback_data=f"coworker_del_yes:{coworker_id}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data=f"coworker:{coworker_id}")],
+            ]
+        ),
+    )
+
+
+async def coworker_delete_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Actually deletes the coworker after confirmation."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    coworker_id = int(query.data.split(":", 1)[1])
+    coworker = db_get_coworker(coworker_id)
+    if not coworker:
+        await query.edit_message_text("That coworker no longer exists.")
+        return
+    name = coworker[1]
+
+    db_delete_coworker(coworker_id)
+
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Coworkers", callback_data="coworker_back")]])
+    await query.edit_message_text(f"🗑 Deleted coworker: {name}", reply_markup=back)
 
 
 async def coworker_editlogin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -12751,6 +12817,8 @@ def main():
     app.add_handler(CallbackQueryHandler(coworker_imdprice_start, pattern=r"^coworker_imdprice:"))
     app.add_handler(CallbackQueryHandler(coworker_editlogin_start, pattern=r"^coworker_editlogin:"))
     app.add_handler(CallbackQueryHandler(coworker_editfield_choice, pattern=r"^coworker_editfield:"))
+    app.add_handler(CallbackQueryHandler(coworker_delete_confirm, pattern=r"^coworker_del:"))
+    app.add_handler(CallbackQueryHandler(coworker_delete_execute, pattern=r"^coworker_del_yes:"))
     app.add_handler(CallbackQueryHandler(coworker_detail, pattern=r"^coworker:"))
     app.add_handler(CallbackQueryHandler(imd_manual_deliver, pattern=r"^imddeliver:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_start, pattern=r"^imdmancred:"))
