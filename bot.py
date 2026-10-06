@@ -92,7 +92,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "6"
+MINI_APP_VERSION = "7"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -2879,6 +2879,10 @@ def _shop_url(user_id: int = 0) -> str:
             "api": BOT_API_URL,
             "cw": coworker_pct,
             "cwp": coworker_imd_prices,
+            # Explicit coworker flag (not just inferring from cw>0) — the
+            # Mini App uses this to show the My Orders button only to
+            # coworkers, never regular customers.
+            "cwid": coworker_login[0] if coworker_login else 0,
             # Self-signed identity for the Mini App's Orders-tab API calls —
             # see _verify_mini_app_token. Not Telegram's own initData, which
             # turned out to be unreliable across real clients.

@@ -284,7 +284,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
       <button class="ico-btn" title="My Subscriptions" onclick="openOrders()">
         📋<div class="ico-badge vis" id="subsBadge" style="display:none">!</div>
       </button>
-      <button class="ico-btn" title="My Orders" onclick="openMyOrders()">📦</button>
+      <button class="ico-btn" title="My Orders" id="myOrdersBtn" onclick="openMyOrders()" style="display:none">📦</button>
       <button class="ico-btn acc" title="Basket" onclick="openBasket()">
         🧺<div class="ico-badge" id="bc">0</div>
       </button>
@@ -1726,6 +1726,11 @@ buildCatalog();
 buildAdBanner();
 document.getElementById('landingImg').src=LOGOS.landing;
 document.getElementById('headerLogo').src=LOGOS.landing;
+
+// My Orders is a coworker-only feature — hidden for regular customers.
+if (SUBS_DATA && SUBS_DATA.cwid) {
+  document.getElementById('myOrdersBtn').style.display='';
+}
 
 // Mark out-of-stock built-in items (from oos list in SUBS_DATA)
 if (SUBS_DATA && SUBS_DATA.oos && SUBS_DATA.oos.length) {
