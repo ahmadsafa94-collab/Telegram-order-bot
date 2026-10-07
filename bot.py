@@ -1277,6 +1277,19 @@ def db_delete_fulfilment(fulfilment_id: int):
     return bool(deleted)
 
 
+def db_delete_order(order_id: int):
+    """Deletes a rejected order entirely, along with any fulfilment rows
+    already created for it (the Mini App pre-stores registration details
+    before payment, so a rejected order can already have some)."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM fulfilment WHERE order_id = ?", (order_id,))
+    cur = conn.execute("DELETE FROM orders WHERE id = ?", (order_id,))
+    conn.commit()
+    deleted = cur.rowcount
+    conn.close()
+    return bool(deleted)
+
+
 def db_order_undelivered_items(order_id: int):
     """Units of this order not yet delivered: (fulfilment_id, item_id, state)."""
     conn = sqlite3.connect(DB_PATH)
@@ -9285,9 +9298,63 @@ async def admin_pending_rejected_detail(update: Update, context: ContextTypes.DE
     buttons = [
         [InlineKeyboardButton("✅ Confirm Payment", callback_data=f"admin_confirm:{order_id}")],
         [InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{order_id}")],
+        [InlineKeyboardButton("🗑 Delete Order", callback_data=f"orderdel:{order_id}")],
         [InlineKeyboardButton("⬅️ Back", callback_data="apend_back")],
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def rejected_order_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '🗑 Delete Order' on a rejected-receipt order — ask for
+    confirmation before actually removing it, since this can't be undone."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    order_id = int(query.data.split(":", 1)[1])
+    order = db_get_order(order_id)
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"apend_rejected:{order_id}")]])
+    if not order:
+        await query.edit_message_text("Order not found.", reply_markup=back)
+        return
+    oid, user_id, username, items_json, total, status, created_at = order
+    who = f"@{username}" if username else str(user_id)
+
+    await query.edit_message_text(
+        f"Delete Order #{oid} ({who}, {CURRENCY}{total:.2f})?\n\n"
+        "This removes it from Payment Pending permanently — the customer will NOT be "
+        "notified and this can't be undone.",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✅ Yes, delete it", callback_data=f"orderdel_yes:{order_id}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data=f"apend_rejected:{order_id}")],
+            ]
+        ),
+    )
+
+
+async def rejected_order_delete_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Actually deletes the order after confirmation."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    order_id = int(query.data.split(":", 1)[1])
+    order = db_get_order(order_id)
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Pending Orders", callback_data="apend_back")]])
+    if not order:
+        await query.edit_message_text("Order not found.", reply_markup=back)
+        return
+    oid, user_id, username, items_json, total, status, created_at = order
+    who = f"@{username}" if username else str(user_id)
+
+    db_delete_order(order_id)
+
+    await query.edit_message_text(f"🗑 Deleted Order #{oid} ({who}).", reply_markup=back)
 
 
 def _inbox_summary_keyboard() -> InlineKeyboardMarkup:
@@ -12961,6 +13028,8 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_pending_detail, pattern=r"^apend:"))
     app.add_handler(CallbackQueryHandler(clear_unpaid_orders, pattern=r"^clear_unpaid$"))
     app.add_handler(CallbackQueryHandler(admin_pending_rejected_detail, pattern=r"^apend_rejected:"))
+    app.add_handler(CallbackQueryHandler(rejected_order_delete_confirm, pattern=r"^orderdel:"))
+    app.add_handler(CallbackQueryHandler(rejected_order_delete_execute, pattern=r"^orderdel_yes:"))
     app.add_handler(CallbackQueryHandler(pending_delete_confirm, pattern=r"^pdel:"))
     app.add_handler(CallbackQueryHandler(pending_delete_execute, pattern=r"^pdel_yes:"))
     app.add_handler(CallbackQueryHandler(admin_msg_start, pattern=r"^admin_msg:"))
