@@ -93,7 +93,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "9"
+MINI_APP_VERSION = "10"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -178,9 +178,12 @@ MENU = {
     "imd_renew_1y": ("iMD VIP Renewal - 1 Year", 75.00),
 
     # iMD VIP — one product per duration; New Account vs Renewal is chosen
-    # on the account details page (see IMD_TRIGGER_ITEMS).
+    # on the account details page (see IMD_TRIGGER_ITEMS). The 2-Year
+    # option has no serial pool of its own — it's fulfilled as two chained
+    # 1-Year actions against the same account (see IMD_POOL_FOR_DURATION).
     "imd_6m": ("iMD VIP - 6 Months", 50.00),
     "imd_1y": ("iMD VIP - 1 Year", 75.00),
+    "imd_2y": ("iMD VIP - 2 Years", 140.00),
 
     # Uptodate — three access tiers, each with a Mobile App / Mobile App +
     # Browser choice.
@@ -289,11 +292,11 @@ CATALOG = {
 # iMD FORM COLLECTION
 # ------------------------------------------------------------------
 
-# Both iMD durations trigger the guided collection flow. New Account vs
-# Renewal is no longer encoded in the item id — it's asked as an explicit
-# step in that flow (see start_imd_collection / the Mini App's iMD
-# toggle) and read back via each fulfilment's info_json["account_type"].
-IMD_TRIGGER_ITEMS = {"imd_6m", "imd_1y"}
+# All three iMD durations trigger the guided collection flow. New Account
+# vs Renewal is no longer encoded in the item id — it's asked as an
+# explicit step in that flow (see start_imd_collection / the Mini App's
+# iMD toggle) and read back via each fulfilment's info_json["account_type"].
+IMD_TRIGGER_ITEMS = {"imd_6m", "imd_1y", "imd_2y"}
 
 # Uptodate AI — a code-redemption product (no registration, no customer-
 # entered details at all). Reuses the same serials pool mechanism as
@@ -336,11 +339,19 @@ IMD_CHANGE_PASSWORD_URL = "https://en.imedicaldoctor.net/changepass.php"
 IMD_APK_URL = "sg.imedicaldoctor.net/imd200.apk"
 IMD_WEB_URL = "www.imdweb.org"
 
-# Maps each item id to which serial pool it should draw from.
+# Maps each item id to its sellable duration.
 IMD_DURATION_MAP = {
     "imd_6m": "6m",
     "imd_1y": "1y",
+    "imd_2y": "2y",
 }
+
+# Maps a sellable duration to the serial pool it draws from. "2y" has no
+# pool of its own — it's fulfilled as two chained 1-Year actions against
+# the same account (register-then-renew for a new account, renew-then-
+# renew for an existing one), each drawing a serial from the "1y" pool
+# just like a plain iMD VIP - 1 Year order.
+IMD_POOL_FOR_DURATION = {"6m": "6m", "1y": "1y", "2y": "1y"}
 
 # Overridable via Railway variables, so a URL change (or trying http://
 # instead of https://) doesn't need a code edit.
@@ -2725,6 +2736,7 @@ async def imd_menu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [
         [InlineKeyboardButton(label_for("imd_6m", "6 Months", MENU["imd_6m"][1]), callback_data="add:imd_6m")],
         [InlineKeyboardButton(label_for("imd_1y", "1 Year", MENU["imd_1y"][1]), callback_data="add:imd_1y")],
+        [InlineKeyboardButton(label_for("imd_2y", "2 Years", MENU["imd_2y"][1]), callback_data="add:imd_2y")],
         [InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu")],
     ]
     await query.edit_message_text("iMD VIP — choose a duration:", reply_markup=InlineKeyboardMarkup(buttons))
@@ -6117,7 +6129,12 @@ def format_fulfilment_info(item_id: str, info_json: str) -> str:
         "login_username": "Username/Email", "login_password": "Password",
         "account_type": "Account type",
     }
-    return "\n".join(f"{labels.get(k, k)}: {v}" for k, v in info.items())
+    # Internal bookkeeping for a 2-Year iMD order's second serial — not
+    # something the customer submitted, so not worth showing here.
+    hidden_keys = {"imd2y_step", "imd2y_username"}
+    return "\n".join(
+        f"{labels.get(k, k)}: {v}" for k, v in info.items() if k not in hidden_keys
+    )
 
 
 PAYMENT_METHOD_ICONS = {
@@ -6327,7 +6344,7 @@ def all_toggleable_items() -> list:
 
     for cat in CATALOG.values():
         walk(cat)
-    items.extend(["imd_6m", "imd_1y"])
+    items.extend(["imd_6m", "imd_1y", "imd_2y"])
     items.extend(SINGLE_MAIN_ITEMS)
     return [i for i in items if not ITEM_OVERRIDES.get(i, (None, None, None, False))[3]]
 
@@ -11102,7 +11119,7 @@ async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TY
         db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
 
     if ADMIN_CHAT_ID:
-        duration_label = "1 Year" if duration == "1y" else "6 Months"
+        duration_label = {"6m": "6 Months", "1y": "1 Year", "2y": "2 Years"}.get(duration, "6 Months")
         if is_renew:
             summary = f"Previous username: {data.get('prev_username')}"
         else:
@@ -11167,9 +11184,36 @@ def db_recover_imd_registration_data(order_id: int):
     }
 
 
+def _persist_imd2y_step2(fulfilment_id: int, username: str):
+    """After step 1 of a 2-Year order succeeds, marks the fulfilment's
+    saved info_json so a restart (or a step-2 failure + retry) resumes at
+    step 2 against the same account instead of re-running step 1 and
+    risking a duplicate registration or a wasted serial. Merges onto the
+    existing info rather than overwriting it, so the admin-facing details
+    view still shows the original submitted fields."""
+    row = db_get_fulfilment(fulfilment_id)
+    try:
+        info = json.loads(row[6]) if row and row[6] else {}
+    except (TypeError, ValueError):
+        info = {}
+    info["imd2y_step"] = 2
+    info["imd2y_username"] = username
+    db_set_fulfilment_info(fulfilment_id, info)
+
+
 async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int):
     """Pulls a serial from the pool matching this order's duration and
-    performs the registration or renewal, then handles the outcome."""
+    performs the registration or renewal, then handles the outcome.
+
+    A "2y" order is two of these calls chained: step 1 is the normal
+    new-account/renewal action with one 1-Year serial; on success it's
+    NOT delivered yet — instead the resulting account's username is
+    stashed as data["imd2y_username"], data["imd2y_step"] is bumped to 2,
+    and this function re-enters itself, which now performs a plain
+    RENEWAL of that same account with a second 1-Year serial. Only once
+    that second step succeeds does anything get delivered. Persisting the
+    step/username (via _persist_imd2y_step2) means a retry after a
+    step-2 failure resumes at step 2, never re-running step 1."""
     pending = context.application.bot_data.get("pending_registrations", {})
     data = pending.get(order_id)
 
@@ -11198,7 +11242,7 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
             return
 
     duration = data.get("duration")
-    is_renew = data.get("is_renew")
+    is_renew = data.get("is_renew")  # the ORIGINAL account type the customer chose
 
     # Sanitize in place — the SAME cleaned values must be used both to fill
     # the registration form and to build the delivery message sent to the
@@ -11211,14 +11255,24 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
         if data.get(field) is not None:
             data[field] = sanitize_imd_field(data[field])
 
-    popped = db_pop_serial(duration)
+    # For a 2-Year order, step 1 is whatever the customer originally asked
+    # for (new account or renewal); step 2 is always a plain renewal of
+    # the account step 1 just confirmed. Everything else is a single step.
+    imd2y_step = data.get("imd2y_step", 1) if duration == "2y" else None
+    step_is_renew = True if imd2y_step == 2 else is_renew
+    pool_duration = IMD_POOL_FOR_DURATION.get(duration, duration)
+
+    step_suffix = f" (2-Year, Step {imd2y_step} of 2)" if duration == "2y" else ""
+    action_label = ("Renewal" if step_is_renew else "Registration") + step_suffix
+
+    popped = db_pop_serial(pool_duration)
     if not popped:
-        duration_label = "1 Year" if duration == "1y" else "6 Months"
+        pool_label = "1 Year" if pool_duration == "1y" else "6 Months"
         if ADMIN_CHAT_ID:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
                 text=(
-                    f"⚠️ No available {duration_label} serials in stock for order #{order_id}.\n"
+                    f"⚠️ No available {pool_label} serials in stock for order #{order_id} ({action_label}).\n"
                     f"Add some via ➕ Add Serials, then tap Retry below."
                 ),
                 reply_markup=InlineKeyboardMarkup(
@@ -11229,7 +11283,11 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
 
     serial_id, serial_code = popped
 
-    if is_renew:
+    if step_is_renew:
+        # Step 2 of a 2-Year order renews the account under the username
+        # stashed when step 1 succeeded; every other renewal (6m/1y, or
+        # step 1 of a 2-Year renewal) uses the customer's previous username.
+        renew_username = data.get("imd2y_username") if imd2y_step == 2 else data.get("prev_username")
         # The warm-up-via-register-page trick was only needed while ess.php
         # was being Cloudflare-challenged harder than the register page.
         # That's been fixed on iMD's side, so this goes back to a direct
@@ -11237,7 +11295,7 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
         status, detail, page_text, screenshot_bytes = await attempt_imd_action(
             IMD_RENEW_URL,
             IMD_RENEW_FIELD_MAP,
-            {"username": data.get("prev_username"), "serial": serial_code},
+            {"username": renew_username, "serial": serial_code},
         )
     else:
         status, detail, page_text, screenshot_bytes = await attempt_imd_action(
@@ -11252,15 +11310,45 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
             },
         )
 
+    # Step 2 renews an account we just confirmed exists (either freshly
+    # created in step 1, or already renewed once before) — a username/email
+    # problem here means something unexpected happened, not that the
+    # customer needs to pick a new username for an account that already
+    # has one, so route it to the generic "unconfirmed" handling instead
+    # of the per-field customer retry flow.
+    if imd2y_step == 2 and status in ("username_error", "email_error"):
+        status = "unknown"
+
     order = db_get_order(order_id)
     customer_user_id = order[1] if order else None
-    action_label = "Renewal" if is_renew else "Registration"
     retry_button = InlineKeyboardMarkup(
         [[InlineKeyboardButton(f"🔁 Retry {action_label}", callback_data=f"reg_go:{order_id}")]]
     )
 
-    # ---- Confirmed success: deliver to the customer, consume the serial.
+    # ---- Confirmed success.
     if status == "success":
+        if duration == "2y" and imd2y_step == 1:
+            # First year confirmed — don't deliver yet. Move to step 2
+            # with a second 1-Year serial against the same account.
+            db_finalize_serial(serial_id, order_id, success=True)
+            username_for_step2 = data.get("username") if not is_renew else data.get("prev_username")
+            data["imd2y_step"] = 2
+            data["imd2y_username"] = username_for_step2
+            pending[order_id] = data
+            if data.get("fulfilment_id"):
+                _persist_imd2y_step2(data["fulfilment_id"], username_for_step2)
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    f"✅ Step 1 of 2 confirmed for order #{order_id} (2-Year iMD) — "
+                    f"'{username_for_step2}' now has 1 year. Serial used: {serial_code}\n"
+                    "Applying the second serial for the remaining year..."
+                ),
+            )
+            context.application.create_task(run_imd_registration(context, order_id))
+            return
+
+        # Final success — either a plain 6m/1y order, or step 2 of a 2y one.
         pending.pop(order_id, None)
         db_finalize_serial(serial_id, order_id, success=True)
 
@@ -11298,19 +11386,19 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
     if status == "serial_error":
         db_finalize_serial(serial_id, order_id, success=False, mark_not_working=True)
         logger.warning(
-            "iMD serial %s rejected for order #%s — marked not_working, trying next serial",
-            serial_code, order_id,
+            "iMD serial %s rejected for order #%s (%s) — marked not_working, trying next serial",
+            serial_code, order_id, action_label,
         )
         # Read-only check (db_count_serials doesn't reserve anything) — if
         # we called db_pop_serial here just to preview the next serial, it
         # would mark that serial 'pending' and it would then sit unused
         # forever, since the recursive retry below pops its own serial
         # independently. This just checks whether one exists.
-        if db_count_serials(duration) > 0:
+        if db_count_serials(pool_duration) > 0:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
                 text=(
-                    f"🔄 Serial `{serial_code}` failed for order #{order_id} — "
+                    f"🔄 Serial `{serial_code}` failed for order #{order_id} ({action_label}) — "
                     f"marked as not working, trying the next available serial..."
                 ),
             )
@@ -11337,10 +11425,13 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
     db_finalize_serial(serial_id, order_id, success=False)
 
     # ---- Username problem: ask the customer to supply a different one.
+    # Only reachable for step 1 (step 2's username/email errors are
+    # downgraded to "unknown" above), so `is_renew` here always matches
+    # `step_is_renew`.
     if status == "username_error":
         if is_renew:
             admin_note = (
-                f"🟠 USERNAME PROBLEM — Order #{order_id} (Renewal)\n\n"
+                f"🟠 USERNAME PROBLEM — Order #{order_id} ({action_label})\n\n"
                 f"iMD didn't accept the username '{data.get('prev_username')}'.\n"
                 f"The customer has been asked to send their correct username. "
                 f"Serial {serial_code} returned to the pool.\n\n{detail}"
@@ -11352,7 +11443,7 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
             retry_field = "prev_username"
         else:
             admin_note = (
-                f"🟠 USERNAME PROBLEM — Order #{order_id} (Registration)\n\n"
+                f"🟠 USERNAME PROBLEM — Order #{order_id} ({action_label})\n\n"
                 f"iMD didn't accept the username '{data.get('username')}' (likely already taken).\n"
                 f"The customer has been asked to choose another. "
                 f"Serial {serial_code} returned to the pool.\n\n{detail}"
@@ -11380,7 +11471,7 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
             text=(
-                f"🟠 EMAIL PROBLEM — Order #{order_id} (Registration)\n\n"
+                f"🟠 EMAIL PROBLEM — Order #{order_id} ({action_label})\n\n"
                 f"iMD didn't accept the email '{data.get('email')}'.\n"
                 f"The customer has been asked for another. "
                 f"Serial {serial_code} returned to the pool.\n\n{detail}"
@@ -11414,18 +11505,27 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
         [InlineKeyboardButton(f"🔁 Retry {action_label}", callback_data=f"reg_go:{order_id}")]
     )
 
-    who = data.get("prev_username") if is_renew else data.get("username")
+    if imd2y_step == 2:
+        who = data.get("imd2y_username")
+    else:
+        who = data.get("prev_username") if is_renew else data.get("username")
     # Shows the RAW stored value's exact characters (repr escapes anything
     # invisible — directional marks, zero-width spaces, etc. — as \uXXXX)
     # so a future case outside what sanitize_imd_email already strips is
     # diagnosable straight from this message, without another screenshot
     # round-trip.
-    raw_email_line = f"Raw email (exact chars): {data.get('email')!r}\n" if not is_renew else ""
+    raw_email_line = f"Raw email (exact chars): {data.get('email')!r}\n" if not step_is_renew else ""
+    step2_note = (
+        "Note: Step 1 already succeeded — this account already has at least 1 year of "
+        "validity; this was just the second serial for the remaining year.\n\n"
+        if imd2y_step == 2 else ""
+    )
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
         text=(
             f"⚠️ COULD NOT CONFIRM — Order #{order_id} ({action_label})\n\n"
             f"Nothing was sent to the customer and serial {serial_code} went back to the pool.\n\n"
+            f"{step2_note}"
             f"Username: {who}\n"
             f"{raw_email_line}"
             f"Serial to use: {serial_code} (still available in the pool)\n\n"
@@ -11637,7 +11737,7 @@ def build_imd_delivery_message(username: str, password: str = None, date_str: st
     if not date_str:
         date_str = datetime.now().strftime("%Y-%m-%d")
     date_label = "Valid until" if is_renewal else "Date"
-    duration_label = "6 months" if duration == "6m" else "1 year"
+    duration_label = {"6m": "6 months", "1y": "1 year", "2y": "2 years"}.get(duration, "1 year")
     password_line = f"Password: {password}\n" if password else ""
     return (
         f"✅ IMD {duration_label} Full Access \n\n"
