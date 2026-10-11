@@ -1289,11 +1289,17 @@ def db_delete_fulfilment(fulfilment_id: int):
 
 
 def db_delete_order(order_id: int):
-    """Deletes a rejected order entirely, along with any fulfilment rows
-    already created for it (the Mini App pre-stores registration details
-    before payment, so a rejected order can already have some)."""
+    """Deletes an order entirely — the order row itself, any fulfilment
+    rows (the Mini App pre-stores registration details before payment, so
+    even a rejected/unpaid order can already have some), and any
+    deliveries rows. That last one matters for an already-delivered order:
+    the customer's "My Subscriptions" view in the Mini App reads the
+    deliveries table by user_id alone, with no join back to orders, so
+    leaving those rows behind would make a "deleted" order keep showing up
+    to the customer as if nothing happened."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM fulfilment WHERE order_id = ?", (order_id,))
+    conn.execute("DELETE FROM deliveries WHERE order_id = ?", (order_id,))
     cur = conn.execute("DELETE FROM orders WHERE id = ?", (order_id,))
     conn.commit()
     deleted = cur.rowcount
@@ -12098,21 +12104,11 @@ async def customer_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text[i:i + 3500])
 
 
-async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: full detail for one order, including delivered credentials."""
-    if update.effective_user.id != ADMIN_CHAT_ID:
-        return
-
-    if not context.args:
-        await update.message.reply_text("Usage: /order <order_id>")
-        return
-
-    try:
-        order_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("Order id must be a number.")
-        return
-
+def _build_order_lookup_view(order_id: int):
+    """Shared render for /order's detail screen — (text, keyboard), or
+    None if the order doesn't exist. Factored out so the delete
+    confirmation's Cancel button can redisplay the exact same view via a
+    callback, instead of only being reachable as a fresh command reply."""
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
         "SELECT id, user_id, username, items_json, total, status, created_at, "
@@ -12123,8 +12119,7 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not row:
-        await update.message.reply_text(f"Order #{order_id} not found.")
-        return
+        return None
 
     (oid, user_id, username, items_json, total, status, created_at, credentials,
      delivered_at, paid_at, payment_method, discount_code, credits_applied, receipt_reference) = row
@@ -12179,8 +12174,109 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append(
             [InlineKeyboardButton(f"🔑 Deliver {name}{suffix} Manually", callback_data=f"imdmancred:{fulfilment_id}")]
         )
+    # Available regardless of status — including already-delivered orders,
+    # which is the whole point: a bad/duplicate/test order sometimes isn't
+    # caught until after delivery, and until now there was no way to remove
+    # it once it got that far.
+    buttons.append([InlineKeyboardButton("🗑 Delete Order", callback_data=f"ordlkdel:{oid}")])
 
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+    return text, InlineKeyboardMarkup(buttons)
+
+
+async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: full detail for one order, including delivered credentials."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /order <order_id>")
+        return
+
+    try:
+        order_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Order id must be a number.")
+        return
+
+    view = _build_order_lookup_view(order_id)
+    if not view:
+        await update.message.reply_text(f"Order #{order_id} not found.")
+        return
+
+    text, keyboard = view
+    await update.message.reply_text(text, reply_markup=keyboard)
+
+
+async def order_lookup_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '🗑 Delete Order' on the /order detail screen — ask for
+    confirmation before actually removing it, since this can't be undone
+    and (unlike the Payment Pending list's delete button) this can be an
+    already-delivered order."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    order_id = int(query.data.split(":", 1)[1])
+    order = db_get_order(order_id)
+    if not order:
+        await query.edit_message_text("Order not found.")
+        return
+    oid, user_id, username, items_json, total, status, created_at = order
+    who = f"@{username}" if username else str(user_id)
+
+    await query.edit_message_text(
+        f"Delete Order #{oid} ({who}, {CURRENCY}{total:.2f}, status: {status})?\n\n"
+        "This permanently removes the order, its fulfilment records, and any delivered "
+        "credentials — it will also disappear from the customer's My Subscriptions. The "
+        "customer will NOT be notified and this can't be undone.",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✅ Yes, delete it", callback_data=f"ordlkdel_yes:{order_id}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data=f"ordlkdel_cancel:{order_id}")],
+            ]
+        ),
+    )
+
+
+async def order_lookup_delete_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin backed out of the delete confirmation — redisplay the order
+    exactly as /order showed it."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    order_id = int(query.data.split(":", 1)[1])
+    view = _build_order_lookup_view(order_id)
+    if not view:
+        await query.edit_message_text(f"Order #{order_id} not found.")
+        return
+    text, keyboard = view
+    await query.edit_message_text(text, reply_markup=keyboard)
+
+
+async def order_lookup_delete_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Actually deletes the order after confirmation."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    order_id = int(query.data.split(":", 1)[1])
+    order = db_get_order(order_id)
+    if not order:
+        await query.edit_message_text("Order not found.")
+        return
+    oid, user_id, username, items_json, total, status, created_at = order
+    who = f"@{username}" if username else str(user_id)
+
+    db_delete_order(order_id)
+
+    await query.edit_message_text(f"🗑 Deleted Order #{oid} ({who}).")
 
 
 # ------------------------------------------------------------------
@@ -13130,6 +13226,9 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_pending_rejected_detail, pattern=r"^apend_rejected:"))
     app.add_handler(CallbackQueryHandler(rejected_order_delete_confirm, pattern=r"^orderdel:"))
     app.add_handler(CallbackQueryHandler(rejected_order_delete_execute, pattern=r"^orderdel_yes:"))
+    app.add_handler(CallbackQueryHandler(order_lookup_delete_confirm, pattern=r"^ordlkdel:"))
+    app.add_handler(CallbackQueryHandler(order_lookup_delete_cancel, pattern=r"^ordlkdel_cancel:"))
+    app.add_handler(CallbackQueryHandler(order_lookup_delete_execute, pattern=r"^ordlkdel_yes:"))
     app.add_handler(CallbackQueryHandler(pending_delete_confirm, pattern=r"^pdel:"))
     app.add_handler(CallbackQueryHandler(pending_delete_execute, pattern=r"^pdel_yes:"))
     app.add_handler(CallbackQueryHandler(admin_msg_start, pattern=r"^admin_msg:"))
