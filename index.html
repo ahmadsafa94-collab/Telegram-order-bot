@@ -482,7 +482,7 @@ let appliedDiscountCode = '';
 let appliedDiscountPct = 0;
 
 // ── Catalog data ──────────────────────────────────────────────────────
-const IMD = new Set(['imd_6m','imd_1y']);
+const IMD = new Set(['imd_6m','imd_1y','imd_2y']);
 
 // Uptodate AI is a code-redemption product — no account/credentials are
 // needed at all, it's delivered automatically right after payment. Skip
@@ -498,6 +498,7 @@ const CATALOG = [
     {label:'VIP Access',items:[
       {id:'imd_6m',name:'iMD - 6 Months',sub:'New account or renewal',price:50},
       {id:'imd_1y',name:'iMD - 1 Year',sub:'New account or renewal',price:75},
+      {id:'imd_2y',name:'iMD - 2 Years',sub:'New account or renewal',price:140},
     ]},
   ]},
   {id:'uptodate',name:'Uptodate',emoji:'📖',groups:[
