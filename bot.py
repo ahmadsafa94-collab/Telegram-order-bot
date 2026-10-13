@@ -12161,6 +12161,17 @@ def _build_order_lookup_view(order_id: int):
     conn.close()
 
     buttons = [[InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{oid}")]]
+    if status not in ("paid", "delivered"):
+        # Lets the admin force an order through even though nothing here
+        # confirmed the payment — e.g. the customer paid through a channel
+        # the bot doesn't see, or the receipt review was skipped/missed.
+        # Reuses the exact same admin_confirm handler as the receipt-review
+        # Confirm button, so it marks the order paid, deducts any reserved
+        # credits/discount code, notifies the customer, and starts
+        # fulfilment/delivery exactly the same way.
+        buttons.append(
+            [InlineKeyboardButton("✅ Approve Payment & Deliver", callback_data=f"admin_confirm:{oid}")]
+        )
     for delivery_id, item_id, message in delivery_rows:
         name = MENU.get(item_id, (item_id or "item",))[0]
         buttons.append(
