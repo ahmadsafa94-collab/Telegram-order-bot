@@ -1767,23 +1767,6 @@ if (SUBS_DATA && SUBS_DATA.c && SUBS_DATA.c.length) {
   }
 }
 
-// Jump straight to a catalog tab when asked to, via either:
-//  - ?cat=imd — a plain query param, used by the bot's "🛒 Open Shop"
-//    button after /start imd (a normal WebApp URL open, not a startapp
-//    deep link, so there's no start_param involved at all).
-//  - start_param === 'imd' — Telegram's own startapp payload, kept in
-//    case a Direct Mini App link is ever used again.
-// Safe to read either without any signature check (unlike full initData
-// validation, which this app deliberately avoids relying on — see the
-// Orders-tab auth note above): it only decides which tab to land on,
-// nothing security-sensitive, so there's no harm if either is missing.
-try {
-  const catParam = new URLSearchParams(window.location.search).get('cat');
-  const wantsImd = catParam === 'imd' || (tg.initDataUnsafe && tg.initDataUnsafe.start_param === 'imd');
-  if (wantsImd) {
-    switchCat('imd');
-  }
-} catch(e) { /* ignore */ }
 </script>
 </body>
 </html>
