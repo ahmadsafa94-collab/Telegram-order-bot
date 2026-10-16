@@ -572,6 +572,28 @@ const CATALOG = [
   ]},
 ];
 
+// Admin edits from 📦 Manage Stock in the bot (bot.py's _shop_url): edited
+// prices replace the hardcoded ones above so tiles match what checkout
+// charges, and removed items are hidden. Point-in-time snapshot like
+// OOS_IDS; the server re-prices everything at checkout regardless.
+const PRICE_OVERRIDES = (SUBS_DATA && SUBS_DATA.po) || {};
+const REMOVED_IDS = new Set((SUBS_DATA && SUBS_DATA.rm) || []);
+(function applyAdminEdits(){
+  const keep = i => !REMOVED_IDS.has(i.id);
+  const reprice = i => { if (PRICE_OVERRIDES[i.id] != null) i.price = Number(PRICE_OVERRIDES[i.id]); };
+  for (let c = CATALOG.length - 1; c >= 0; c--) {
+    const cat = CATALOG[c];
+    if (cat.groups) {
+      cat.groups.forEach(g => { g.items = g.items.filter(keep); g.items.forEach(reprice); });
+      cat.groups = cat.groups.filter(g => g.items.length);
+    }
+    if (cat.single) { cat.single = cat.single.filter(keep); cat.single.forEach(reprice); }
+    // Drop a category left empty, except "other", which also hosts custom items.
+    const empty = !(cat.groups && cat.groups.length) && !(cat.single && cat.single.length);
+    if (empty && cat.id !== 'other') CATALOG.splice(c, 1);
+  }
+})();
+
 const IMAP = {};
 // Some item names already lead with their category (e.g. "Uptodate Online",
 // "iMD - 6 Months"), so skip re-prefixing those in fullname — avoids

@@ -94,7 +94,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "17"
+MINI_APP_VERSION = "18"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -2840,6 +2840,30 @@ def _badge(label: str, count: int) -> str:
     return f"{label} 🔴{count}" if count > 0 else label
 
 
+def _mini_app_custom_items() -> list:
+    """[[item_id, name, price], ...] for admin-added subscriptions, using the
+    current MENU name/price (so Manage Stock edits show) and skipping removed ones."""
+    items = []
+    for item_id, name, price in db_load_custom_items():
+        if ITEM_OVERRIDES.get(item_id, (None, None, None, False))[3]:
+            continue
+        cur_name, cur_price = MENU.get(item_id, (name, price))
+        items.append([item_id, cur_name, float(cur_price)])
+    return items
+
+
+def _mini_app_admin_edits() -> tuple:
+    """({item_id: price}, [removed item_ids]) from 📦 Manage Stock, for the
+    built-in items whose prices are hardcoded in index.html."""
+    prices = {
+        item_id: float(ov_price)
+        for item_id, (_, ov_price, _, _) in ITEM_OVERRIDES.items()
+        if ov_price is not None
+    }
+    removed = [item_id for item_id, ov in ITEM_OVERRIDES.items() if ov[3]]
+    return prices, removed
+
+
 def _shop_url(user_id: int = 0) -> str:
     """Builds the Mini App URL. When user_id is known, subscription data and
     custom admin-added items are encoded as a base64 query param (?subs=...)
@@ -2853,16 +2877,24 @@ def _shop_url(user_id: int = 0) -> str:
             json.dumps(data, separators=(",", ":")).encode()
         ).decode().rstrip("=")
 
-    # Always include custom catalog items so the Mini App catalog stays in sync
+    # Always include custom catalog items so the Mini App catalog stays in sync.
+    # Name/price come from MENU so 📦 Manage Stock → Edit applies to them too,
+    # and removed ones are left out.
     try:
-        custom = [[item_id, name, float(price)] for item_id, name, price in db_load_custom_items()]
+        custom = _mini_app_custom_items()
     except Exception:
         custom = []
 
+    # 📦 Manage Stock edits for the Mini App's hardcoded built-in catalog
+    # (index.html): edited prices ("po") and removed items ("rm"), so the
+    # tiles show what checkout actually charges.
+    price_overrides, removed_ids = _mini_app_admin_edits()
+
     if not user_id:
-        if custom:
+        if custom or price_overrides or removed_ids:
             try:
-                return f"{MINI_APP_URL}?v={MINI_APP_VERSION}&subs={_encode({'d':[],'p':[],'c':custom})}"
+                data = {'d': [], 'p': [], 'c': custom, 'po': price_overrides, 'rm': removed_ids}
+                return f"{MINI_APP_URL}?v={MINI_APP_VERSION}&subs={_encode(data)}"
             except Exception:
                 pass
         return f"{MINI_APP_URL}?v={MINI_APP_VERSION}"
@@ -2914,11 +2946,7 @@ def _shop_url(user_id: int = 0) -> str:
         ]
         # Custom items — exclude out-of-stock ones so the Mini App catalog
         # automatically stays in sync with the admin's stock toggles
-        custom_filtered = [
-            [item_id, name, float(price)]
-            for item_id, name, price in db_load_custom_items()
-            if item_id not in oos_ids
-        ]
+        custom_filtered = [item for item in custom if item[0] not in oos_ids]
         # Credit balance and currently-active discount codes — embedded
         # so the Mini App can show accurate credits/discount math without
         # a live API call. This is a point-in-time snapshot (same
@@ -2953,6 +2981,8 @@ def _shop_url(user_id: int = 0) -> str:
             "p": pending,
             "c": custom_filtered,
             "oos": oos_ids,
+            "po": price_overrides,
+            "rm": removed_ids,
             "cr": credits_balance,
             "dc": active_codes,
             "api": BOT_API_URL,
