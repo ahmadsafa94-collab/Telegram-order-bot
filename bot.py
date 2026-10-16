@@ -33,6 +33,7 @@ import csv
 import hashlib
 import hmac
 import io
+import hmac
 import json
 import logging
 import os
@@ -105,6 +106,12 @@ BOT_API_URL = os.environ.get("BOT_API_URL") or (
 # Port the API server listens on — Railway injects PORT automatically once
 # Public Networking is turned on; 8080 is just a sane local-dev fallback.
 BOT_API_PORT = int(os.environ.get("PORT", "8080"))
+
+# Shared secret for the read-only /api/public_catalog endpoint, which the
+# Medic-ChatBot reply bot polls for live prices and payment methods. Set the
+# same value as CATALOG_API_KEY on both Railway services; the endpoint is
+# disabled (401 for everyone) while this is unset.
+CATALOG_API_KEY = os.environ.get("CATALOG_API_KEY", "")
 
 # Private "Subscriptions" channel — every subscription actually delivered
 # to a customer is posted here (product, login, date, customer).
@@ -8265,6 +8272,88 @@ async def http_health(request):
     return web.json_response({"ok": True})
 
 
+# Short descriptions of the per-country methods offered under "Pay in your
+# own currency" (LOCAL_PAYMENT_COUNTRIES), for the reply bot to tell
+# customers which options exist. Account details are deliberately not
+# exposed here: customers get those at checkout, where receipts are verified.
+LOCAL_PAYMENT_METHOD_LABELS = {
+    "Lebanon": "Whish Money",
+    "Jordan": "CliQ (Etihad Bank, Zain Cash)",
+    "India": "UPI",
+    "Ghana": "MTN Mobile Money / Telecel Cash",
+    "Pakistan": "HBL bank transfer",
+    "Europe": "Revolut card transfer",
+    "KSA": "Al Ahli Bank transfer",
+    "Russia": "Sberbank international transfer",
+    "Ethiopia": "Dashen Bank transfer",
+    "Armenia": "Idram",
+}
+
+# Keep in sync with the international buttons in the checkout keyboard
+# (the "Pay using international methods" section).
+INTERNATIONAL_PAYMENT_METHODS = [
+    "Telegram Stars",
+    "Visa/Mastercard (card payment link)",
+    "Cryptocurrency: USDT (BEP20 or TRC20), Bitcoin, or a Bybit/OKX/BingX transfer",
+    "Ria",
+    "Paysend",
+    "Revolut",
+    "TapTap Send",
+]
+
+
+async def http_public_catalog(request):
+    """Read-only snapshot of what customers can buy right now and how they
+    can pay, for the Medic-ChatBot reply bot. Uses the same item list as
+    📦 Manage Stock (so removed items are excluded) with admin price edits
+    applied, and flags out-of-stock items. Requires the X-Api-Key header to
+    match CATALOG_API_KEY."""
+    from aiohttp import web
+    supplied = request.headers.get("X-Api-Key", "")
+    if not CATALOG_API_KEY or not hmac.compare_digest(supplied.encode(), CATALOG_API_KEY.encode()):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    out_of_stock = db_out_of_stock_items()
+    item_ids = all_toggleable_items()
+    for extra in sorted(MANUAL_ACCESS_ITEMS):  # sold in the Mini App, not toggleable in Manage Stock
+        if not ITEM_OVERRIDES.get(extra, (None, None, None, False))[3]:
+            item_ids.append(extra)
+    products = [
+        {
+            "id": item_id,
+            "name": MENU[item_id][0],
+            "price": MENU[item_id][1],
+            "currency": "USD",
+            "in_stock": item_id not in out_of_stock,
+        }
+        for item_id in dict.fromkeys(item_ids)
+        if item_id in MENU
+    ]
+    local = [
+        {
+            "country": country,
+            "method": LOCAL_PAYMENT_METHOD_LABELS.get(country, ""),
+            "currency": CURRENCY_RATES.get(country, ("USD", 1))[0],
+            "rate_per_usd": CURRENCY_RATES.get(country, ("USD", 1))[1],
+        }
+        for country in LOCAL_PAYMENT_COUNTRIES
+    ]
+    return web.json_response(
+        {
+            "products": products,
+            "payment_methods": {
+                "international": INTERNATIONAL_PAYMENT_METHODS,
+                "local": local,
+                "how_to_pay": (
+                    "Place the order in the shop bot, choose a payment method at checkout to see "
+                    "the exact payment details, pay, then tap \"I've Paid\" and upload the receipt."
+                ),
+            },
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+        }
+    )
+
+
 def _mini_app_token(user_id: int) -> str:
     """A short token the bot signs for one specific user, embedded in
     _shop_url()'s subs= payload alongside everything else already trusted
@@ -8396,6 +8485,7 @@ async def start_api_server(application):
     api_app.router.add_get("/api/my_purchase_history", http_my_purchase_history)
     api_app.router.add_options("/api/my_purchase_history", http_imd_search_options)
     api_app.router.add_get("/health", http_health)
+    api_app.router.add_get("/api/public_catalog", http_public_catalog)
 
     runner = web.AppRunner(api_app)
     await runner.setup()
