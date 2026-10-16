@@ -16,7 +16,9 @@
   --teal: #0d9488; --teal2:#14b8a6;
   --red:  #ef4444;
   --r:14px;
+  --field-border: #fff; /* dark UI default — flipped to #000 under [data-theme="light"] below */
 }
+:root[data-theme="light"]{ --field-border: #000; }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   background:var(--bg);color:var(--text);min-height:100vh;padding-bottom:100px}
@@ -152,7 +154,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .fields{padding:0 13px 13px}
 .field{margin-top:11px}
 .field label{font-size:10px;font-weight:700;color:var(--hint);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:4px}
-.field input{width:100%;background:transparent;border:1.5px solid #000;
+.field input{width:100%;background:transparent;border:1.5px solid var(--field-border);
   border-radius:10px;padding:10px 11px;color:var(--text);font-size:13px;outline:none;transition:border-color .15s}
 .field input:focus{border-color:var(--acc)}
 .field input.err{border-color:var(--red)}
@@ -434,6 +436,19 @@ tg.ready(); tg.expand();
 // missing entirely, and calling it unguarded would throw here and halt
 // this whole script before the catalog/ads/search below ever run.
 try { tg.setHeaderColor && tg.setHeaderColor('secondary_bg_color'); } catch(e) {}
+
+// Drives --field-border (see :root[data-theme="light"] above): black
+// outline on Telegram's light theme, white on dark — tg.colorScheme is
+// the one reliable signal for which palette the client is actually
+// using right now, independent of the --tg-theme-* CSS vars' own
+// (sometimes stale) values. Re-applied on themeChanged so flipping the
+// client's theme while the Mini App is open updates it live.
+function applyColorScheme(){
+  try { document.documentElement.dataset.theme = tg.colorScheme === 'light' ? 'light' : 'dark'; }
+  catch(e) {}
+}
+applyColorScheme();
+try { tg.onEvent && tg.onEvent('themeChanged', applyColorScheme); } catch(e) {}
 
 // ── Load subscription data from URL query param ──────────────────────
 // The bot encodes the user's subscriptions + custom catalog items as
