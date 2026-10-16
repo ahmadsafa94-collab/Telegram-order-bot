@@ -1766,6 +1766,18 @@ if (SUBS_DATA && SUBS_DATA.c && SUBS_DATA.c.length) {
     });
   }
 }
+
+// Direct Mini App link support (t.me/<bot>/<shortname>?startapp=imd) —
+// Telegram hands the startapp payload to the Mini App as start_param.
+// Safe to read without any signature check (unlike full initData
+// validation, which this app deliberately avoids relying on — see the
+// Orders-tab auth note above): it only decides which tab to land on,
+// nothing security-sensitive, so there's no harm if it's ever missing.
+try {
+  if (tg.initDataUnsafe && tg.initDataUnsafe.start_param === 'imd') {
+    switchCat('imd');
+  }
+} catch(e) { /* ignore */ }
 </script>
 </body>
 </html>
