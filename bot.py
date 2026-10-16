@@ -8331,6 +8331,99 @@ INTERNATIONAL_PAYMENT_METHODS = [
     "TapTap Send",
 ]
 
+# How a customer uses this bot, for the Medic-ChatBot reply bot to explain it
+# and steer customers back here. Keep in sync with the customer-facing flow
+# (button labels, Mini App steps, receipt upload, My Subscriptions).
+SHOP_GUIDE_FOR_REPLY_BOT = f"""\
+Buying a subscription:
+1. Open the shop bot and press Start. Tap the "🟢 SHOP 🟢 (Click here to buy)" button at the bottom (or "🛒 Open Shop").
+2. In the shop, pick the category tab (iMD, Uptodate, Amboss, Telegram AI Bots, All Subscriptions) and tap + on the subscription to add it to the basket. Search is available too.
+3. Open the basket, fill in the account details asked for (for iMD: new account or renewal, plus the account fields), and apply credits or a discount code if they have one.
+4. Choose a payment method and submit. The shop bot then posts "Order #<number>" in its chat with the exact payment details for that method.
+5. Pay, then tap "✅ I've Paid" under that order message and upload the receipt screenshot (photo or PDF; several are fine for split payments), then confirm.
+6. The payment is verified, the order is confirmed, and the subscription is delivered in the shop bot's chat. Telegram Stars and credits are confirmed instantly.
+
+After ordering:
+- "{MY_SUBS_LABEL}" → "✅ Registered Subscriptions" shows delivered subscriptions and their login details; "⏳ Pending Orders" shows orders not delivered yet and what each is waiting for.
+- If a customer paid but hasn't uploaded the receipt, they should go back to their "Order #<number>" message in the shop bot chat, tap "✅ I've Paid" and upload it there. Receipts sent anywhere else are not linked to the order.
+- If an order is waiting for details (needs info), "⏳ Pending Orders" → the order asks for the missing information again.
+- Delivery normally happens after confirmation; if it takes more than 48 hours, use "{TICKET_LABEL}" or "{SUPPORT_LABEL}" in the shop bot.
+- Other buttons: "{GET_FREE_LABEL}" (referrals), "{MY_CREDITS_LABEL}", "{BOOK_REQUEST_LABEL}", "{ANNOUNCEMENTS_LABEL}".
+"""
+
+# What each order status means for the customer, for the reply bot.
+ORDER_STATUS_MEANINGS = {
+    "awaiting_payment": "order created, payment not received yet (no receipt uploaded)",
+    "awaiting_receipt": "customer said they paid but hasn't uploaded the receipt in the shop bot yet",
+    "awaiting_confirmation": "receipt uploaded, payment being verified",
+    "paid": "payment confirmed",
+    "rejected": "payment was rejected (receipt didn't check out)",
+    "cancelled": "order cancelled",
+}
+FULFILMENT_STATE_MEANINGS = {
+    "needs_info": "waiting for the customer to send account details in the shop bot",
+    "awaiting_delivery": "being prepared, will be delivered in the shop bot",
+    "delivered": "delivered",
+}
+
+
+async def http_customer_orders(request):
+    """A customer's recent orders, for the Medic-ChatBot reply bot to see
+    where an order stands when the customer writes to the business account
+    (their Telegram user id is the same in both). Read-only, X-Api-Key
+    protected like /api/public_catalog. No payment details or credentials."""
+    from aiohttp import web
+    supplied = request.headers.get("X-Api-Key", "")
+    if not CATALOG_API_KEY or not hmac.compare_digest(supplied.encode(), CATALOG_API_KEY.encode()):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        user_id = int(request.query.get("user_id", ""))
+    except ValueError:
+        return web.json_response({"error": "user_id must be a number"}, status=400)
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        orders = conn.execute(
+            "SELECT id, items_json, total, status, created_at, payment_method, paid_at FROM orders "
+            "WHERE user_id = ? ORDER BY id DESC LIMIT 5",
+            (user_id,),
+        ).fetchall()
+        result = []
+        for order_id, items_json, total, status, created_at, payment_method, paid_at in orders:
+            try:
+                items = json.loads(items_json) or {}
+            except (TypeError, ValueError):
+                items = {}
+            states = dict(
+                conn.execute(
+                    "SELECT item_id, GROUP_CONCAT(state) FROM fulfilment WHERE order_id = ? GROUP BY item_id",
+                    (order_id,),
+                ).fetchall()
+            )
+            result.append({
+                "order_id": order_id,
+                "created_at": created_at,
+                "total": total,
+                "status": status,
+                "status_meaning": ORDER_STATUS_MEANINGS.get(status, status),
+                "payment_method": payment_method,
+                "paid_at": paid_at,
+                "items": [
+                    {
+                        "name": MENU.get(item_id, (item_id,))[0],
+                        "quantity": qty,
+                        "delivery": [
+                            FULFILMENT_STATE_MEANINGS.get(s, s)
+                            for s in (states.get(item_id) or "").split(",") if s
+                        ],
+                    }
+                    for item_id, qty in items.items()
+                ],
+            })
+    finally:
+        conn.close()
+    return web.json_response({"user_id": user_id, "orders": result})
+
 
 async def http_public_catalog(request):
     """Read-only snapshot of what customers can buy right now and how they
@@ -8379,6 +8472,7 @@ async def http_public_catalog(request):
                     "the exact payment details, pay, then tap \"I've Paid\" and upload the receipt."
                 ),
             },
+            "guide": SHOP_GUIDE_FOR_REPLY_BOT,
             "generated_at": datetime.utcnow().isoformat() + "Z",
         }
     )
@@ -8516,6 +8610,7 @@ async def start_api_server(application):
     api_app.router.add_options("/api/my_purchase_history", http_imd_search_options)
     api_app.router.add_get("/health", http_health)
     api_app.router.add_get("/api/public_catalog", http_public_catalog)
+    api_app.router.add_get("/api/customer_orders", http_customer_orders)
 
     runner = web.AppRunner(api_app)
     await runner.setup()
