@@ -67,6 +67,7 @@ from telegram.ext import (
     PersistenceInput,
     PicklePersistence,
     PreCheckoutQueryHandler,
+    TypeHandler,
     filters,
 )
 
@@ -1121,6 +1122,23 @@ def db_init():
             conn.execute(f"ALTER TABLE users ADD COLUMN {column} {coltype}")
         except sqlite3.OperationalError:
             pass
+
+    # Conversation log between each customer and this bot (both directions),
+    # for the Medic-ChatBot reply bot — see log_customer_update and
+    # ChatLoggingRequest. Separate from `messages`, which is the
+    # admin↔customer order-comment thread.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            direction TEXT NOT NULL,
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS chat_log_user ON chat_log (user_id, id)")
 
     conn.commit()
     conn.close()
@@ -5305,7 +5323,21 @@ async def payer_name_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Order not found — please start over with /start.")
         return
 
-    order_id, user_id, username, items_json, total, status, created_at = order
+    order_id = order[0]
+    _record_receipt_submission(order_id, items, payer_name)
+
+    await update.message.reply_text(
+        f"Thanks! Receipt received for order #{order_id}. "
+        "We're verifying it and will confirm shortly."
+    )
+
+    await _verify_submitted_receipts(context, order, items, payer_name)
+
+
+def _record_receipt_submission(order_id: int, items: list, payer_name: str):
+    """Marks the order as awaiting confirmation with the payer's name and a
+    representative receipt photo. Shared by payer_name_reply (receipt sent
+    in this bot) and /api/submit_receipt (receipt sent via the reply bot)."""
     db_update_status(order_id, "awaiting_confirmation")
     db_set_payer_name(order_id, payer_name)
 
@@ -5315,11 +5347,14 @@ async def payer_name_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if first_photo:
         db_set_receipt_photo(order_id, first_photo)
 
-    await update.message.reply_text(
-        f"Thanks! Receipt received for order #{order_id}. "
-        "We're verifying it and will confirm shortly."
-    )
 
+async def _verify_submitted_receipts(context: ContextTypes.DEFAULT_TYPE, order, items: list, payer_name: str):
+    """The approval flow for submitted receipts: AI + hard-gate checks, then
+    either auto-confirm (which starts delivery) or manual admin review.
+    `order` is the db_get_order row from before the status change. Shared by
+    payer_name_reply and /api/submit_receipt, so both go through exactly the
+    same checks."""
+    order_id, user_id, username, items_json, total, status, created_at = order
     if not items:
         return
 
@@ -8302,6 +8337,176 @@ async def http_health(request):
     return web.json_response({"ok": True})
 
 
+# ------------------------------------------------------------------
+# CONVERSATION LOG (for the Medic-ChatBot reply bot)
+# ------------------------------------------------------------------
+# Every message between a customer and this bot is recorded in chat_log so
+# the reply bot can see where the customer is in the flow. Logging must
+# never affect the bot itself: every step is wrapped and failures are only
+# logged. Password-like values are masked, and the admin chat and
+# channels/groups are never recorded.
+
+CHAT_LOG_MAX_BODY = 1500
+CHAT_LOG_RETENTION_DAYS = 90
+_SECRET_VALUE_RE = re.compile(
+    r"(?i)\b(password|passcode|pass|pwd|serial|activation code|otp|كلمة\s*(?:السر|المرور))\b(\s*[:：=\-]\s*)(\S+)"
+)
+# Customers whose next message answers a password prompt, so it's masked.
+_AWAITING_SECRET_REPLY = set()
+_chat_log_inserts = 0
+
+
+def _mask_secrets(text: str) -> str:
+    return _SECRET_VALUE_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[hidden]", text)
+
+
+def db_log_chat(user_id: int, direction: str, body: str):
+    global _chat_log_inserts
+    body = _mask_secrets(body.strip())[:CHAT_LOG_MAX_BODY]
+    if not body:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO chat_log (user_id, direction, body, created_at) VALUES (?, ?, ?, ?)",
+        (user_id, direction, body, datetime.utcnow().isoformat()),
+    )
+    _chat_log_inserts += 1
+    if _chat_log_inserts % 500 == 0:
+        cutoff = (datetime.utcnow() - timedelta(days=CHAT_LOG_RETENTION_DAYS)).isoformat()
+        conn.execute("DELETE FROM chat_log WHERE created_at < ?", (cutoff,))
+    conn.commit()
+    conn.close()
+
+
+def db_customer_chat(user_id: int, limit: int = 40):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT direction, body, created_at FROM chat_log WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+        (user_id, limit),
+    ).fetchall()
+    conn.close()
+    return list(reversed(rows))
+
+
+def _is_customer_chat(chat_id) -> bool:
+    try:
+        chat_id = int(chat_id)
+    except (TypeError, ValueError):
+        return False
+    return chat_id > 0 and chat_id != ADMIN_CHAT_ID
+
+
+def _button_labels(markup) -> list:
+    if not isinstance(markup, dict):
+        return []
+    rows = markup.get("inline_keyboard") or markup.get("keyboard") or []
+    labels = []
+    for row in rows:
+        for button in row:
+            label = button.get("text") if isinstance(button, dict) else button
+            if label:
+                labels.append(str(label))
+    return labels
+
+
+def _log_outgoing(endpoint: str, params: dict):
+    chat_id = params.get("chat_id")
+    if not _is_customer_chat(chat_id):
+        return
+    media = {
+        "sendPhoto": "[photo]", "sendDocument": "[file]", "sendVideo": "[video]",
+        "sendAnimation": "[GIF]", "sendVoice": "[voice]", "sendAudio": "[audio]",
+    }
+    if endpoint == "sendMessage":
+        body = params.get("text") or ""
+    elif endpoint == "editMessageText":
+        body = "[updated message] " + (params.get("text") or "")
+    elif endpoint in media:
+        body = f"{media[endpoint]} {params.get('caption') or ''}"
+    elif endpoint == "editMessageCaption":
+        body = "[updated caption] " + (params.get("caption") or "")
+    elif endpoint == "sendMediaGroup":
+        album = params.get("media") or []
+        first = album[0] if album and isinstance(album[0], dict) else {}
+        body = f"[album of {len(album)}] {first.get('caption') or ''}"
+    elif endpoint == "sendInvoice":
+        body = f"[Telegram Stars invoice] {params.get('title') or ''}"
+    else:
+        return
+    labels = _button_labels(params.get("reply_markup"))
+    if labels:
+        body += "\nButtons: " + " | ".join(labels[:10])
+    user_id = int(chat_id)
+    if "password" in body.lower() or "كلمة" in body:
+        _AWAITING_SECRET_REPLY.add(user_id)
+    db_log_chat(user_id, "bot", body)
+
+
+from telegram.request import HTTPXRequest  # noqa: E402  (kept next to its only use)
+
+
+class ChatLoggingRequest(HTTPXRequest):
+    """The default HTTP layer, plus a record in chat_log of every message
+    sent to a customer. All Bot API calls go through post(), so this covers
+    every send/edit in the bot without touching each call site."""
+
+    async def post(self, url, request_data=None, *args, **kwargs):
+        result = await super().post(url, request_data, *args, **kwargs)
+        try:
+            if request_data is not None:
+                _log_outgoing(url.rsplit("/", 1)[-1], request_data.parameters)
+        except Exception:
+            logger.exception("chat_log: failed to record an outgoing message")
+        return result
+
+
+async def log_customer_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Records what a customer sends or taps (runs before every other handler,
+    never blocks them)."""
+    try:
+        user = update.effective_user
+        chat = update.effective_chat
+        if not user or not chat or chat.type != "private" or not _is_customer_chat(user.id):
+            return
+        body = ""
+        if update.callback_query:
+            query = update.callback_query
+            label = query.data or ""
+            markup = query.message.reply_markup if query.message else None
+            if markup:
+                for row in markup.inline_keyboard:
+                    for button in row:
+                        if button.callback_data == query.data:
+                            label = button.text
+            body = f"[tapped: {label}]"
+        elif update.message:
+            m = update.message
+            if m.web_app_data:
+                try:
+                    data = json.loads(m.web_app_data.data)
+                    body = f"[Mini App: {data.get('action', 'action')}]"
+                    if data.get("action") == "full_order":
+                        body = (
+                            f"[Placed an order in the Mini App: payment method {data.get('payment_method')}, "
+                            f"total ${data.get('total')}]"
+                        )
+                except (TypeError, ValueError):
+                    body = "[Mini App action]"
+            elif m.photo:
+                body = f"[photo] {m.caption or ''}"
+            elif m.document:
+                body = f"[file: {m.document.file_name or 'document'}] {m.caption or ''}"
+            elif m.text:
+                body = m.text
+                if user.id in _AWAITING_SECRET_REPLY and not body.startswith("/"):
+                    body = "[hidden: reply to a password prompt]"
+            _AWAITING_SECRET_REPLY.discard(user.id)
+        if body:
+            db_log_chat(user.id, "customer", body)
+    except Exception:
+        logger.exception("chat_log: failed to record an incoming update")
+
+
 # Short descriptions of the per-country methods offered under "Pay in your
 # own currency" (LOCAL_PAYMENT_COUNTRIES), for the reply bot to tell
 # customers which options exist. Account details are deliberately not
@@ -8378,15 +8583,16 @@ async def http_customer_orders(request):
         return web.json_response({"error": "Unauthorized"}, status=401)
     try:
         user_id = int(request.query.get("user_id", ""))
+        limit = min(max(int(request.query.get("limit", "5")), 1), 50)
     except ValueError:
-        return web.json_response({"error": "user_id must be a number"}, status=400)
+        return web.json_response({"error": "user_id and limit must be numbers"}, status=400)
 
     conn = sqlite3.connect(DB_PATH)
     try:
         orders = conn.execute(
             "SELECT id, items_json, total, status, created_at, payment_method, paid_at FROM orders "
-            "WHERE user_id = ? ORDER BY id DESC LIMIT 5",
-            (user_id,),
+            "WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, limit),
         ).fetchall()
         result = []
         for order_id, items_json, total, status, created_at, payment_method, paid_at in orders:
@@ -8423,6 +8629,169 @@ async def http_customer_orders(request):
     finally:
         conn.close()
     return web.json_response({"user_id": user_id, "orders": result})
+
+
+def _reply_bot_authorized(request) -> bool:
+    supplied = request.headers.get("X-Api-Key", "")
+    return bool(CATALOG_API_KEY) and hmac.compare_digest(supplied.encode(), CATALOG_API_KEY.encode())
+
+
+async def http_customer_chat(request):
+    """The customer's recent conversation with this bot (chat_log), oldest
+    first, for the reply bot. X-Api-Key protected."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        user_id = int(request.query.get("user_id", ""))
+        limit = min(max(int(request.query.get("limit", "40")), 1), 200)
+    except ValueError:
+        return web.json_response({"error": "user_id and limit must be numbers"}, status=400)
+    messages = [
+        {"from": direction, "text": body, "at": created_at}
+        for direction, body, created_at in db_customer_chat(user_id, limit)
+    ]
+    return web.json_response({"user_id": user_id, "messages": messages})
+
+
+async def http_all_orders(request):
+    """Orders across all customers, for the owner's lookups in the reply bot
+    (never shown to customers there). ?order_id= for one order, otherwise
+    the latest ?limit= (max 100), optionally filtered by ?status=."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        order_id = int(request.query["order_id"]) if request.query.get("order_id") else None
+        limit = min(max(int(request.query.get("limit", "20")), 1), 100)
+    except ValueError:
+        return web.json_response({"error": "order_id and limit must be numbers"}, status=400)
+    status = request.query.get("status")
+    sql = "SELECT id, user_id, username, items_json, total, status, created_at, payment_method, payer_name FROM orders"
+    if order_id is not None:
+        sql, args = sql + " WHERE id = ?", (order_id,)
+    elif status:
+        sql, args = sql + " WHERE status = ? ORDER BY id DESC LIMIT ?", (status, limit)
+    else:
+        sql, args = sql + " ORDER BY id DESC LIMIT ?", (limit,)
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(sql, args).fetchall()
+    conn.close()
+    orders = []
+    for oid, uid, username, items_json, total, ostatus, created_at, payment_method, payer_name in rows:
+        try:
+            items = json.loads(items_json) or {}
+        except (TypeError, ValueError):
+            items = {}
+        orders.append({
+            "order_id": oid, "user_id": uid, "username": username, "total": total,
+            "status": ostatus, "status_meaning": ORDER_STATUS_MEANINGS.get(ostatus, ostatus),
+            "created_at": created_at, "payment_method": payment_method, "payer_name": payer_name,
+            "items": [{"name": MENU.get(i, (i,))[0], "quantity": q} for i, q in items.items()],
+        })
+    return web.json_response({"orders": orders})
+
+
+RECEIPT_MAX_FILES = 5
+RECEIPT_MAX_BYTES = 10 * 1024 * 1024
+
+
+async def http_submit_receipt(request):
+    """A receipt the customer sent to the reply bot, submitted for one of
+    their unpaid orders. Runs exactly the same approval flow as a receipt
+    uploaded here (_verify_submitted_receipts): AI + hard-gate checks, then
+    auto-confirm and delivery by this bot, or manual admin review.
+
+    JSON body: {user_id, order_id, payer_name, receipts: [{type: "photo"|"pdf", data: base64}]}.
+    The receipts are posted in the customer's chat with this bot (which is
+    also how this bot gets its own file_ids for them)."""
+    import base64 as _b64
+    import io
+    from aiohttp import web
+    from telegram import InputFile
+    from telegram.ext import CallbackContext
+
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        body = await request.json()
+        user_id = int(body["user_id"])
+        order_id = int(body["order_id"])
+        payer_name = " ".join(str(body.get("payer_name") or "").split())
+        receipts = [
+            {"type": r.get("type"), "data": _b64.b64decode(r.get("data") or "", validate=True)}
+            for r in (body.get("receipts") or [])
+        ]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return web.json_response({"error": "invalid request body"}, status=400)
+    if not 2 <= len(payer_name) <= 100:
+        return web.json_response({"error": "the payer's full name is required"}, status=400)
+    if not 1 <= len(receipts) <= RECEIPT_MAX_FILES:
+        return web.json_response({"error": f"send between 1 and {RECEIPT_MAX_FILES} receipts"}, status=400)
+    if any(r["type"] not in ("photo", "pdf") or not r["data"] or len(r["data"]) > RECEIPT_MAX_BYTES for r in receipts):
+        return web.json_response({"error": "each receipt must be a photo or PDF up to 10 MB"}, status=400)
+
+    order = db_get_order(order_id)
+    if not order or order[1] != user_id:
+        return web.json_response({"error": f"order #{order_id} doesn't belong to this customer"}, status=404)
+    status = order[5]
+    if status not in ("awaiting_payment", "awaiting_receipt"):
+        return web.json_response(
+            {"error": "this order isn't waiting for a payment", "status": status,
+             "status_meaning": ORDER_STATUS_MEANINGS.get(status, status)},
+            status=409,
+        )
+
+    application = request.app["application"]
+    bot = application.bot
+    items = []
+    for index, receipt in enumerate(receipts):
+        caption = (
+            f"📎 Receipt for order #{order_id} received through our support chat "
+            f"(payer: {payer_name}). We're verifying it now."
+            if index == 0 else None
+        )
+        sent = None
+        for chat_id in (user_id, ADMIN_CHAT_ID):  # customer's chat first; admin chat if that fails
+            if not chat_id:
+                continue
+            try:
+                if receipt["type"] == "pdf":
+                    sent = await bot.send_document(
+                        chat_id=chat_id,
+                        document=InputFile(io.BytesIO(receipt["data"]), filename=f"receipt_order_{order_id}.pdf"),
+                        caption=caption if chat_id == user_id else f"Receipt for order #{order_id} via the reply bot",
+                    )
+                    items.append({"type": "pdf", "file_id": sent.document.file_id})
+                else:
+                    sent = await bot.send_photo(
+                        chat_id=chat_id, photo=receipt["data"],
+                        caption=caption if chat_id == user_id else f"Receipt for order #{order_id} via the reply bot",
+                    )
+                    items.append({"type": "photo", "file_id": sent.photo[-1].file_id})
+                break
+            except Exception:
+                logger.exception("submit_receipt: couldn't post receipt for order #%s to chat %s", order_id, chat_id)
+        if sent is None:
+            return web.json_response({"error": "couldn't upload the receipt to Telegram"}, status=502)
+
+    # Drop any half-finished receipt upload for this order in the
+    # customer's session here, so this bot doesn't ask for it again.
+    customer_data = application.user_data[user_id]
+    pending = customer_data.get("pending_receipt_orders") or []
+    if order_id in pending:
+        pending.remove(order_id)
+    if customer_data.get("awaiting_receipt_for_order") == order_id:
+        customer_data["awaiting_receipt_for_order"] = pending[0] if pending else None
+    for key in ("collecting_receipts_for_order", "awaiting_payer_name_for_order"):
+        if customer_data.get(key) == order_id:
+            customer_data.pop(key, None)
+            customer_data.pop("pending_receipt_items", None)
+
+    _record_receipt_submission(order_id, items, payer_name)
+    context = CallbackContext(application, chat_id=user_id, user_id=user_id)
+    application.create_task(_verify_submitted_receipts(context, order, items, payer_name))
+    return web.json_response({"ok": True, "order_id": order_id, "status": "awaiting_confirmation"})
 
 
 async def http_public_catalog(request):
@@ -8599,7 +8968,12 @@ async def start_api_server(application):
     crash the whole bot."""
     from aiohttp import web
 
-    api_app = web.Application()
+    # Larger body limit than aiohttp's 1 MB default: /api/submit_receipt
+    # carries up to 5 base64 receipts of 10 MB each.
+    api_app = web.Application(client_max_size=70 * 1024 * 1024)
+    # The reply-bot endpoints need the bot itself (to post receipts and run
+    # the approval flow).
+    api_app["application"] = application
     api_app.router.add_get("/api/imd_search", http_imd_search)
     api_app.router.add_options("/api/imd_search", http_imd_search_options)
     api_app.router.add_get("/api/my_orders", http_my_orders)
@@ -8611,6 +8985,9 @@ async def start_api_server(application):
     api_app.router.add_get("/health", http_health)
     api_app.router.add_get("/api/public_catalog", http_public_catalog)
     api_app.router.add_get("/api/customer_orders", http_customer_orders)
+    api_app.router.add_get("/api/customer_chat", http_customer_chat)
+    api_app.router.add_get("/api/orders", http_all_orders)
+    api_app.router.add_post("/api/submit_receipt", http_submit_receipt)
 
     runner = web.AppRunner(api_app)
     await runner.setup()
@@ -13346,11 +13723,18 @@ def main():
     app = (
         Application.builder()
         .token(BOT_TOKEN)
+        # Same settings as the builder's default HTTP layer (256-connection
+        # pool), plus the chat_log recording of outgoing customer messages.
+        .request(ChatLoggingRequest(connection_pool_size=256))
         .persistence(persistence)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
     )
+
+    # Records customer messages/taps for the reply bot. Group -1 runs before
+    # every other handler; block=False so it never delays them.
+    app.add_handler(TypeHandler(Update, log_customer_update, block=False), group=-1)
 
     # Nightly automatic backup at 00:00 local time (per REPORT_UTC_OFFSET —
     # the same "local day" convention already used for sales reports).
