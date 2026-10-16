@@ -93,7 +93,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "11"
+MINI_APP_VERSION = "12"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -2972,6 +2972,20 @@ def _shop_url(user_id: int = 0) -> str:
         return f"{MINI_APP_URL}?v={MINI_APP_VERSION}"
 
 
+def _shop_url_for_cat(user_id: int, cat: str) -> str:
+    """Same personalized Mini App URL as _shop_url(), with an extra &cat=
+    param so the Mini App jumps straight to a specific catalog tab (e.g.
+    'imd') on open instead of landing on the generic category picker.
+    Used for the one-off 'Open Shop' button sent after /start <arg> — the
+    persistent Shop keyboard button has no particular tab to jump to, so
+    it keeps using plain _shop_url()."""
+    url = _shop_url(user_id)
+    if not url:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}cat={cat}"
+
+
 def main_menu_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
     """Persistent customer keyboard. When the Mini App is configured the
     🏪 Shop button is full-width and first; the catalog-only buttons
@@ -3081,17 +3095,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_new = not db_user_exists(user_id)
     db_upsert_user(user_id, update.effective_user.username)
 
+    deep_link_arg = context.args[0] if context.args else None
+
     # Deep-link referral: /start ref_<referrer_id>. Only attributed for a
     # genuinely new user — an existing user tapping someone else's link
     # later doesn't retroactively change who referred them.
-    if is_new and context.args:
-        arg = context.args[0]
-        if arg.startswith("ref_"):
-            try:
-                referrer_id = int(arg[4:])
-                db_set_referred_by(user_id, referrer_id)
-            except ValueError:
-                pass
+    if is_new and deep_link_arg and deep_link_arg.startswith("ref_"):
+        try:
+            referrer_id = int(deep_link_arg[4:])
+            db_set_referred_by(user_id, referrer_id)
+        except ValueError:
+            pass
 
     if update.effective_user.id == ADMIN_CHAT_ID:
         await update.message.reply_text(
@@ -3104,6 +3118,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Welcome! Use the buttons below any time.",
         reply_markup=main_menu_keyboard(update.effective_user.id),
     )
+
+    # Deep-link shortcut straight to a catalog section — e.g. /start imd,
+    # from https://t.me/<bot_username>?start=imd. Telegram requires a real
+    # user tap to open a WebApp (a bot can't auto-launch one), so this is
+    # the best a one-tap-after-/start link can do: a dedicated follow-up
+    # button that opens the Mini App straight into that section, instead
+    # of making the customer open the regular Shop button and navigate
+    # there themselves.
+    if deep_link_arg == "imd":
+        shop_url = _shop_url_for_cat(user_id, "imd")
+        if shop_url:
+            await update.message.reply_text(
+                "🎓 Tap below to see iMD VIP plans:",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🛒 Open Shop", web_app=WebAppInfo(url=shop_url))]]
+                ),
+            )
 
 async def main_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles taps on the persistent bottom keyboard: Buy, My Subscriptions,
