@@ -3105,20 +3105,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_menu_keyboard(update.effective_user.id),
     )
 
-    # Deep-link shortcut: /start shop, from https://t.me/<bot_username>?start=shop.
-    # Telegram requires a real user tap to open a WebApp (a bot can't
-    # auto-launch one), so this is the best a one-tap-after-/start link can
-    # do: a dedicated follow-up button that opens the Shop, right after the
-    # welcome message that sets up the normal bottom keyboard.
-    if deep_link_arg == "shop":
-        shop_url = _shop_url(user_id)
-        if shop_url:
-            await update.message.reply_text(
-                "🛒 Tap below to open the Shop:",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("🛒 Open Shop", web_app=WebAppInfo(url=shop_url))]]
-                ),
-            )
+    # Always follow up with a one-tap "Open Shop" button, regardless of
+    # how /start was reached (plain, a referral link, or anything else) —
+    # Telegram won't let the bot auto-open a WebApp itself, so this is the
+    # closest thing to automatic right after the welcome message.
+    shop_url = _shop_url(user_id)
+    if shop_url:
+        await update.message.reply_text(
+            "🛒 Tap below to open the Shop:",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🛒 Open Shop", web_app=WebAppInfo(url=shop_url))]]
+            ),
+        )
 
 async def main_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles taps on the persistent bottom keyboard: Buy, My Subscriptions,
