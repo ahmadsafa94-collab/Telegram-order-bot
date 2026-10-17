@@ -570,10 +570,14 @@ CURRENCY_RATES = {
 # recipient names, since that's the only way to confirm it was actually
 # sent to us rather than someone else.
 NO_REFERENCE_REQUIRED_METHODS = {"Jordan"}
+# Previous Jordan/CLIQ recipient identifiers — drafted here for later use:
+# JORDAN_RECIPIENT_IDENTIFIERS = [
+#     "WKS777", "WKS999", "WKS555",
+#     "WALEED SHAQFEH", "WALEED KHALID AHMAD SHAQFEH", "SHAQFEH",
+#     "MOHAMMAD SHAMALTI", "MOHAMMAD ISMAIL ABEDELQADER SHAMALTY", "SHAMALTY", "SHAMALTI",
+# ]
 JORDAN_RECIPIENT_IDENTIFIERS = [
-    "WKS777", "WKS999", "WKS555",
-    "WALEED SHAQFEH", "WALEED KHALID AHMAD SHAQFEH", "SHAQFEH",
-    "MOHAMMAD SHAMALTI", "MOHAMMAD ISMAIL ABEDELQADER SHAMALTY", "SHAMALTY", "SHAMALTI",
+    "IBOY1300", "IBRAHIM OMAR ALSALAHAT", "IBRAHIM ALSALAHAT", "ALSALAHAT",
 ]
 
 # KSA (Al Ahli) receipts DO normally show a reference number, so KSA
@@ -668,12 +672,15 @@ LOCAL_PAYMENT_INSTRUCTIONS = {
         "WhishMoney Number: (Tap to copy)\n`81666579`"
     ),
     "Jordan": (
-        "Tap on one of the cliq IDs below to copy:\n\n"
-        # Orange Money (WKS777) temporarily removed — re-add this line
-        # when it's back:
+        # Previous CLIQ details — drafted here for later use, not
+        # currently shown:
+        # "Tap on one of the cliq IDs below to copy:\n\n"
         # "CLIQ ALIAS: `WKS777`\n(Orange Money)\nWALEED SHAQFEH\n\n"
-        "CLIQ ALIAS: `WKS999`\n(Etihad bank)\nWALEED SHAQFEH\n\n"
-        "CLIQ ALIAS: `WKS555`\n(Zain Cash)\nMohammad shamalti"
+        # "CLIQ ALIAS: `WKS999`\n(Etihad bank)\nWALEED SHAQFEH\n\n"
+        # "CLIQ ALIAS: `WKS555`\n(Zain Cash)\nMohammad shamalti"
+        "UWallet\n\n"
+        "CLIQ ALIAS (tap to copy): `IBOY1300`\n"
+        "Name: Ibrahim Omar Alsalahat"
     ),
     "India": (
         "UPI ID (tap to copy)\n`s4005194160889795@slc`\n\n"
@@ -5518,11 +5525,11 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
             "one. Instead, check whether the receipt shows the amount in JOD AND the recipient "
             f"matches one of these known names/aliases: {', '.join(JORDAN_RECIPIENT_IDENTIFIERS)}. "
             "Matching rules: case-insensitive; a SURNAME appearing anywhere in the recipient's "
-            "full name is enough on its own (e.g. if the receipt shows \"MOHAMMAD ISMAIL "
-            "ABEDELQADER SHAMALTY\" and \"SHAMALTY\" is in the list, that's a match — the extra "
-            "middle names don't matter); minor spelling variants are fine too (e.g. \"SHAMALTY\" "
-            "vs \"SHAMALTI\" is the same match). Set \"recipient_ok\" to true if you can see the "
-            "amount in JOD and any reasonable match to one of these identifiers, false otherwise."
+            "full name is enough on its own (e.g. if the receipt shows \"IBRAHIM OMAR "
+            "ALSALAHAT\" and \"ALSALAHAT\" is in the list, that's a match — the extra "
+            "first/middle names don't matter); minor spelling variants are fine too. Set "
+            "\"recipient_ok\" to true if you can see the amount in JOD and any reasonable match "
+            "to one of these identifiers, false otherwise."
             if payment_method == "Jordan" else ""
         )
         ksa_note = (
