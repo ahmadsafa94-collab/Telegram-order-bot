@@ -741,6 +741,50 @@ LOCAL_PAYMENT_INSTRUCTIONS = {
 
 }
 
+
+def _mini_app_payment_recap(pay_method: str, total: float) -> str:
+    """The 'how to pay + amount' info for a manual payment method, as a
+    plain text block — used to resend payment info in the chat right
+    after the Mini App submits an order, since the Mini App's own in-app
+    display of this same info disappears once the customer taps 'I've
+    Paid' and the WebView closes. Mirrors exactly what each in-chat
+    payment-method handler (pay_card_start, pay_paypal_start, pay_crypto,
+    local_country_selected) already shows before its own I've Paid
+    button. Returns '' for anything without a known recap (Stars,
+    Credits, an unrecognized country) — those don't need one."""
+    if pay_method == "card":
+        return (
+            f"💳 *Visa/Mastercard*\n\n"
+            f"Amount to pay: *{CURRENCY}{total:.2f}*\n\n"
+            "1️⃣ Open the payment link below\n"
+            "2️⃣ Choose \"Pay online with your card\"\n"
+            "3️⃣ From whom is the gift? — your first name\n"
+            f"4️⃣ How much do you want to gift? — *{total:.2f}* (exact amount in USD)\n"
+            "5️⃣ Message (optional) — leave empty\n"
+            "6️⃣ Enter your Visa/Mastercard details and proceed\n\n"
+            f"💳 Payment link: {PAYMENT_LINK_BASE_URL}"
+        )
+    if pay_method == "PayPal":
+        return (
+            f"🅿️ *PayPal*\n\n"
+            f"Amount to pay: *{CURRENCY}{total:.2f}*\n\n"
+            "1️⃣ Open the payment link below\n"
+            f"2️⃣ Enter the amount: *{total:.2f}* USD\n"
+            "3️⃣ Pay with your PayPal balance, bank, card, or Venmo\n\n"
+            f"🅿️ Payment link: {PAYPAL_LINK_URL}"
+        )
+    if pay_method == "Cryptocurrency":
+        return CRYPTO_INSTRUCTIONS
+    if pay_method in LOCAL_PAYMENT_INSTRUCTIONS:
+        flag = COUNTRY_FLAGS.get(pay_method, "")
+        return (
+            f"*{flag} {pay_method}*\n\n"
+            f"Amount to pay: *{convert_for_country(total, pay_method)}*\n\n"
+            f"{LOCAL_PAYMENT_INSTRUCTIONS[pay_method]}"
+        )
+    return ""
+
+
 # USA offers a choice of remittance apps instead of one fixed method.
 USA_PAYMENT_APPS = ["TapTap Send", "Ria", "Paysend", "Remitly", "Revolut"]
 
@@ -3138,6 +3182,11 @@ def referral_link(bot_username: str, user_id: int) -> str:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # /start is the universal "reset me" — a customer stuck in any
+    # half-finished flow (e.g. an iMD registration retry with no cancel
+    # option) needs a reliable way out, and this is it. Cart is kept
+    # (setdefault below), everything else customer-side is cleared.
+    clear_customer_flow_state(context.user_data)
     context.user_data.setdefault("cart", {})
     user_id = update.effective_user.id
     is_new = not db_user_exists(user_id)
@@ -4090,6 +4139,29 @@ COLLECTION_STATE_KEYS = [
     "awaiting_book_link",
     "awaiting_discount_code_for_order",
 ]
+
+# Every customer-side "awaiting a reply" flag text_state_router checks,
+# including COLLECTION_STATE_KEYS above plus the ones that live outside it
+# (iMD search, admin-reply threads, tickets, /coworker login). A flow like
+# the iMD registration retry ("please reply with your correct previous
+# username") has no cancel button — if the customer never sends a valid
+# answer, EVERY later message they send (even "hi") keeps getting
+# swallowed by that same stuck flag. Clearing all of these on /start gives
+# a stuck customer a reliable way out, the same way typing /start to any
+# bot is universally understood as "reset me."
+CUSTOMER_FLOW_KEYS = COLLECTION_STATE_KEYS + [
+    "awaiting_imd_search", "last_imd_search_query",
+    "awaiting_customer_reply_for_order",
+    "awaiting_book_reply_for",
+    "awaiting_ticket_field", "ticket_sub_item_id", "ticket_sub_label",
+    "ticket_sub_delivery_id", "ticket_awaiting_resolved_check",
+    "awaiting_coworker_field",
+]
+
+
+def clear_customer_flow_state(user_data: dict):
+    for key in CUSTOMER_FLOW_KEYS:
+        user_data.pop(key, None)
 
 
 def stash_collection_state(user_data: dict) -> bool:
@@ -13349,6 +13421,15 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     db_update_status(order_id, "awaiting_receipt")
     queue_receipt_request(context, order_id)
 
+    # The Mini App showed the payment info once, in-app, while the
+    # customer was choosing a method — but that view disappears the
+    # moment they tap "I've Paid" and submit. Resend it here as a real
+    # chat message (amount + how to pay) so it's still there, in their
+    # chat history, right alongside the "send a receipt" prompt that
+    # follows it — exactly like the in-chat checkout flow already shows
+    # both together before its own "I've Paid" button.
+    payment_recap = _mini_app_payment_recap(pay_method, total)
+
     if pay_method == "Jordan":
         receipt_prompt = (
             "📸 *Send a screenshot of the receipt clearly showing the amount in JOD and "
@@ -13382,11 +13463,14 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "⚠️ *Receipts without one may take longer to review and won't be approved automatically.*"
         )
 
+    if payment_recap:
+        payment_block = f"{payment_recap}\n\n"
+    else:
+        payment_block = f"Total: {CURRENCY}{total:.2f}\nPayment: {pay_method}\n\n"
+
     await safe_reply_markdown(
         update.message,
-        f"✅ Order #{order_id} confirmed!\n\n{summary}\n\nTotal: {CURRENCY}{total:.2f}\n"
-        f"Payment: {pay_method}\n\n"
-        f"{receipt_prompt}",
+        f"✅ Order #{order_id} confirmed!\n\n{summary}\n\n{payment_block}{receipt_prompt}",
     )
 
     # Notify admin
