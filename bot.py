@@ -95,7 +95,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "19"
+MINI_APP_VERSION = "20"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -1588,6 +1588,17 @@ def db_upsert_user(user_id: int, username: str):
     )
     conn.commit()
     conn.close()
+
+
+def db_get_username(user_id: int):
+    """Last-known @username for this user_id, or None. Used by
+    http_submit_order — an HTTP request has no Telegram Update to read
+    effective_user.username from, and this avoids an extra live Telegram
+    API call (get_chat) just to label an admin notification."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT username FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    return row[0] if row else None
 
 
 def db_set_referred_by(user_id: int, referrer_id: int):
@@ -8429,6 +8440,16 @@ def _imd_search_cors_headers() -> dict:
     }
 
 
+def _post_cors_headers() -> dict:
+    # Same open-CORS story as _imd_search_cors_headers, but advertising
+    # POST so the browser's preflight for an actual POST body succeeds.
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    }
+
+
 async def http_imd_search(request):
     from aiohttp import web
     query = (request.query.get("q") or "").strip()
@@ -9236,6 +9257,8 @@ async def start_api_server(application):
     api_app.router.add_get("/api/orders", http_all_orders)
     api_app.router.add_post("/api/submit_receipt", http_submit_receipt)
     api_app.router.add_post("/api/create_order", http_create_order)
+    api_app.router.add_post("/api/submit_order", http_submit_order)
+    api_app.router.add_options("/api/submit_order", http_submit_order_options)
 
     runner = web.AppRunner(api_app)
     await runner.setup()
@@ -13328,18 +13351,58 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await start_ticket_message_collection(context, user_id, ticket_id, update.effective_chat.id)
         return
 
-    if action not in ("cart_checkout", "full_order"):
-        return
+    if action in ("cart_checkout", "full_order"):
+        await process_full_order(context, update.effective_user.id, update.effective_user.username, data)
 
-    items_raw    = data.get("items", [])
-    pay_method   = data.get("payment_method", "")
-    total_sent   = float(data.get("total", 0))
-    user_id      = update.effective_user.id
-    username     = update.effective_user.username
+
+class _FauxMessage:
+    """Stand-in for a Telegram Message when there's no real one to reply
+    to — e.g. an order submitted through the HTTP API instead of
+    WebApp.sendData(). Forwards replies as fresh messages to the given
+    chat instead of replying in a thread."""
+    def __init__(self, bot, chat_id):
+        self._bot = bot
+        self._chat_id = chat_id
+
+    async def reply_text(self, text, **kwargs):
+        return await self._bot.send_message(chat_id=self._chat_id, text=text, **kwargs)
+
+    async def reply_invoice(self, **kwargs):
+        return await self._bot.send_invoice(chat_id=self._chat_id, **kwargs)
+
+
+async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, username: str, data: dict) -> dict:
+    """Core order-creation logic for a Mini App checkout submission —
+    shared by two entry points:
+      - the legacy Telegram WebApp.sendData() message, still handled by
+        web_app_data_handler above for backward compatibility
+      - POST /api/submit_order (http_submit_order), which the Mini App's
+        "I've Paid" button now actually uses
+
+    The switch to HTTP exists because WebApp.sendData() silently fails
+    for any payload at or above Telegram's hard 4096-byte limit — easy
+    to hit with a multi-item cart, or a customer who pastes a long
+    email/username/password into the registration fields. That failure
+    is completely invisible: the button just does nothing, with no error
+    anywhere the admin or customer could see, and it hits some customers
+    (bigger carts, longer typed values) and not others — exactly the
+    "works for some, hangs for others" pattern that was reported. HTTP
+    has no such limit and gives the Mini App a real success/failure
+    response instead of blind faith that sendData got through.
+
+    Builds its own stand-in "message" (see _FauxMessage) so this has no
+    dependency on an originating Telegram Update at all — needed for the
+    HTTP path, which doesn't have one. Returns {"ok": True, "order_id": N}
+    on success, {"ok": False, "error": "..."} when the order couldn't be
+    placed at all (empty cart, nothing in stock, credit balance changed)."""
+    message = _FauxMessage(context.bot, user_id)
+
+    items_raw  = data.get("items", [])
+    pay_method = data.get("payment_method", "")
 
     if not items_raw:
-        await update.message.reply_text("Your cart was empty.")
-        return
+        await message.reply_text("Your cart was empty.")
+        return {"ok": False, "error": "Your cart was empty."}
 
     # Build the items dict for the order, checking stock
     order_items = {}
@@ -13355,8 +13418,9 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         order_items[item_id] = order_items.get(item_id, 0) + 1
 
     if not order_items:
-        await update.message.reply_text("None of your items are available right now.\n" + "\n".join(skipped))
-        return
+        text = "None of your items are available right now.\n" + "\n".join(skipped)
+        await message.reply_text(text)
+        return {"ok": False, "error": text}
 
     # ── Apply the coworker discount server-side, before anything else —
     # never trust a client-sent discount; look up whether THIS Telegram
@@ -13546,10 +13610,9 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             # Balance changed between page load and submission — bail out
             # safely rather than deliver something that was never paid for.
             db_update_status(order_id, "cancelled")
-            await update.message.reply_text(
-                "Your credit balance changed and no longer covers this order — please try again."
-            )
-            return
+            text = "Your credit balance changed and no longer covers this order — please try again."
+            await message.reply_text(text)
+            return {"ok": False, "error": text, "order_id": order_id}
         db_set_payment_method(order_id, "Credits (Full)" if credits_applied else "Discount Code (Full)")
         # Deducted directly above — clear credits_applied so
         # finalize_order_confirmation doesn't deduct it a second time.
@@ -13558,9 +13621,9 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         conn.commit()
         conn.close()
         paid_note = f" using {credits_applied} credit(s)" if credits_applied else " via your discount code"
-        await update.message.reply_text(f"✅ Order #{order_id} paid in full{paid_note}!\n\n{summary}")
+        await message.reply_text(f"✅ Order #{order_id} paid in full{paid_note}!\n\n{summary}")
         await finalize_order_confirmation(context, order_id, user_id, json.dumps(order_items))
-        return
+        return {"ok": True, "order_id": order_id}
 
     if pay_lower == "stars":
         # Create a Stars invoice — the customer pays in Telegram, the
@@ -13568,7 +13631,7 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         db_update_status(order_id, "awaiting_payment")
         amount_stars = max(1, round(total * STAR_RATE))
         try:
-            await update.message.reply_invoice(
+            await message.reply_invoice(
                 title      = "Medic SalesBot Order",
                 description= summary[:255],
                 payload    = f"order_{order_id}",
@@ -13586,11 +13649,11 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     )
                 except Exception:
                     pass
-            await update.message.reply_text(
+            await message.reply_text(
                 f"Order #{order_id} created. Total: {CURRENCY}{total:.2f}\n\n"
                 "Stars invoice failed — please use another payment method or contact support."
             )
-        return
+        return {"ok": True, "order_id": order_id}
 
     # Manual payment methods (local, card, crypto) — confirm the order and
     # ask for a receipt photo. Everything else is already stored.
@@ -13656,11 +13719,11 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         [[InlineKeyboardButton("❌ Cancel Order", callback_data=f"cancel:{order_id}")]]
     )
     await safe_reply_markdown(
-        update.message,
+        message,
         f"✅ Order #{order_id} confirmed!\n\n{summary}\n\n{payment_block}",
         reply_markup=cancel_order_button,
     )
-    await safe_reply_markdown(update.message, receipt_prompt, reply_markup=cancel_order_button)
+    await safe_reply_markdown(message, receipt_prompt, reply_markup=cancel_order_button)
 
     # Notify admin
     if ADMIN_CHAT_ID:
@@ -13686,6 +13749,51 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         except Exception:
             logger.exception("Failed to notify admin of Mini App order #%s", order_id)
+
+    return {"ok": True, "order_id": order_id}
+
+
+async def http_submit_order(request):
+    """The Mini App's 'I've Paid' button submits the order here instead of
+    via Telegram.WebApp.sendData(). sendData() silently fails above
+    Telegram's hard 4096-byte payload limit — easy to hit with a
+    multi-item cart or long registration details (email/username/password
+    per item) — and that failure is invisible: the button just does
+    nothing, with no error anywhere, which is exactly the "works for some
+    customers, hangs for others" pattern that was reported. HTTP has no
+    such limit and gives the Mini App a real success/failure response to
+    act on instead of blind faith that sendData got through."""
+    from aiohttp import web
+    from telegram.ext import CallbackContext
+
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=_post_cors_headers())
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request body"}, status=400, headers=_post_cors_headers())
+    if not isinstance(data, dict) or not data.get("items"):
+        return web.json_response({"ok": False, "error": "Your cart was empty."}, status=400, headers=_post_cors_headers())
+
+    application = request.app["application"]
+    username = db_get_username(user_id)
+    context = CallbackContext(application, chat_id=user_id, user_id=user_id)
+    try:
+        result = await process_full_order(context, user_id, username, data)
+    except Exception:
+        logger.exception("http_submit_order: process_full_order raised for user %s", user_id)
+        return web.json_response(
+            {"ok": False, "error": "Something went wrong placing your order — please try again or contact support."},
+            status=500, headers=_post_cors_headers(),
+        )
+    status = 200 if result.get("ok") else 400
+    return web.json_response(result, status=status, headers=_post_cors_headers())
+
+
+async def http_submit_order_options(request):
+    from aiohttp import web
+    return web.Response(headers=_post_cors_headers())
 
 
 async def send_db_backup(bot, chat_id: int, caption_prefix: str = "Database backup"):

@@ -1665,15 +1665,44 @@ function collectDetails(){
   });
   return out;
 }
+let _submittingOrder=false;
 function submitOrder(){
+  if(_submittingOrder) return;
   if(!selPay){showToast('Choose a payment method');return;}
   let pay=selPay;
   if(selPay.startsWith('country:')) pay=selPay.slice(8);
   else if(selPay.startsWith('app:')) pay=selPay.slice(4);
-  tg.sendData(JSON.stringify({
+  const payload={
     action:'full_order',items:collectDetails(),payment_method:pay,
     total:effectiveTotal(),use_credits:appliedCreditsFlag,discount_code:appliedDiscountCode,
-  }));
+  };
+  const sub=document.getElementById('submitBtn');
+  const prevLabel=sub?sub.textContent:'';
+  _submittingOrder=true;
+  if(sub){sub.textContent='Placing order…';sub.disabled=true;sub.style.opacity='0.6';}
+  // Switched from tg.sendData() to a real HTTP call: sendData() silently
+  // fails above Telegram's hard 4096-byte payload limit — easy to hit
+  // with several items or long typed registration details — and gives
+  // no error at all, which is exactly what "the button does nothing for
+  // some customers" was. fetch() has no such limit and always tells us
+  // whether the order actually went through.
+  fetch(withAuth('/api/submit_order'),{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),
+  }).then(r=>r.json().catch(()=>({ok:false,error:'Unexpected response from server.'})).then(j=>({status:r.status,body:j})))
+    .then(({body})=>{
+      if(body&&body.ok){
+        tg.close();
+      }else{
+        showToast((body&&body.error)||'Could not place your order. Please try again.');
+        _submittingOrder=false;
+        if(sub){sub.textContent=prevLabel;sub.disabled=false;sub.style.opacity='1';}
+      }
+    })
+    .catch(()=>{
+      showToast('Network error placing your order — please check your connection and try again.');
+      _submittingOrder=false;
+      if(sub){sub.textContent=prevLabel;sub.disabled=false;sub.style.opacity='1';}
+    });
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────
