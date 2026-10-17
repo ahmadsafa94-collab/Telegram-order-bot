@@ -13504,14 +13504,19 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
     if payment_recap:
-        payment_block = f"{payment_recap}\n\n"
+        payment_block = payment_recap
     else:
-        payment_block = f"Total: {CURRENCY}{total:.2f}\nPayment: {pay_method}\n\n"
+        payment_block = f"Total: {CURRENCY}{total:.2f}\nPayment: {pay_method}"
 
+    # Two separate messages — the payment info is meant to be copied from
+    # while making the payment, and the receipt request is a distinct next
+    # step; splitting them keeps the tap-to-copy UPI ID/CLIQ alias/etc.
+    # from scrolling off together with a long wall of text.
     await safe_reply_markdown(
         update.message,
-        f"✅ Order #{order_id} confirmed!\n\n{summary}\n\n{payment_block}{receipt_prompt}",
+        f"✅ Order #{order_id} confirmed!\n\n{summary}\n\n{payment_block}",
     )
+    await safe_reply_markdown(update.message, receipt_prompt)
 
     # Notify admin
     if ADMIN_CHAT_ID:
