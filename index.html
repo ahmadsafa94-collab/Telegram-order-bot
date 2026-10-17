@@ -864,7 +864,7 @@ function renderOrders(){
   // ── Delivered subscriptions ──────────────────────────────
   if(d.length){
     html+=`<div class="sub-section-lbl">✅ Delivered (${d.length})</div>`;
-    d.forEach(([name,date,creds],i)=>{
+    d.forEach(([name,date,creds,oid],i)=>{
       const hasCredentials = creds && creds.trim().length > 0;
       const panelId = 'cp-'+i;
       const rowId   = 'cr-'+i;
@@ -875,7 +875,7 @@ function renderOrders(){
           <div style="display:flex;align-items:flex-start;gap:10px;padding:11px 15px;width:100%">
             <div class="sub-icon">✅</div>
             <div class="sub-info">
-              <div class="sub-name">${name}</div>
+              <div class="sub-name">${name}${oid?` <span style="color:var(--hint);font-weight:400">#${oid}</span>`:''}</div>
               ${date?`<div class="sub-meta">${date}</div>`:''}
               ${hasCredentials?`<div class="sub-meta" style="color:var(--teal2);margin-top:3px">Tap to view credentials ›</div>`:''}
             </div>
@@ -921,7 +921,7 @@ function renderOrders(){
           <div style="display:flex;align-items:flex-start;gap:10px;padding:11px 15px;width:100%">
             <div class="sub-icon">${info.icon}</div>
             <div class="sub-info">
-              <div class="sub-name">${name}</div>
+              <div class="sub-name">${name}${oid?` <span style="color:var(--hint);font-weight:400">#${oid}</span>`:''}</div>
               <div class="sub-meta">${info.label}</div>
             </div>
           </div>

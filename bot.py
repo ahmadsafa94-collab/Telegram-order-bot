@@ -95,7 +95,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "20"
+MINI_APP_VERSION = "21"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -2983,7 +2983,7 @@ def _shop_url(user_id: int = 0) -> str:
         conn = sqlite3.connect(DB_PATH)
         # Deliveries with credentials message for the "tap to see details" feature
         del_rows = conn.execute(
-            "SELECT id, item_id, delivered_at, message FROM deliveries "
+            "SELECT id, item_id, delivered_at, message, order_id FROM deliveries "
             "WHERE user_id = ? ORDER BY id DESC",
             (user_id,),
         ).fetchall()
@@ -3005,8 +3005,8 @@ def _shop_url(user_id: int = 0) -> str:
         oos_ids = [r[0] for r in oos_rows]
 
         delivered = [
-            [MENU.get(iid, (iid,))[0], dat[:10] if dat else "", msg or ""]
-            for _, iid, dat, msg in del_rows
+            [MENU.get(iid, (iid,))[0], dat[:10] if dat else "", msg or "", oid]
+            for _, iid, dat, msg, oid in del_rows
         ]
         pending = [
             # If the ORDER hasn't been paid yet (any of UNPAID_ORDER_STATUSES),
