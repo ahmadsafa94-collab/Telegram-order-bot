@@ -2682,16 +2682,16 @@ def db_user_purchase_history(user_id: int):
 # HELPERS
 # ------------------------------------------------------------------
 
-async def safe_reply_markdown(message, text: str):
+async def safe_reply_markdown(message, text: str, reply_markup=None):
     """Sends with Markdown parsing, but falls back to plain text if the
     content (e.g. an admin-entered product name with a stray _ or *)
     breaks Telegram's parser — a parse failure must never mean the whole
     order confirmation silently fails to send."""
     try:
-        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
     except Exception:
         logger.warning("Markdown parse failed on outgoing message — sending as plain text.")
-        await message.reply_text(text)
+        await message.reply_text(text, reply_markup=reply_markup)
 
 
 def md_escape(text: str) -> str:
@@ -4138,7 +4138,7 @@ COLLECTION_STATE_KEYS = [
     "awaiting_generic_field", "generic_data", "generic_order_id",
     "generic_item_id", "generic_fulfilment_id", "generic_account_type",
     "awaiting_payer_name_for_order", "pending_receipt_items", "awaiting_receipt_for_order",
-    "collecting_receipts_for_order",
+    "collecting_receipts_for_order", "pending_receipt_orders",
     "awaiting_book_link",
     "awaiting_discount_code_for_order",
 ]
@@ -4220,13 +4220,19 @@ async def restore_collection_state(context: ContextTypes.DEFAULT_TYPE, user_data
     reg_field = stash.get("awaiting_registration_field")
     if reg_field:
         prompt = IMD_FIELD_PROMPTS.get(reg_field, "Please send the requested information:")
-        await context.bot.send_message(chat_id=chat_id, text=f"Let's continue where we left off.\n\n{prompt}")
+        await context.bot.send_message(
+            chat_id=chat_id, text=f"Let's continue where we left off.\n\n{prompt}",
+            reply_markup=_cancel_button(),
+        )
         return
 
     gen_field = stash.get("awaiting_generic_field")
     if gen_field:
         prompt = GENERIC_FIELD_PROMPTS.get(gen_field, "Please send the requested information:")
-        await context.bot.send_message(chat_id=chat_id, text=f"Let's continue where we left off.\n\n{prompt}")
+        await context.bot.send_message(
+            chat_id=chat_id, text=f"Let's continue where we left off.\n\n{prompt}",
+            reply_markup=_cancel_button(),
+        )
         return
 
     # Was stuck at the New Account / Renewal question itself (before
@@ -4241,6 +4247,7 @@ async def restore_collection_state(context: ContextTypes.DEFAULT_TYPE, user_data
                 [
                     [InlineKeyboardButton("🆕 New Account", callback_data="gentype:new")],
                     [InlineKeyboardButton("🔄 Renewal of a previous account", callback_data="gentype:renew")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="cust_cancel")],
                 ]
             ),
         )
@@ -4250,11 +4257,13 @@ async def restore_collection_state(context: ContextTypes.DEFAULT_TYPE, user_data
         await context.bot.send_message(
             chat_id=chat_id,
             text="Let's continue where we left off — please upload the photo of your payment receipt:",
+            reply_markup=_cancel_button(),
         )
     elif stash.get("awaiting_payer_name_for_order"):
         await context.bot.send_message(
             chat_id=chat_id,
             text="Let's continue where we left off — please send the Full Name of the person who did the payment:",
+            reply_markup=_cancel_button(),
         )
 
 
@@ -5294,7 +5303,12 @@ async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "(screenshot is fine) as your next message here."
             )
 
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text(
+            text, parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("❌ Cancel Order", callback_data=f"cancel:{order_id}")]]
+            ),
+        )
 
     elif action == "cancel":
         db_update_status(order_id, "cancelled")
@@ -5375,8 +5389,11 @@ async def _accumulate_receipt_item(update: Update, context: ContextTypes.DEFAULT
         f"📎 Receipt {count} added.\n\n"
         "Send another if you paid in multiple parts, or tap Done when finished:",
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton(f"✅ Done ({count} receipt{'s' if count != 1 else ''})",
-                                   callback_data=f"receipts_done:{order_id}")]]
+            [
+                [InlineKeyboardButton(f"✅ Done ({count} receipt{'s' if count != 1 else ''})",
+                                       callback_data=f"receipts_done:{order_id}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cust_cancel")],
+            ]
         ),
     )
 
@@ -13511,12 +13528,20 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     # Two separate messages — the payment info is meant to be copied from
     # while making the payment, and the receipt request is a distinct next
     # step; splitting them keeps the tap-to-copy UPI ID/CLIQ alias/etc.
-    # from scrolling off together with a long wall of text.
+    # from scrolling off together with a long wall of text. Same Cancel
+    # Order button on both — reuses order_action's existing "cancel"
+    # handling (marks the order cancelled) rather than the generic
+    # cust_cancel, since there's now a real order sitting in
+    # awaiting_receipt that a bare "clear the flags" wouldn't resolve.
+    cancel_order_button = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❌ Cancel Order", callback_data=f"cancel:{order_id}")]]
+    )
     await safe_reply_markdown(
         update.message,
         f"✅ Order #{order_id} confirmed!\n\n{summary}\n\n{payment_block}",
+        reply_markup=cancel_order_button,
     )
-    await safe_reply_markdown(update.message, receipt_prompt)
+    await safe_reply_markdown(update.message, receipt_prompt, reply_markup=cancel_order_button)
 
     # Notify admin
     if ADMIN_CHAT_ID:
