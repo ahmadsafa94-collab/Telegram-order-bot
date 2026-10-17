@@ -8923,6 +8923,123 @@ async def http_submit_receipt(request):
     return web.json_response({"ok": True, "order_id": order_id, "status": "awaiting_confirmation"})
 
 
+# Payment-method values an order can be created with via /api/create_order:
+# the same strings the checkout stores (db_set_payment_method), limited to
+# the receipt-based methods. Telegram Stars and credits confirm instantly
+# and never need a receipt, so they're not offered here.
+def reply_bot_payment_method_codes() -> list:
+    return list(LOCAL_PAYMENT_COUNTRIES) + list(USA_PAYMENT_APPS) + ["card", "Cryptocurrency", "PayPal"]
+
+
+CREATE_ORDER_MAX_UNITS = 5
+
+
+def _reply_bot_order_total(user_id: int, order_items: dict) -> float:
+    """Server-side price for an order created by the reply bot: MENU prices,
+    with this customer's coworker pricing applied the same way as a Mini App
+    checkout (no credits or discount codes)."""
+    coworker_login = db_get_user_coworker(user_id)
+    if not coworker_login:
+        return round(sum(MENU[i][1] * q for i, q in order_items.items()), 2)
+    _, _, coworker_pct, imd_6m_price, imd_1y_price = coworker_login
+    fixed_prices = {"imd_6m": imd_6m_price, "imd_1y": imd_1y_price}
+    total = 0.0
+    for item_id, qty in order_items.items():
+        fixed = fixed_prices.get(item_id)
+        unit_price = fixed if fixed is not None else round(MENU[item_id][1] * (1 - coworker_pct / 100), 2)
+        total += unit_price * qty
+    return round(total, 2)
+
+
+async def http_create_order(request):
+    """Creates an order on a customer's behalf when the Mini App's submit
+    ("I've Paid ✅") failed and no order was ever created, so the reply bot
+    can then attach their receipt via /api/submit_receipt. Same as the
+    in-chat checkout: an order with the chosen payment method; account
+    details are collected here after payment is confirmed, and delivery
+    stays with this bot.
+
+    JSON body: {user_id, items: {item_id: quantity}, payment_method}.
+    If the customer already has an unpaid order, nothing is created and that
+    order is returned (409 with order_id) so the receipt goes to it instead."""
+    from aiohttp import web
+
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        body = await request.json()
+        user_id = int(body["user_id"])
+        requested = {str(k): int(v) for k, v in (body.get("items") or {}).items()}
+        payment_method = str(body.get("payment_method") or "").strip()
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return web.json_response({"error": "invalid request body"}, status=400)
+
+    codes = {c.lower(): c for c in reply_bot_payment_method_codes()}
+    if payment_method.lower() not in codes:
+        return web.json_response(
+            {"error": "unknown payment method", "allowed": reply_bot_payment_method_codes()}, status=400
+        )
+    payment_method = codes[payment_method.lower()]
+
+    sellable = set(all_toggleable_items()) | {
+        i for i in MANUAL_ACCESS_ITEMS if not ITEM_OVERRIDES.get(i, (None, None, None, False))[3]
+    }
+    order_items = {}
+    for item_id, qty in requested.items():
+        if item_id not in sellable or item_id not in MENU or qty < 1:
+            return web.json_response({"error": f"unknown product: {item_id}"}, status=400)
+        if db_is_out_of_stock(item_id):
+            return web.json_response({"error": f"{MENU[item_id][0]} is out of stock"}, status=409)
+        order_items[item_id] = qty
+    if not order_items or sum(order_items.values()) > CREATE_ORDER_MAX_UNITS:
+        return web.json_response(
+            {"error": f"order between 1 and {CREATE_ORDER_MAX_UNITS} subscriptions"}, status=400
+        )
+
+    if not db_user_exists(user_id):
+        return web.json_response(
+            {"error": "the customer hasn't started the shop bot yet"}, status=409
+        )
+    conn = sqlite3.connect(DB_PATH)
+    existing = conn.execute(
+        "SELECT id FROM orders WHERE user_id = ? AND status IN ('awaiting_payment', 'awaiting_receipt') "
+        "ORDER BY id DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    user_row = conn.execute("SELECT username FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    if existing:
+        return web.json_response(
+            {"error": "the customer already has an unpaid order", "order_id": existing[0]}, status=409
+        )
+
+    total = _reply_bot_order_total(user_id, order_items)
+    order_id = db_create_order(user_id, (user_row[0] if user_row else None) or str(user_id), order_items, total)
+    db_set_payment_method(order_id, payment_method)
+    coworker_login = db_get_user_coworker(user_id)
+    if coworker_login:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE orders SET coworker_id = ? WHERE id = ?", (coworker_login[0], order_id))
+        conn.commit()
+        conn.close()
+
+    lines = [f"{qty}x {MENU[i][0]}" for i, qty in order_items.items()]
+    try:
+        await request.app["application"].bot.send_message(
+            chat_id=user_id,
+            text=(
+                f"🧾 Order #{order_id} was created for you through our support chat:\n"
+                + "\n".join(lines)
+                + f"\n\nTotal: {CURRENCY}{total:.2f}\nPayment method: {payment_method}\n\n"
+                "Your receipt is being attached to it for verification. If any account details "
+                "are needed, I'll ask you for them here after the payment is confirmed."
+            ),
+        )
+    except Exception:
+        logger.exception("create_order: couldn't notify customer %s about order #%s", user_id, order_id)
+    return web.json_response({"ok": True, "order_id": order_id, "total": total, "payment_method": payment_method})
+
+
 async def http_public_catalog(request):
     """Read-only snapshot of what customers can buy right now and how they
     can pay, for the Medic-ChatBot reply bot. Uses the same item list as
@@ -8971,6 +9088,7 @@ async def http_public_catalog(request):
                 ),
             },
             "guide": SHOP_GUIDE_FOR_REPLY_BOT,
+            "payment_method_codes": reply_bot_payment_method_codes(),
             "generated_at": datetime.utcnow().isoformat() + "Z",
         }
     )
@@ -9117,6 +9235,7 @@ async def start_api_server(application):
     api_app.router.add_get("/api/customer_chat", http_customer_chat)
     api_app.router.add_get("/api/orders", http_all_orders)
     api_app.router.add_post("/api/submit_receipt", http_submit_receipt)
+    api_app.router.add_post("/api/create_order", http_create_order)
 
     runner = web.AppRunner(api_app)
     await runner.setup()
