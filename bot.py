@@ -3272,7 +3272,10 @@ async def main_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == BOOK_REQUEST_LABEL:
         context.user_data["awaiting_book_link"] = True
-        await update.message.reply_text("Please send the link of the book you're looking for:")
+        await update.message.reply_text(
+            "Please send the link of the book you're looking for:",
+            reply_markup=_cancel_button(),
+        )
 
     elif text == IMD_SEARCH_LABEL:
         await imd_search_start(update, context)
@@ -4164,6 +4167,34 @@ def clear_customer_flow_state(user_data: dict):
         user_data.pop(key, None)
 
 
+def _cancel_button() -> InlineKeyboardMarkup:
+    """Attached to every customer-facing prompt that asks them to reply
+    with something. Without this, a mistake, a change of mind, or iMD
+    repeatedly rejecting a value (see the username/email retry prompts in
+    run_imd_registration) left the conversation stuck with no way out —
+    every later message kept getting swallowed as an attempted answer to
+    the same stale prompt. See clear_customer_flow_state."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cust_cancel")]])
+
+
+async def customer_cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generic handler for the Cancel button above — clears whatever
+    collection flow was waiting on a reply and hands the customer back
+    their normal menu."""
+    query = update.callback_query
+    await query.answer()
+    clear_customer_flow_state(context.user_data)
+    try:
+        await query.edit_message_text("❌ Cancelled.")
+    except Exception:
+        pass
+    await context.bot.send_message(
+        chat_id=query.from_user.id,
+        text="Use the buttons below any time.",
+        reply_markup=main_menu_keyboard(query.from_user.id),
+    )
+
+
 def stash_collection_state(user_data: dict) -> bool:
     """Saves and clears any in-progress registration/generic/receipt flow.
     Returns True if anything was actually paused."""
@@ -4235,6 +4266,7 @@ async def start_ticket_message_collection(context: ContextTypes.DEFAULT_TYPE, us
     await context.bot.send_message(
         chat_id=chat_id,
         text="Please send a message describing the problem:",
+        reply_markup=_cancel_button(),
     )
 
 
@@ -4247,7 +4279,7 @@ async def ticket_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ticket_id = context.user_data.get("ticket_id")
     db_set_ticket_message(ticket_id, message=update.message.text)
     context.user_data["awaiting_ticket_field"] = "screenshot"
-    await update.message.reply_text("Thanks — now please send a screenshot:")
+    await update.message.reply_text("Thanks — now please send a screenshot:", reply_markup=_cancel_button())
 
 
 async def ticket_screenshot_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -5369,6 +5401,7 @@ async def receipts_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=query.message.chat_id,
         text="Please send the Full Name of the person who did the payment, as mentioned on the receipt:",
+        reply_markup=_cancel_button(),
     )
 
 
@@ -5881,7 +5914,7 @@ async def coworker_login_start(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     context.user_data.pop("coworker_login_username", None)
     context.user_data["awaiting_coworker_field"] = "username"
-    await update.message.reply_text("Enter your coworker username:")
+    await update.message.reply_text("Enter your coworker username:", reply_markup=_cancel_button())
 
 
 async def coworker_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5896,7 +5929,7 @@ async def coworker_field_reply(update: Update, context: ContextTypes.DEFAULT_TYP
     if field == "username":
         context.user_data["coworker_login_username"] = text
         context.user_data["awaiting_coworker_field"] = "password"
-        await update.message.reply_text("Enter your coworker password:")
+        await update.message.reply_text("Enter your coworker password:", reply_markup=_cancel_button())
         return
 
     # field == "password"
@@ -11472,7 +11505,7 @@ async def generic_type_selected(update: Update, context: ContextTypes.DEFAULT_TY
     label = "New Account" if account_type == "new" else "Renewal"
     # Plain text on purpose: the password rules mention symbols like _ and
     # #, and Telegram's Markdown parser breaks on unescaped underscores.
-    await query.edit_message_text(f"📝 {item_name} — {label}\n\n{fields[0][1]}")
+    await query.edit_message_text(f"📝 {item_name} — {label}\n\n{fields[0][1]}", reply_markup=_cancel_button())
 
 
 async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11494,12 +11527,12 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         if field == "username":
             error = validate_generic_username(value)
             if error:
-                await update.message.reply_text(error)
+                await update.message.reply_text(error, reply_markup=_cancel_button())
                 return
         elif field == "password":
             error = validate_generic_password(value)
             if error:
-                await update.message.reply_text(error)
+                await update.message.reply_text(error, reply_markup=_cancel_button())
                 return
 
         # Uniqueness — only meaningful for a brand-new registration, and
@@ -11509,7 +11542,8 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
             if db_credential_already_used(update.effective_user.id, item_id, field, value):
                 await update.message.reply_text(
                     f"You've already used this {field} to register for this subscription before. "
-                    "Please provide a different one:"
+                    "Please provide a different one:",
+                    reply_markup=_cancel_button(),
                 )
                 return
 
@@ -11522,7 +11556,7 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
     if idx + 1 < len(fields):
         next_field, next_prompt = fields[idx + 1]
         context.user_data["awaiting_generic_field"] = next_field
-        await update.message.reply_text(next_prompt)
+        await update.message.reply_text(next_prompt, reply_markup=_cancel_button())
         return
 
     # All fields collected — hand off to the admin for manual fulfilment.
@@ -11660,6 +11694,7 @@ async def start_generic_collection(context: ContextTypes.DEFAULT_TYPE, order_id:
             [
                 [InlineKeyboardButton("🆕 New Account", callback_data="gentype:new")],
                 [InlineKeyboardButton("🔄 Renewal of a previous account", callback_data="gentype:renew")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cust_cancel")],
             ]
         ),
     )
@@ -11689,6 +11724,7 @@ async def start_imd_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int
             [
                 [InlineKeyboardButton("🆕 New Account", callback_data="imdregtype:new")],
                 [InlineKeyboardButton("🔄 Renewal", callback_data="imdregtype:renew")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cust_cancel")],
             ]
         ),
     )
@@ -11709,7 +11745,7 @@ async def imd_registration_type_choice(update: Update, context: ContextTypes.DEF
         context.user_data["awaiting_registration_field"] = "email"
         text = "🎓 Let's set up your iMD account. Please fill this form to register:\n\nReply with your email address:"
 
-    await query.edit_message_text(text)
+    await query.edit_message_text(text, reply_markup=_cancel_button())
 
 
 async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11730,7 +11766,8 @@ async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT
     # retry (both paths funnel through here).
     if field == "username" and not is_renew and re.search(r"\s", value):
         await update.message.reply_text(
-            "⚠️ Username can't contain spaces — it must be one word. Please resend it:"
+            "⚠️ Username can't contain spaces — it must be one word. Please resend it:",
+            reply_markup=_cancel_button(),
         )
         return
 
@@ -11754,12 +11791,12 @@ async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT
     # New account: three fields in sequence.
     if field == "email":
         context.user_data["awaiting_registration_field"] = "username"
-        await update.message.reply_text("Desired username:")
+        await update.message.reply_text("Desired username:", reply_markup=_cancel_button())
         return
 
     if field == "username":
         context.user_data["awaiting_registration_field"] = "password"
-        await update.message.reply_text("Desired password:")
+        await update.message.reply_text("Desired password:", reply_markup=_cancel_button())
         return
 
     if field == "password":
@@ -12153,7 +12190,9 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
             customer_data["registration_data"] = {k: v for k, v in data.items() if k not in ("is_renew", "duration")}
             customer_data["registration_retry_field"] = retry_field
             customer_data["awaiting_registration_field"] = retry_field
-            await context.bot.send_message(chat_id=customer_user_id, text=customer_note)
+            await context.bot.send_message(
+                chat_id=customer_user_id, text=customer_note, reply_markup=_cancel_button()
+            )
         return
 
     # ---- Email problem: ask the customer for a different address.
@@ -12178,6 +12217,7 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
             await context.bot.send_message(
                 chat_id=customer_user_id,
                 text="⚠️ That email address wasn't accepted by iMD.\n\nPlease reply with a different email address:",
+                reply_markup=_cancel_button(),
             )
         return
 
@@ -13860,6 +13900,7 @@ def main():
     app.add_handler(CommandHandler("listserials", show_serials))
     app.add_handler(CommandHandler("removeserial", remove_serial_command))
     app.add_handler(CallbackQueryHandler(order_action, pattern=r"^(paid|cancel):"))
+    app.add_handler(CallbackQueryHandler(customer_cancel_flow, pattern=r"^cust_cancel$"))
     app.add_handler(CallbackQueryHandler(admin_action, pattern=r"^admin_(confirm|reject):"))
     app.add_handler(CallbackQueryHandler(admin_comment_start, pattern=r"^admin_comment:"))
     app.add_handler(CallbackQueryHandler(deliver_start, pattern=r"^deliver:"))
