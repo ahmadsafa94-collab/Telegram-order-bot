@@ -8885,6 +8885,48 @@ async def http_all_orders(request):
     return web.json_response({"orders": orders})
 
 
+async def http_sales_export(request):
+    """Paid orders for the owner's sales report (Google Sheets, filled by Claude).
+    ?since=YYYY-MM-DD limits it to orders paid on or after that day (UTC);
+    without it every paid order is returned. One entry per order, with each
+    item's id, name, quantity and list price."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    since = (request.query.get("since") or "").strip()
+    if since:
+        try:
+            datetime.strptime(since, "%Y-%m-%d")
+        except ValueError:
+            return web.json_response({"error": "since must be YYYY-MM-DD"}, status=400)
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, user_id, username, items_json, total, status, created_at, paid_at, delivered_at, "
+        "payment_method, discount_code, credits_applied FROM orders "
+        "WHERE status IN ('paid', 'delivered') AND COALESCE(paid_at, created_at) >= ? ORDER BY id",
+        (since,),
+    ).fetchall()
+    conn.close()
+    orders = []
+    for (oid, uid, username, items_json, total, status, created_at, paid_at, delivered_at,
+         payment_method, discount_code, credits_applied) in rows:
+        try:
+            items = json.loads(items_json) or {}
+        except (TypeError, ValueError):
+            items = {}
+        orders.append({
+            "order_id": oid, "user_id": uid, "username": username, "total": total, "status": status,
+            "created_at": created_at, "paid_at": paid_at or created_at, "delivered_at": delivered_at,
+            "payment_method": payment_method, "discount_code": discount_code,
+            "credits_applied": credits_applied or 0,
+            "items": [
+                {"item_id": i, "name": MENU.get(i, (i, 0))[0], "quantity": q, "list_price": MENU.get(i, (i, 0))[1]}
+                for i, q in items.items()
+            ],
+        })
+    return web.json_response({"orders": orders, "count": len(orders)})
+
+
 RECEIPT_MAX_FILES = 5
 RECEIPT_MAX_BYTES = 10 * 1024 * 1024
 
@@ -9436,6 +9478,7 @@ async def start_api_server(application):
     api_app.router.add_post("/api/submit_receipt", http_submit_receipt)
     api_app.router.add_post("/api/create_order", http_create_order)
     api_app.router.add_post("/api/register_account", http_register_account)
+    api_app.router.add_get("/api/sales_export", http_sales_export)
     api_app.router.add_post("/api/submit_order", http_submit_order)
     api_app.router.add_options("/api/submit_order", http_submit_order_options)
 
