@@ -8766,6 +8766,7 @@ async def http_customer_orders(request):
                 "paid_at": paid_at,
                 "items": [
                     {
+                        "item_id": item_id,
                         "name": MENU.get(item_id, (item_id,))[0],
                         "quantity": qty,
                         "delivery": [
@@ -9061,6 +9062,131 @@ async def http_create_order(request):
     return web.json_response({"ok": True, "order_id": order_id, "total": total, "payment_method": payment_method})
 
 
+# Account fields the reply bot may submit for each kind of subscription,
+# matching what the in-bot forms and the Mini App collect.
+REGISTER_FIELDS = {
+    ("imd", "new"): ["email", "username", "password"],
+    ("imd", "renew"): ["prev_username"],
+    ("generic", "new"): [f for f, _ in GENERIC_FIELDS],
+    ("generic", "renew"): [f for f, _ in RENEWAL_FIELDS],
+}
+
+
+def _register_kind(item_id: str):
+    if item_id in IMD_TRIGGER_ITEMS:
+        return "imd"
+    if item_id in UPTODATE_AI_TRIGGER_ITEMS:
+        return "none"  # delivered as a code, nothing to collect
+    if item_id.startswith("book_") or item_id in MANUAL_ACCESS_ITEMS:
+        return None  # nothing the customer registers
+    return "generic"
+
+
+async def http_register_account(request):
+    """Lets the reply bot hand in a customer's account details for a paid
+    order, as if they'd filled the registration form here, when the admin
+    told it to (e.g. the customer sent them as a screenshot in the support
+    chat). The details are stored on the next unit still waiting for them,
+    and the normal fulfilment queue takes over: iMD registers automatically,
+    other products go to the admin for delivery. Delivery stays with this bot.
+
+    JSON body: {user_id, order_id, item_id (optional), info: {account_type:
+    "new"|"renew", ...fields}}."""
+    from aiohttp import web
+    from telegram.ext import CallbackContext
+
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        body = await request.json()
+        user_id = int(body["user_id"])
+        order_id = int(body["order_id"])
+        wanted_item = str(body.get("item_id") or "").strip()
+        info = {str(k): str(v).strip() for k, v in (body.get("info") or {}).items()}
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return web.json_response({"error": "invalid request body"}, status=400)
+
+    order = db_get_order(order_id)
+    if not order or order[1] != user_id:
+        return web.json_response({"error": f"order #{order_id} doesn't belong to this customer"}, status=404)
+    if order[5] not in ("paid", "delivered"):
+        return web.json_response(
+            {"error": "this order isn't paid yet, so its account can't be registered",
+             "status": order[5], "status_meaning": ORDER_STATUS_MEANINGS.get(order[5], order[5])},
+            status=409,
+        )
+
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, item_id FROM fulfilment WHERE order_id = ? AND user_id = ? AND state = 'needs_info' ORDER BY id",
+        (order_id, user_id),
+    ).fetchall()
+    conn.close()
+    if wanted_item:
+        rows = [r for r in rows if r[1] == wanted_item]
+    rows = [r for r in rows if _register_kind(r[1]) is not None]
+    if not rows:
+        return web.json_response(
+            {"error": f"nothing in order #{order_id} is waiting for account details"}, status=409
+        )
+    fulfilment_id, item_id = rows[0]
+    kind = _register_kind(item_id)
+
+    if kind == "none":
+        clean = {"account_type": "new"}
+    else:
+        account_type = (info.get("account_type") or "new").lower()
+        if account_type in ("renewal", "renew", "existing"):
+            account_type = "renew"
+        if account_type not in ("new", "renew"):
+            return web.json_response({"error": "account_type must be new or renew"}, status=400)
+        fields = REGISTER_FIELDS[(kind, account_type)]
+        missing = [f for f in fields if not info.get(f)]
+        if missing:
+            return web.json_response(
+                {"error": "missing account details: " + ", ".join(missing), "required": fields}, status=400
+            )
+        clean = {"account_type": account_type, **{f: info[f] for f in fields}}
+        problem = None
+        if account_type == "new" and kind == "imd" and re.search(r"\s", clean["username"]):
+            problem = "the username can't contain spaces"
+        elif account_type == "new" and kind == "generic":
+            problem = validate_generic_username(clean["username"]) or validate_generic_password(clean["password"])
+        if problem:
+            return web.json_response({"error": re.split(r"\s*Please choose", problem)[0].strip(), "required": fields}, status=400)
+
+    application = request.app["application"]
+    # Drop any half-finished form for this unit in the customer's session,
+    # so this bot doesn't keep asking them for the same details.
+    customer_data = application.user_data[user_id]
+    if customer_data.get("registration_fulfilment_id") == fulfilment_id:
+        for key in ("registration_order", "registration_data", "registration_duration", "registration_item_id",
+                    "registration_fulfilment_id", "awaiting_registration_field", "registration_is_renew"):
+            customer_data.pop(key, None)
+    if customer_data.get("generic_fulfilment_id") == fulfilment_id:
+        for key in ("generic_fulfilment_id", "generic_item_id", "generic_account_type", "generic_data",
+                    "awaiting_generic_field"):
+            customer_data.pop(key, None)
+
+    db_set_fulfilment_info(fulfilment_id, clean)
+    item_name = MENU.get(item_id, (item_id, 0))[0]
+    try:
+        await application.bot.send_message(
+            chat_id=user_id,
+            text=(
+                f"📝 Your account details for {item_name} (Order #{order_id}) were received through "
+                "our support chat. We're setting it up now."
+            ),
+        )
+    except Exception:
+        logger.exception("register_account: couldn't message customer %s", user_id)
+    context = CallbackContext(application, chat_id=user_id, user_id=user_id)
+    application.create_task(process_next_in_queue(context, user_id, order_id))
+    return web.json_response(
+        {"ok": True, "order_id": order_id, "fulfilment_id": fulfilment_id, "item_id": item_id, "item_name": item_name}
+    )
+
+
 async def http_public_catalog(request):
     """Read-only snapshot of what customers can buy right now and how they
     can pay, for the Medic-ChatBot reply bot. Uses the same item list as
@@ -9257,6 +9383,7 @@ async def start_api_server(application):
     api_app.router.add_get("/api/orders", http_all_orders)
     api_app.router.add_post("/api/submit_receipt", http_submit_receipt)
     api_app.router.add_post("/api/create_order", http_create_order)
+    api_app.router.add_post("/api/register_account", http_register_account)
     api_app.router.add_post("/api/submit_order", http_submit_order)
     api_app.router.add_options("/api/submit_order", http_submit_order_options)
 
