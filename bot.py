@@ -39,6 +39,7 @@ import logging
 import os
 import math
 import re
+import sys
 import unicodedata
 import sqlite3
 from datetime import datetime, timedelta, time as dt_time
@@ -846,7 +847,11 @@ CARD_TUTORIAL_IMAGES = [
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
+    # stdout, so Railway doesn't flag every line as an error (stderr is shown as errors).
+    stream=sys.stdout,
 )
+# httpx logs every request URL at INFO, and Telegram URLs contain the bot token.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -5801,9 +5806,30 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
             messages=[{"role": "user", "content": content}],
         )
         raw = response.content[0].text.strip()
-        raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
+        verdict = _parse_ai_json(raw)
+        if verdict is None:
+            # It sometimes answers in prose (e.g. pointing out duplicate images); ask once more
+            # for just the JSON before giving up on the check.
+            retry = await asyncio.to_thread(
+                client.messages.create,
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                messages=[
+                    {"role": "user", "content": content},
+                    {"role": "assistant", "content": raw},
+                    {"role": "user", "content": (
+                        "Reply now with only the JSON object in the exact format requested above, "
+                        "with no other text. Mention anything else (such as duplicate images) in its "
+                        "reason field."
+                    )},
+                ],
+            )
+            raw = retry.content[0].text.strip()
+            verdict = _parse_ai_json(raw)
         try:
-            return json.loads(raw)
+            if verdict is None:
+                raise json.JSONDecodeError("no JSON object", raw, 0)
+            return verdict
         except json.JSONDecodeError:
             logger.error("AI receipt analysis returned non-JSON — raw response: %s", raw[:500])
             if ADMIN_CHAT_ID:
@@ -5829,6 +5855,22 @@ async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: lis
             except Exception:
                 pass
         return None
+
+
+def _parse_ai_json(raw: str):
+    """The JSON object in a model reply, also when it's wrapped in a code fence or prose."""
+    text = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        try:
+            value = json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            return None
+    return value if isinstance(value, dict) else None
 
 
 def _ai_verdict_label(verdict: dict, payment_method: str = None) -> str:
@@ -9126,8 +9168,18 @@ async def http_register_account(request):
         rows = [r for r in rows if r[1] == wanted_item]
     rows = [r for r in rows if _register_kind(r[1]) is not None]
     if not rows:
+        # Usually the customer already gave the details here (or the account was delivered):
+        # say where each item stands so the reply bot can tell them.
+        conn = sqlite3.connect(DB_PATH)
+        states = [r[0] for r in conn.execute(
+            "SELECT state FROM fulfilment WHERE order_id = ? AND user_id = ?", (order_id, user_id)
+        ).fetchall()]
+        conn.close()
         return web.json_response(
-            {"error": f"nothing in order #{order_id} is waiting for account details"}, status=409
+            {"error": f"nothing in order #{order_id} is waiting for account details",
+             "already": bool(states) and all(st in ("awaiting_delivery", "delivered") for st in states),
+             "states": [FULFILMENT_STATE_MEANINGS.get(st, st) for st in states]},
+            status=409,
         )
     fulfilment_id, item_id = rows[0]
     kind = _register_kind(item_id)
@@ -9392,15 +9444,20 @@ async def start_api_server(application):
     try:
         site = web.TCPSite(runner, "0.0.0.0", BOT_API_PORT)
         await site.start()
-        application.bot_data["api_runner"] = runner
+        # Not in bot_data: that's pickled by the persistence, and a runner can't be,
+        # which made every save fail (so nothing was persisted at all).
+        _api_runner["runner"] = runner
         logger.info("Mini App API server listening on 0.0.0.0:%s", BOT_API_PORT)
     except OSError:
         logger.exception("Could not bind Mini App API server to port %s — skipping", BOT_API_PORT)
         await runner.cleanup()
 
 
+_api_runner: dict = {}
+
+
 async def stop_api_server(application):
-    runner = application.bot_data.pop("api_runner", None)
+    runner = _api_runner.pop("runner", None)
     if runner:
         await runner.cleanup()
 
@@ -9551,7 +9608,7 @@ async def refresh_admin_keyboard(context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
-            text="​",  # zero-width space — invisible but satisfies Telegram's non-empty requirement
+            text="\u2800",  # blank Braille pattern: invisible, but unlike a zero-width space Telegram counts it as text
             reply_markup=admin_menu_keyboard(),
         )
     except Exception:
