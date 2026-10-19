@@ -6637,12 +6637,34 @@ async def admin_sales_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"⚠️ Couldn't build the sales Excel: {type(e).__name__}: {e}")
 
 
+def log_daily_sales(day):
+    """One machine-readable log line per finished day. A scheduled Claude
+    task reads it from the Railway logs and appends it to the owner's
+    Google Sheet, so the bot needs no Google credentials."""
+    days, _ = db_daily_sales(day)
+    d = days[-1] if days and days[-1]["day"] == day else {"orders": 0, "received": 0.0, "items": []}
+    costs = round(sum(qty * c for _, qty, c in d["items"]), 2)
+    logger.info("DAILY_SALES %s", json.dumps({
+        "day": day.isoformat(),
+        "orders": d["orders"],
+        "accounts": sum(qty for _, qty, _ in d["items"]),
+        "received": round(d["received"], 2),
+        "costs": costs,
+        "profit": round(d["received"] - costs, 2),
+        "items": [[name, qty, c] for name, qty, c in d["items"]],
+    }, ensure_ascii=False))
+
+
 async def daily_sales_excel_job(context: ContextTypes.DEFAULT_TYPE):
     """Shortly after local midnight: yesterday is complete, so send the
     workbook with yesterday as its newest row."""
     if not ADMIN_CHAT_ID:
         return
     yesterday = (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date() - timedelta(days=1)
+    try:
+        log_daily_sales(yesterday)
+    except Exception:
+        logger.exception("Daily sales log line failed")
     try:
         await send_sales_excel(context.bot, ADMIN_CHAT_ID, yesterday, "🌙 Daily sales report")
     except Exception as e:
