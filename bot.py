@@ -96,7 +96,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "21"
+MINI_APP_VERSION = "22"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -2962,6 +2962,24 @@ def _shop_url(user_id: int = 0) -> str:
             json.dumps(data, separators=(",", ":")).encode()
         ).decode().rstrip("=")
 
+    # Auth (uid/tok) and the API base are their own short query params,
+    # never inside the subs= blob below. That blob carries every delivered
+    # item's full credential text and only grows as a customer accumulates
+    # orders — long enough, for an established customer, to get corrupted or
+    # truncated somewhere between here and the Mini App's JSON.parse(atob(...)),
+    # which fails silently and leaves SUBS_DATA null. If uid/tok lived inside
+    # it, that silently takes checkout authentication down with it — exactly
+    # what produced "Unauthorized" on I've Paid for customers with a long
+    # subscription history. Keeping them separate (and before subs= in the
+    # URL, so any trailing truncation can only ever eat the display blob)
+    # means the Mini App can always authenticate even when subs= can't be
+    # parsed at all.
+    from urllib.parse import quote as _urlquote
+    auth_params = (
+        f"&uid={user_id}&tok={_mini_app_token(user_id)}&api={_urlquote(BOT_API_URL, safe='')}"
+        if user_id else ""
+    )
+
     # Always include custom catalog items so the Mini App catalog stays in sync.
     # Name/price come from MENU so 📦 Manage Stock → Edit applies to them too,
     # and removed ones are left out.
@@ -3070,28 +3088,22 @@ def _shop_url(user_id: int = 0) -> str:
             "rm": removed_ids,
             "cr": credits_balance,
             "dc": active_codes,
-            "api": BOT_API_URL,
             "cw": coworker_pct,
             "cwp": coworker_imd_prices,
             # Explicit coworker flag (not just inferring from cw>0) — the
             # Mini App uses this to show the My Orders button only to
             # coworkers, never regular customers.
             "cwid": coworker_login[0] if coworker_login else 0,
-            # Self-signed identity for the Mini App's Orders-tab API calls —
-            # see _verify_mini_app_token. Not Telegram's own initData, which
-            # turned out to be unreliable across real clients.
-            "uid": user_id,
-            "tok": _mini_app_token(user_id),
         }
-        return f"{MINI_APP_URL}?v={MINI_APP_VERSION}&subs={_encode(data)}"
+        return f"{MINI_APP_URL}?v={MINI_APP_VERSION}{auth_params}&subs={_encode(data)}"
     except Exception:
         logger.exception("_shop_url: failed to encode subscription data for user %s", user_id)
         if custom:
             try:
-                return f"{MINI_APP_URL}?v={MINI_APP_VERSION}&subs={_encode({'d':[],'p':[],'c':custom})}"
+                return f"{MINI_APP_URL}?v={MINI_APP_VERSION}{auth_params}&subs={_encode({'d':[],'p':[],'c':custom})}"
             except Exception:
                 pass
-        return f"{MINI_APP_URL}?v={MINI_APP_VERSION}"
+        return f"{MINI_APP_URL}?v={MINI_APP_VERSION}{auth_params}"
 
 
 def main_menu_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
