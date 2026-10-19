@@ -44,10 +44,13 @@ import unicodedata
 import sqlite3
 from datetime import datetime, timedelta, time as dt_time
 
+from sales_excel import build_sales_workbook
+
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InlineQueryResultArticle,
+    InputFile,
     InputMediaDocument,
     InputMediaPhoto,
     InputTextMessageContent,
@@ -232,6 +235,19 @@ MENU = {
     # Telegram AI bots — no registration details needed; access is granted
     # directly on the relevant Telegram bot after payment.
     "medical_toolkit": ("Medical Toolkit Bot Access - 1 Month", 5.00),
+}
+
+# What one account of each product costs the owner, in USD, for the daily
+# sales Excel. Only seeds the item_costs table on first run; after that the
+# owner edits them in 📦 Manage Stock → product → 💲 Edit Cost. Anything not
+# listed starts at $0.
+DEFAULT_ITEM_COSTS = {
+    "imd_6m": 33.5, "imd_1y": 47.5, "imd_2y": 95.0,  # 2 Years = two 1-year serials
+    "imd_new_6m": 33.5, "imd_renew_6m": 33.5, "imd_new_1y": 47.5, "imd_renew_1y": 47.5,
+    "up_online_web": 5.0, "up_offline_web": 5.0, "up_pathways_web": 5.0,
+    "up_pathways_app": 10.0,
+    "amboss_library": 30.0, "amboss_premium_1y": 35.0, "item4": 35.0,
+    "boardvitals": 35.0,
 }
 
 # Order the single-choice items appear in the main menu.
@@ -881,6 +897,9 @@ def db_init():
         ("payment_method", "TEXT"), ("payer_name", "TEXT"), ("receipt_photo_file_id", "TEXT"),
         ("receipt_reference", "TEXT"), ("discount_code", "TEXT"),
         ("credits_applied", "INTEGER"), ("paid_at", "TEXT"),
+        # {item_id: cost per account} at the moment the order was paid, so a
+        # later cost change never rewrites past days in the sales Excel.
+        ("costs_json", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE orders ADD COLUMN {column} {coltype}")
@@ -1195,6 +1214,22 @@ def db_init():
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS chat_log_user ON chat_log (user_id, id)")
+
+    # Owner's cost per account of each product (daily sales Excel).
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS item_costs (
+            item_id TEXT PRIMARY KEY,
+            cost REAL NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    now = datetime.utcnow().isoformat()
+    conn.executemany(
+        "INSERT OR IGNORE INTO item_costs (item_id, cost, updated_at) VALUES (?, ?, ?)",
+        [(item_id, cost, now) for item_id, cost in DEFAULT_ITEM_COSTS.items()],
+    )
 
     conn.commit()
     conn.close()
@@ -1522,6 +1557,80 @@ def db_sales_by_method_since(since_iso: str):
     ).fetchall()
     conn.close()
     return [(method, float(total or 0), count) for method, total, count in rows]
+
+
+def db_get_item_costs() -> dict:
+    """{item_id: cost per account in USD} for every product with a cost set."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT item_id, cost FROM item_costs").fetchall()
+    conn.close()
+    return {item_id: float(cost) for item_id, cost in rows}
+
+
+def db_set_item_cost(item_id: str, cost: float):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO item_costs (item_id, cost, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(item_id) DO UPDATE SET cost = excluded.cost, updated_at = excluded.updated_at",
+        (item_id, cost, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_daily_sales(until_local_day):
+    """Paid orders grouped by local day (REPORT_UTC_OFFSET), from the first
+    sale up to and including until_local_day, with a row for every day in
+    between. Same paid-order filter as db_sales_since; an order counts on
+    the day it was paid. Returns (days, products_sold) for sales_excel."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT items_json, total, COALESCE(paid_at, created_at), costs_json FROM orders "
+        "WHERE status NOT IN ('awaiting_payment', 'awaiting_receipt', "
+        "'awaiting_confirmation', 'cancelled', 'rejected')"
+    ).fetchall()
+    conn.close()
+
+    offset = timedelta(hours=REPORT_UTC_OFFSET)
+    current_costs = db_get_item_costs()
+    per_day = {}
+    sold = {}
+    for items_json, total, when, costs_json in rows:
+        try:
+            items = json.loads(items_json)
+            day = (datetime.fromisoformat(when) + offset).date()
+        except (TypeError, ValueError):
+            continue
+        if day > until_local_day:
+            continue
+        try:
+            snapshot = json.loads(costs_json) if costs_json else {}
+        except ValueError:
+            snapshot = {}
+        d = per_day.setdefault(day, {"orders": 0, "received": 0.0, "items": {}})
+        d["orders"] += 1
+        d["received"] += float(total or 0)
+        for item_id, qty in items.items():
+            cost_each = snapshot.get(item_id, current_costs.get(item_id, 0.0))
+            key = (item_id, float(cost_each))
+            d["items"][key] = d["items"].get(key, 0) + int(qty)
+            sold[item_id] = sold.get(item_id, 0) + int(qty)
+
+    days = []
+    if per_day:
+        day = min(per_day)
+        while day <= until_local_day:
+            d = per_day.get(day, {"orders": 0, "received": 0.0, "items": {}})
+            items = sorted(
+                ((MENU.get(i, (i,))[0], qty, cost) for (i, cost), qty in d["items"].items()),
+                key=lambda t: (-t[1], t[0]),
+            )
+            days.append({"day": day, "orders": d["orders"], "received": d["received"], "items": items})
+            day += timedelta(days=1)
+    products_sold = sorted(
+        ((MENU.get(i, (i,))[0], qty) for i, qty in sold.items()), key=lambda t: (-t[1], t[0])
+    )
+    return days, products_sold
 
 
 def db_add_message(order_id: int, user_id: int, direction: str, body: str, delivered: bool = True) -> int:
@@ -2596,10 +2705,22 @@ def db_update_status(order_id: int, status: str):
     conn = sqlite3.connect(DB_PATH)
     if status == "paid":
         # COALESCE so re-confirming an already-paid order (e.g. a double
-        # tap) never clobbers the original payment timestamp.
+        # tap) never clobbers the original payment timestamp or costs.
+        costs_json = None
+        row = conn.execute("SELECT items_json FROM orders WHERE id = ?", (order_id,)).fetchone()
+        if row:
+            try:
+                item_ids = list(json.loads(row[0]).keys())
+            except (TypeError, ValueError, AttributeError):
+                item_ids = []
+            known = db_get_item_costs()
+            # Only costs that are set; an item without one is priced at
+            # report time, so setting its cost later still counts it.
+            costs_json = json.dumps({i: known[i] for i in item_ids if i in known})
         conn.execute(
-            "UPDATE orders SET status = ?, paid_at = COALESCE(paid_at, ?) WHERE id = ?",
-            (status, datetime.utcnow().isoformat(), order_id),
+            "UPDATE orders SET status = ?, paid_at = COALESCE(paid_at, ?), "
+            "costs_json = COALESCE(costs_json, ?) WHERE id = ?",
+            (status, datetime.utcnow().isoformat(), costs_json, order_id),
         )
     else:
         conn.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
@@ -2900,6 +3021,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_new_sub_field", "new_sub_data",
     "awaiting_book_price_for", "awaiting_book_message_for",
     "awaiting_stock_edit_field", "stock_edit_item_id", "stock_edit_name", "stock_edit_duration",
+    "awaiting_stock_cost_for",
     "awaiting_imd_catalog_username", "awaiting_imd_catalog_password",
     "awaiting_imd_session_token", "imd_extract_username",
     "awaiting_imd_api_url", "imd_saved_token",
@@ -6493,9 +6615,100 @@ async def admin_input_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("This Week", callback_data="sales:week")],
                 [InlineKeyboardButton("This Month", callback_data="sales:month")],
                 [InlineKeyboardButton("Overall (Lifetime)", callback_data="sales:overall")],
+                [InlineKeyboardButton("📊 Excel file (daily profit)", callback_data="salesxlsx")],
             ]
         ),
     )
+
+
+def _sales_excel_file(until_local_day):
+    """(file bytes, caption) for the daily sales Excel up to until_local_day."""
+    days, products_sold = db_daily_sales(until_local_day)
+    costs = db_get_item_costs()
+    cost_rows = sorted(
+        ((MENU.get(i, (i,))[0], i, costs.get(i, 0.0)) for i in set(all_toggleable_items()) | set(costs)),
+        key=lambda t: t[0].lower(),
+    )
+    generated = (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).strftime("%d %b %Y %H:%M")
+    data = build_sales_workbook(days, products_sold, cost_rows, generated)
+
+    last = days[-1] if days and days[-1]["day"] == until_local_day else None
+    label = until_local_day.strftime("%a %d %b %Y")
+    if last and last["orders"]:
+        cost = sum(qty * c for _, qty, c in last["items"])
+        accounts = sum(qty for _, qty, _ in last["items"])
+        caption = (
+            f"📊 {label}\n"
+            f"Accounts sold: {accounts} ({last['orders']} orders)\n"
+            f"Received: {CURRENCY}{last['received']:.2f}\n"
+            f"Costs: {CURRENCY}{cost:.2f}\n"
+            f"Profit: {CURRENCY}{last['received'] - cost:.2f}"
+        )
+    else:
+        caption = f"📊 {label}\nNo sales."
+    return data, caption
+
+
+async def send_sales_excel(bot, chat_id: int, until_local_day, title: str):
+    data, caption = _sales_excel_file(until_local_day)
+    await bot.send_document(
+        chat_id=chat_id,
+        document=InputFile(io.BytesIO(data), filename="Medic_Accounts_sales.xlsx"),
+        caption=f"{title}\n\n{caption}\n\nCosts per account: 📦 Manage Stock → product → 💲 Edit Cost.",
+    )
+
+
+async def admin_sales_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """📈 Input → 📊 Excel file: the daily sales workbook up to today so far."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer("Preparing the Excel file…")
+    today = (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date()
+    try:
+        await send_sales_excel(context.bot, ADMIN_CHAT_ID, today, "📊 Daily sales (today so far)")
+    except Exception as e:
+        logger.exception("Sales Excel failed")
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"⚠️ Couldn't build the sales Excel: {type(e).__name__}: {e}")
+
+
+def log_daily_sales(day):
+    """One machine-readable log line per finished day. A scheduled Claude
+    task reads it from the Railway logs and appends it to the owner's
+    Google Sheet, so the bot needs no Google credentials."""
+    days, _ = db_daily_sales(day)
+    d = days[-1] if days and days[-1]["day"] == day else {"orders": 0, "received": 0.0, "items": []}
+    costs = round(sum(qty * c for _, qty, c in d["items"]), 2)
+    logger.info("DAILY_SALES %s", json.dumps({
+        "day": day.isoformat(),
+        "orders": d["orders"],
+        "accounts": sum(qty for _, qty, _ in d["items"]),
+        "received": round(d["received"], 2),
+        "costs": costs,
+        "profit": round(d["received"] - costs, 2),
+        "items": [[name, qty, c] for name, qty, c in d["items"]],
+    }, ensure_ascii=False))
+
+
+async def daily_sales_excel_job(context: ContextTypes.DEFAULT_TYPE):
+    """Shortly after local midnight: yesterday is complete, so send the
+    workbook with yesterday as its newest row."""
+    if not ADMIN_CHAT_ID:
+        return
+    yesterday = (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date() - timedelta(days=1)
+    try:
+        log_daily_sales(yesterday)
+    except Exception:
+        logger.exception("Daily sales log line failed")
+    try:
+        await send_sales_excel(context.bot, ADMIN_CHAT_ID, yesterday, "🌙 Daily sales report")
+    except Exception as e:
+        logger.exception("Daily sales Excel failed")
+        try:
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"⚠️ Daily sales Excel failed: {type(e).__name__}: {e}")
+        except Exception:
+            pass
 
 
 async def admin_sales_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6692,10 +6905,65 @@ async def stock_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _stock_item_text(item_id: str) -> str:
+    name, price = MENU.get(item_id, (item_id, 0))
+    cost = db_get_item_costs().get(item_id, 0.0)
+    return (
+        f"📦 {name}\nPrice: {CURRENCY}{price:.2f}\nYour cost: {CURRENCY}{cost:.2f}\n\n"
+        "What would you like to do?"
+    )
+
+
+async def stock_cost_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """💲 Edit Cost: asks what one account of this product costs the owner."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    item_id = query.data.split(":", 1)[1]
+    clear_admin_flow_state(context.user_data)
+    context.user_data["awaiting_stock_cost_for"] = item_id
+    name = MENU.get(item_id, (item_id,))[0]
+    cost = db_get_item_costs().get(item_id, 0.0)
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=(
+            f"💲 {name}\nCurrent cost: {CURRENCY}{cost:.2f} per account\n\n"
+            "Send the new cost in USD (e.g. 47.5), or /skip to keep it.\n"
+            "It applies to sales from now on; past days keep the cost they were sold at."
+        ),
+    )
+
+
+async def stock_cost_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    item_id = context.user_data.get("awaiting_stock_cost_for")
+    if not item_id:
+        return
+    text = update.message.text.strip().replace("$", "").replace(",", ".")
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Manage Stock", callback_data="stock_back")]])
+    if text == "/skip":
+        context.user_data.pop("awaiting_stock_cost_for", None)
+        await update.message.reply_text("Cost unchanged.", reply_markup=back)
+        return
+    try:
+        cost = float(text)
+        if cost < 0 or not math.isfinite(cost):
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("That doesn't look like a cost. Send a number like 47.5, or /skip:")
+        return
+    context.user_data.pop("awaiting_stock_cost_for", None)
+    db_set_item_cost(item_id, cost)
+    name = MENU.get(item_id, (item_id,))[0]
+    await update.message.reply_text(f"✅ {name}: cost set to {CURRENCY}{cost:.2f} per account.", reply_markup=back)
+
+
 def _stock_item_detail_keyboard(item_id: str) -> InlineKeyboardMarkup:
     out = db_is_out_of_stock(item_id)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ Edit", callback_data=f"stockedit:{item_id}")],
+        [InlineKeyboardButton("💲 Edit Cost", callback_data=f"stockcost:{item_id}")],
         [InlineKeyboardButton("🗑 Remove", callback_data=f"stockremove:{item_id}")],
         [InlineKeyboardButton(
             "🚫 Mark Out of Stock" if not out else "✅ Mark Available",
@@ -6716,7 +6984,7 @@ async def stock_item_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     item_id = query.data.split(":", 1)[1]
     name, price = MENU.get(item_id, (item_id, 0))
     await query.edit_message_text(
-        f"📦 {name}\nPrice: {CURRENCY}{price:.2f}\n\nWhat would you like to do?",
+        _stock_item_text(item_id),
         reply_markup=_stock_item_detail_keyboard(item_id),
     )
 
@@ -6746,7 +7014,7 @@ async def stock_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name, price = MENU.get(item_id, (item_id, 0))
     try:
         await query.edit_message_text(
-            f"📦 {name}\nPrice: {CURRENCY}{price:.2f}\n\nWhat would you like to do?",
+            _stock_item_text(item_id),
             reply_markup=_stock_item_detail_keyboard(item_id),
         )
     except Exception:
@@ -11631,6 +11899,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get("awaiting_stock_edit_field"):
             await stock_edit_field_reply(update, context)
             return
+        if context.user_data.get("awaiting_stock_cost_for"):
+            await stock_cost_reply(update, context)
+            return
         if context.user_data.get("awaiting_discount_field"):
             await discount_field_reply(update, context)
             return
@@ -14469,6 +14740,12 @@ def main():
             time=dt_time(hour=backup_hour_utc, minute=0),
             name="nightly_db_backup",
         )
+        # Daily sales Excel to the admin 5 minutes after local midnight.
+        app.job_queue.run_daily(
+            daily_sales_excel_job,
+            time=dt_time(hour=backup_hour_utc, minute=5),
+            name="daily_sales_excel",
+        )
     else:
         logger.warning(
             "JobQueue not available — nightly backup will NOT run. "
@@ -14514,6 +14791,7 @@ def main():
     app.add_handler(CallbackQueryHandler(stock_toggle, pattern=r"^stocktoggle:"))
     app.add_handler(CallbackQueryHandler(stock_item_detail, pattern=r"^stockitem:"))
     app.add_handler(CallbackQueryHandler(stock_edit_start, pattern=r"^stockedit:"))
+    app.add_handler(CallbackQueryHandler(stock_cost_start, pattern=r"^stockcost:"))
     app.add_handler(CallbackQueryHandler(stock_remove_confirm, pattern=r"^stockremove:"))
     app.add_handler(CallbackQueryHandler(stock_remove_do, pattern=r"^stockremoveyes:"))
     app.add_handler(CallbackQueryHandler(stock_back, pattern=r"^stock_back$"))
@@ -14603,6 +14881,7 @@ def main():
     app.add_handler(CallbackQueryHandler(imd_manual_cred_start, pattern=r"^imdmancred:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_type_choice, pattern=r"^imdmantype:"))
     app.add_handler(CallbackQueryHandler(admin_sales_report, pattern=r"^sales:"))
+    app.add_handler(CallbackQueryHandler(admin_sales_excel, pattern=r"^salesxlsx$"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, photo_router))
