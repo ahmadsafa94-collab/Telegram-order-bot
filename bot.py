@@ -2164,6 +2164,19 @@ def db_resolve_ticket(ticket_id: int, resolution_message: str):
     conn.close()
 
 
+def db_resolve_all_tickets() -> int:
+    """Closes every unresolved ticket at once, without customer messages."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        "UPDATE tickets SET status = 'resolved', resolution_message = '(closed with Mark all as resolved)', "
+        "resolved_at = ? WHERE status = 'unresolved'",
+        (datetime.utcnow().isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+    return cur.rowcount
+
+
 def db_add_custom_item(item_id: str, name: str, price: float):
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
@@ -4437,8 +4450,39 @@ async def start_ticket_message_collection(context: ContextTypes.DEFAULT_TYPE, us
     await context.bot.send_message(
         chat_id=chat_id,
         text="Please send a message describing the problem:",
-        reply_markup=_cancel_button(),
+        reply_markup=_ticket_skip_cancel_buttons("message"),
     )
+
+
+def _ticket_skip_cancel_buttons(step: str) -> InlineKeyboardMarkup:
+    """Skip / Cancel under the ticket's message and screenshot prompts."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("⏭ Skip", callback_data=f"ticketskip:{step}"),
+        InlineKeyboardButton("❌ Cancel", callback_data="cust_cancel"),
+    ]])
+
+
+async def ticket_skip_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer tapped Skip on the message or screenshot prompt."""
+    query = update.callback_query
+    step = query.data.split(":", 1)[1]
+    if context.user_data.get("awaiting_ticket_field") != step or not context.user_data.get("ticket_id"):
+        await query.answer("This step is already finished.", show_alert=True)
+        return
+    await query.answer()
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if step == "message":
+        context.user_data["awaiting_ticket_field"] = "screenshot"
+        await context.bot.send_message(
+            chat_id=query.from_user.id,
+            text="Now please send a screenshot, or tap Skip:",
+            reply_markup=_ticket_skip_cancel_buttons("screenshot"),
+        )
+        return
+    await _submit_ticket(context, query.from_user.id, photo_file_id=None)
 
 
 async def ticket_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4450,7 +4494,10 @@ async def ticket_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ticket_id = context.user_data.get("ticket_id")
     db_set_ticket_message(ticket_id, message=update.message.text)
     context.user_data["awaiting_ticket_field"] = "screenshot"
-    await update.message.reply_text("Thanks — now please send a screenshot:", reply_markup=_cancel_button())
+    await update.message.reply_text(
+        "Thanks — now please send a screenshot, or tap Skip:",
+        reply_markup=_ticket_skip_cancel_buttons("screenshot"),
+    )
 
 
 async def ticket_screenshot_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -4459,14 +4506,21 @@ async def ticket_screenshot_reply(update: Update, context: ContextTypes.DEFAULT_
     knows not to also try)."""
     if context.user_data.get("awaiting_ticket_field") != "screenshot":
         return False
+    await _submit_ticket(context, update.effective_chat.id, photo_file_id=update.message.photo[-1].file_id)
+    return True
 
+
+async def _submit_ticket(context: ContextTypes.DEFAULT_TYPE, chat_id: int, photo_file_id: str = None):
+    """Finishes the customer's ticket (with or without a screenshot),
+    tells the admin and gives the customer back what they were doing."""
     ticket_id = context.user_data.pop("ticket_id", None)
     context.user_data.pop("awaiting_ticket_field", None)
-    photo_file_id = update.message.photo[-1].file_id
-    db_set_ticket_message(ticket_id, photo_file_id=photo_file_id)
+    if photo_file_id:
+        db_set_ticket_message(ticket_id, photo_file_id=photo_file_id)
 
-    await update.message.reply_text(
-        f"✅ Ticket #{ticket_id} submitted. We'll get back to you as soon as possible."
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"✅ Ticket #{ticket_id} submitted. We'll get back to you as soon as possible.",
     )
 
     if ADMIN_CHAT_ID:
@@ -4479,21 +4533,20 @@ async def ticket_screenshot_reply(update: Update, context: ContextTypes.DEFAULT_
             f"Category: {category}\n"
             + (f"Subscription: {sub_label}\n" if sub_label else "")
             + (f"\nSelf-help shown:\n{self_help}\n" if self_help else "")
-            + f"\nMessage:\n{message}"
+            + (f"\nMessage:\n{message}" if message else "\n(no message provided)")
+            + ("" if photo else "\n(no screenshot)")
         )
-        await context.bot.send_photo(
-            chat_id=ADMIN_CHAT_ID,
-            photo=photo_file_id,
-            caption=caption,
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("✅ Mark Resolved", callback_data=f"ticketresolve:{ticket_id}")]]
-            ),
+        buttons = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("✅ Mark Resolved", callback_data=f"ticketresolve:{ticket_id}")]]
         )
+        if photo:
+            await context.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=photo, caption=caption, reply_markup=buttons)
+        else:
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=caption, reply_markup=buttons)
         # Push updated keyboard so the Tickets badge appears immediately.
         await refresh_admin_keyboard(context)
 
-    await restore_collection_state(context, context.user_data, update.effective_chat.id)
-    return True
+    await restore_collection_state(context, context.user_data, chat_id)
 
 
 async def subs_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -10053,6 +10106,8 @@ def _tickets_list_keyboard(status: str) -> InlineKeyboardMarkup:
         buttons.append(
             [InlineKeyboardButton(f"#{ticket_id} — {who} — {what}"[:60], callback_data=f"ticketview:{ticket_id}")]
         )
+    if status == "unresolved" and rows:
+        buttons.append([InlineKeyboardButton("✅ Mark all as resolved", callback_data="tickets_resolveall")])
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="tickets_back")])
     return InlineKeyboardMarkup(buttons)
 
@@ -10067,7 +10122,7 @@ async def tickets_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = _tickets_list_keyboard(status)
     label = "Resolved" if status == "resolved" else "Unresolved"
-    if len(keyboard.inline_keyboard) == 1:  # only the Back button — list is empty
+    if not db_list_tickets(status):
         await query.edit_message_text(f"No {label.lower()} tickets.", reply_markup=keyboard)
         return
     await query.edit_message_text(f"{label} tickets:", reply_markup=keyboard)
@@ -10149,8 +10204,95 @@ async def ticket_resolve_start(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["awaiting_ticket_resolution"] = ticket_id
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
-        text=f"Type the message to send the customer when closing ticket #{ticket_id}:",
+        text=(
+            f"Type the message to send the customer when closing ticket #{ticket_id}.\n"
+            "⏭ Skip closes it with a standard message; ❌ Cancel leaves it open."
+        ),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⏭ Skip", callback_data=f"ticketresskip:{ticket_id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data=f"ticketrescancel:{ticket_id}"),
+        ]]),
     )
+
+
+TICKET_STANDARD_RESOLUTION = (
+    "Your issue has been taken care of. If anything is still wrong, open a new ticket from 🎫 Send a Ticket."
+)
+
+
+async def _close_ticket(context: ContextTypes.DEFAULT_TYPE, ticket_id: int, resolution_text: str) -> str:
+    """Marks the ticket resolved and sends the customer the closing message.
+    Returns the confirmation for the admin."""
+    ticket = db_get_ticket(ticket_id)
+    if not ticket:
+        return "That ticket no longer exists."
+    if ticket[9] == "resolved":
+        return f"Ticket #{ticket_id} was already resolved."
+    db_resolve_ticket(ticket_id, resolution_text)
+    try:
+        await context.bot.send_message(
+            chat_id=ticket[1],
+            text=f"✅ Your ticket #{ticket_id} has been resolved:\n\n{resolution_text}",
+        )
+        note = "and the customer notified"
+    except Exception:
+        logger.exception("Couldn't send ticket #%s resolution to the customer", ticket_id)
+        note = "but the message to the customer couldn't be sent"
+    await refresh_admin_keyboard(context)
+    return f"✅ Ticket #{ticket_id} marked resolved {note}."
+
+
+async def ticket_resolve_skip_or_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """⏭ Skip / ❌ Cancel under the admin's closing-message prompt."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    action, ticket_id = query.data.split(":", 1)
+    ticket_id = int(ticket_id)
+    if context.user_data.get("awaiting_ticket_resolution") == ticket_id:
+        context.user_data.pop("awaiting_ticket_resolution", None)
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if action == "ticketrescancel":
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"Ticket #{ticket_id} left open.")
+        return
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID, text=await _close_ticket(context, ticket_id, TICKET_STANDARD_RESOLUTION)
+    )
+
+
+async def tickets_resolve_all_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    count = db_unresolved_ticket_count()
+    await query.edit_message_text(
+        f"Mark all {count} unresolved tickets as resolved?\nNo message is sent to the customers.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Yes, resolve all", callback_data="tickets_resolveall_yes")],
+            [InlineKeyboardButton("⬅️ Cancel", callback_data="tickets:unresolved")],
+        ]),
+    )
+
+
+async def tickets_resolve_all_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    count = db_resolve_all_tickets()
+    await query.edit_message_text(
+        f"✅ {count} tickets marked resolved.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="tickets_back")]]),
+    )
+    await refresh_admin_keyboard(context)
 
 
 async def ticket_resolution_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -10165,16 +10307,7 @@ async def ticket_resolution_reply(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text("That ticket no longer exists.")
         return
 
-    user_id = ticket[1]
-    resolution_text = update.message.text
-    db_resolve_ticket(ticket_id, resolution_text)
-
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=f"✅ Your ticket #{ticket_id} has been resolved:\n\n{resolution_text}",
-    )
-    await update.message.reply_text(f"✅ Ticket #{ticket_id} marked resolved and the customer notified.")
-    await refresh_admin_keyboard(context)
+    await update.message.reply_text(await _close_ticket(context, ticket_id, update.message.text))
 
 
 def _short_submitted(created_at: str) -> str:
@@ -14809,6 +14942,10 @@ def main():
     app.add_handler(CallbackQueryHandler(tickets_back, pattern=r"^tickets_back$"))
     app.add_handler(CallbackQueryHandler(ticket_view, pattern=r"^ticketview:"))
     app.add_handler(CallbackQueryHandler(ticket_resolve_start, pattern=r"^ticketresolve:"))
+    app.add_handler(CallbackQueryHandler(ticket_resolve_skip_or_cancel, pattern=r"^ticketres(skip|cancel):"))
+    app.add_handler(CallbackQueryHandler(tickets_resolve_all_confirm, pattern=r"^tickets_resolveall$"))
+    app.add_handler(CallbackQueryHandler(tickets_resolve_all_do, pattern=r"^tickets_resolveall_yes$"))
+    app.add_handler(CallbackQueryHandler(ticket_skip_step, pattern=r"^ticketskip:"))
     app.add_handler(CallbackQueryHandler(pay_with_stars, pattern=r"^pay_stars:"))
     app.add_handler(CallbackQueryHandler(local_pay_start, pattern=r"^local_pay:"))
     app.add_handler(CallbackQueryHandler(country_missing_start, pattern=r"^country_missing:"))
