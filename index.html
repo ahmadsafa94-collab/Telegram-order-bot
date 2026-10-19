@@ -453,13 +453,27 @@ function applyColorScheme(){
 applyColorScheme();
 try { tg.onEvent && tg.onEvent('themeChanged', applyColorScheme); } catch(e) {}
 
+// ── Auth (uid/tok/api) — its own short query params, deliberately kept
+// OUT of the subs= blob below. That blob carries every delivered item's
+// full credential text and only grows as a customer accumulates orders —
+// long enough, for an established customer, to get corrupted or truncated
+// in transit, which fails JSON.parse(atob(...)) below and leaves SUBS_DATA
+// null. If auth lived inside it, a broken subs= would silently break
+// checkout too ("Unauthorized" on I've Paid). Reading these independently
+// means the Mini App can always authenticate even when subs= can't be
+// parsed at all. ──────────────────────────────────────────────────────
+const _qs = new URLSearchParams(window.location.search);
+const AUTH_UID = _qs.get('uid') || '';
+const AUTH_TOK = _qs.get('tok') || '';
+const API_BASE = _qs.get('api') || '';
+
 // ── Load subscription data from URL query param ──────────────────────
 // The bot encodes the user's subscriptions + custom catalog items as
 // base64 JSON in the ?subs= query parameter. Using a query param (not
 // a fragment #) ensures Telegram always passes it to the WebApp intact.
 let SUBS_DATA = null;
 try {
-  const _subs = new URLSearchParams(window.location.search).get('subs');
+  const _subs = _qs.get('subs');
   if (_subs) {
     const pad = '=='.slice(0, (4 - _subs.length % 4) % 4);
     const b64 = (_subs + pad).replace(/-/g, '+').replace(/_/g, '/');
@@ -1126,21 +1140,21 @@ function switchCat(id){
 // that powers the iMD catalog search) rather than embedded in SUBS_DATA —
 // credentials and delivery status need to be current, not a stale
 // snapshot from whenever this page's URL was last generated. Authenticated
-// with a token the BOT itself signed for this user (SUBS_DATA.uid/.tok,
+// with a token the BOT itself signed for this user (AUTH_UID/AUTH_TOK,
 // see _mini_app_token in bot.py) rather than Telegram's own WebApp
 // initData — that turned out to be unreliable across real clients
 // (customers on the actual mobile app were still hitting "Unauthorized"),
 // while this has no dependency on the client populating anything: the
 // bot already knows who it built this URL for.
-function apiBase(){ return (SUBS_DATA&&SUBS_DATA.api)||''; }
+function apiBase(){ return API_BASE; }
 function withAuth(pathAndQuery){
   const sep = pathAndQuery.includes('?') ? '&' : '?';
-  return apiBase()+pathAndQuery+sep+'uid='+encodeURIComponent((SUBS_DATA&&SUBS_DATA.uid)||'')+
-    '&tok='+encodeURIComponent((SUBS_DATA&&SUBS_DATA.tok)||'');
+  return apiBase()+pathAndQuery+sep+'uid='+encodeURIComponent(AUTH_UID)+
+    '&tok='+encodeURIComponent(AUTH_TOK);
 }
 function ordersUnavailableReason(){
   if(!apiBase()) return "Orders aren't available right now — please try again later.";
-  if(!(SUBS_DATA&&SUBS_DATA.uid&&SUBS_DATA.tok)) return "Orders aren't available right now — please reopen the Shop from the bot and try again.";
+  if(!(AUTH_UID&&AUTH_TOK)) return "Orders aren't available right now — please reopen the Shop from the bot and try again.";
   return null;
 }
 
@@ -1415,7 +1429,7 @@ function goGetFreeAccounts(){
 // off to the bot's chat-based search if the API isn't reachable yet (e.g.
 // the admin hasn't enabled Railway Public Networking for the bot service).
 function imdWhatsIncluded(){
-  if(SUBS_DATA && SUBS_DATA.api){
+  if(API_BASE){
     openImdSearch();
   } else {
     tg.sendData(JSON.stringify({action:'imd_catalog_search'}));
@@ -1452,8 +1466,7 @@ async function imdCatalogSearch(q,offset){
   }
   imdSearchQuery=q;
   resEl.innerHTML='<div class="search-empty">Searching…</div>';
-  const apiBase=(SUBS_DATA&&SUBS_DATA.api)||'';
-  const url=apiBase+'/api/imd_search?q='+encodeURIComponent(q)+'&offset='+offset;
+  const url=API_BASE+'/api/imd_search?q='+encodeURIComponent(q)+'&offset='+offset;
   try{
     const resp=await fetch(url);
     const data=await resp.json();
