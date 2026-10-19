@@ -3539,7 +3539,7 @@ async def show_my_credits(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def send_my_credits(context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int, edit_query=None):
     credits = db_get_credits(user_id)
-    usd = credits * 4
+    usd = credits * CREDIT_VALUE_USD
     bot_username = await get_bot_username(context)
     link = referral_link(bot_username, user_id)
 
@@ -3863,6 +3863,9 @@ async def book_proceed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("This book request no longer exists.")
         return
     _, user_id, username, link, price, status, order_id, created_at, priced_at, resolved_at = request
+    if user_id != query.from_user.id:
+        await query.edit_message_text("This book request belongs to another account.")
+        return
 
     if status != "priced":
         await query.edit_message_text("This request isn't awaiting payment anymore.")
@@ -3892,6 +3895,14 @@ async def book_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     request_id = int(query.data.split(":", 1)[1])
+    request = db_get_book_request(request_id)
+    if not request or request[1] != query.from_user.id:
+        await query.edit_message_text("This book request no longer exists.")
+        return
+    if request[5] not in ("pending", "priced"):
+        # Already ordered (an order exists for it) or already cancelled.
+        await query.edit_message_text("This request can't be cancelled anymore. Contact support if you need help.")
+        return
     db_set_book_status(request_id, "cancelled")
     await query.edit_message_text("Your book request has been cancelled.")
 
@@ -4418,6 +4429,9 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     _, order_id, user_id, item_id, unit_no, state, info_json = row
+    if user_id != query.from_user.id:
+        await query.edit_message_text("That order belongs to another account.", reply_markup=back)
+        return
     name = MENU.get(item_id, (item_id,))[0]
 
     order = db_get_order(order_id)
@@ -4899,6 +4913,33 @@ async def pay_paypal_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
 
 
+# Statuses in which a customer may still pay for or cancel an order from its buttons.
+PAYABLE_ORDER_STATUSES = {"awaiting_payment", "awaiting_receipt"}
+
+
+async def _order_tap_allowed(query, order, order_id: int) -> bool:
+    """For a customer's payment/cancel button: the order must exist, belong to the person
+    tapping, and still be waiting for payment. A second tap after paying (or an old message)
+    must not charge credits twice or move a paid order back to "awaiting receipt"."""
+    if not order:
+        await query.edit_message_text("Order not found.")
+        return False
+    if order[1] != query.from_user.id:
+        await query.edit_message_text("This order belongs to another account.")
+        return False
+    status = order[5]
+    if status in PAYABLE_ORDER_STATUSES:
+        return True
+    if status in ("paid", "delivered"):
+        text = f"✅ Order #{order_id} is already paid."
+    elif status == "awaiting_confirmation":
+        text = f"⏳ Your payment for Order #{order_id} is already being verified."
+    else:
+        text = f"Order #{order_id} is {ORDER_STATUS_MEANINGS.get(status, status)}. Please place a new order."
+    await query.edit_message_text(text)
+    return False
+
+
 async def pay_credits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """'Pay using my own Credits' — instant like Stars, no 'I've Paid' step.
     1 credit = $4, and most prices aren't clean multiples of that, so the
@@ -4911,12 +4952,11 @@ async def pay_credits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     order = db_get_order(order_id)
-    if not order:
-        await query.edit_message_text("Order not found.")
+    if not await _order_tap_allowed(query, order, order_id):
         return
     _, order_user_id, username, items_json, total, status, created_at = order
 
-    required_credits = math.ceil(total / 4)
+    required_credits = math.ceil(total / CREDIT_VALUE_USD)
     balance = db_get_credits(user_id)
 
     if balance < required_credits:
@@ -4949,7 +4989,7 @@ async def pay_credits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remaining = db_get_credits(user_id)
     await query.edit_message_text(
         f"✅ Paid with {required_credits} credits! We're preparing your order now.\n"
-        f"Remaining credits: {remaining} ({CURRENCY}{remaining * 5})"
+        f"Remaining credits: {remaining} ({CURRENCY}{remaining * CREDIT_VALUE_USD})"
     )
 
     items = json.loads(items_json)
@@ -4999,8 +5039,7 @@ async def credits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     order_id = int(query.data.split(":", 1)[1])
     order = db_get_order(order_id)
-    if not order:
-        await query.edit_message_text("Order not found.")
+    if not await _order_tap_allowed(query, order, order_id):
         return
     total = order[4]
     user_id = query.from_user.id
@@ -5069,8 +5108,7 @@ async def credits_full(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     order_id = int(query.data.split(":", 1)[1])
     order = db_get_order(order_id)
-    if not order:
-        await query.edit_message_text("Order not found.")
+    if not await _order_tap_allowed(query, order, order_id):
         return
     _, user_id, username, items_json, total, status, created_at = order
     credits_needed = math.ceil(total / CREDIT_VALUE_USD)
@@ -5099,8 +5137,7 @@ async def credits_partial(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     order_id = int(query.data.split(":", 1)[1])
     order = db_get_order(order_id)
-    if not order:
-        await query.edit_message_text("Order not found.")
+    if not await _order_tap_allowed(query, order, order_id):
         return
     total = order[4]
     user_id = query.from_user.id
@@ -5285,8 +5322,7 @@ async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = int(order_id_str)
     order = db_get_order(order_id)
 
-    if not order:
-        await query.edit_message_text("Order not found.")
+    if not await _order_tap_allowed(query, order, order_id):
         return
 
     if action == "paid":
@@ -6127,7 +6163,7 @@ async def award_referral_credit(context: ContextTypes.DEFAULT_TYPE, paying_user_
             chat_id=referrer_id,
             text=(
                 f"🎉 You just earned 1 credit — someone you referred made a purchase!\n\n"
-                f"Your credits: {new_balance} ({CURRENCY}{new_balance * 5})"
+                f"Your credits: {new_balance} ({CURRENCY}{new_balance * CREDIT_VALUE_USD})"
             ),
         )
     except Exception:
@@ -9700,7 +9736,7 @@ async def credits_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["💳 Customer Credits:", ""]
     for user_id, username, credits in rows:
         who = f"@{username}" if username else str(user_id)
-        lines.append(f"{who} (ID: {user_id}) — {credits} credits ({CURRENCY}{credits * 4})")
+        lines.append(f"{who} (ID: {user_id}) — {credits} credits ({CURRENCY}{credits * CREDIT_VALUE_USD})")
 
     text = "\n".join(lines)
     for i in range(0, len(text), 3500):
@@ -13196,7 +13232,7 @@ async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     parts = [f"Customer {query_arg} (ID: {user_id})"]
-    parts.append(f"💳 Credits: {credits} ({CURRENCY}{credits * 4})")
+    parts.append(f"💳 Credits: {credits} ({CURRENCY}{credits * CREDIT_VALUE_USD})")
 
     parts.append("\n✅ DELIVERED")
     if delivered:
