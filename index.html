@@ -864,13 +864,16 @@ function renderOrders(){
   // ── Delivered subscriptions ──────────────────────────────
   if(d.length){
     html+=`<div class="sub-section-lbl">✅ Delivered (${d.length})</div>`;
-    d.forEach(([name,date,creds,oid],i)=>{
-      const hasCredentials = creds && creds.trim().length > 0;
+    d.forEach(([name,date,creds,oid,did],i)=>{
+      // creds is 1 when details exist (fetched on tap via deliveryId); older
+      // launch links carried the text itself.
+      const inline = typeof creds === 'string' ? creds : '';
+      const hasCredentials = inline.trim().length > 0 || (creds === 1 && did);
       const panelId = 'cp-'+i;
       const rowId   = 'cr-'+i;
       html+=`
         <div class="sub-row${hasCredentials?' ':'no-tap '}" id="${rowId}"
-          ${hasCredentials?`onclick="toggleCreds('${panelId}','${rowId}')"`:''}
+          ${hasCredentials?`onclick="toggleCreds('${panelId}','${rowId}',${inline ? 0 : did})"`:''}
           style="flex-direction:column;gap:0;padding:0">
           <div style="display:flex;align-items:flex-start;gap:10px;padding:11px 15px;width:100%">
             <div class="sub-icon">✅</div>
@@ -884,7 +887,7 @@ function renderOrders(){
           ${hasCredentials?`
           <div class="cred-panel" id="${panelId}">
             <div class="cred-label">Account Details</div>
-            <div class="cred-text">${escHtml(creds)}</div>
+            <div class="cred-text">${inline ? escHtml(inline) : 'Loading…'}</div>
             <button class="cred-copy" onclick="copyCreds(event,'${panelId}')">📋 Copy Details</button>
           </div>`:''}
         </div>`;
@@ -954,12 +957,28 @@ function renderOrders(){
   el.innerHTML=html;
 }
 
-function toggleCreds(panelId, rowId){
+function toggleCreds(panelId, rowId, deliveryId){
   const panel=document.getElementById(panelId);
   const row=document.getElementById(rowId);
   if(!panel) return;
   const isOpen=panel.classList.toggle('open');
   if(row) row.classList.toggle('open', isOpen);
+  if(isOpen && deliveryId && !panel.dataset.loaded) loadCreds(panel, deliveryId);
+}
+
+async function loadCreds(panel, deliveryId){
+  const text=panel.querySelector('.cred-text');
+  const reason=ordersUnavailableReason();
+  if(reason){ text.textContent=reason; return; }
+  try{
+    const resp=await fetch(withAuth('/api/delivery?delivery_id='+encodeURIComponent(deliveryId)));
+    if(!resp.ok) throw new Error(resp.status===404?'Not found':'HTTP '+resp.status);
+    const data=await resp.json();
+    text.textContent=data.credentials||'No details saved for this subscription.';
+    panel.dataset.loaded='1';
+  }catch(e){
+    text.textContent='Could not load your details: '+(e.message||String(e))+'. Please try again.';
+  }
 }
 
 function copyCreds(event, panelId){
@@ -1484,7 +1503,7 @@ function renderImdResults(data){
   if(nav.length) html+=`<div style="display:flex;gap:8px;justify-content:center;margin-top:10px">${nav.join('')}</div>`;
   resEl.innerHTML=html;
 }
-function applyDiscountCode(){
+async function applyDiscountCode(){
   const raw=(document.getElementById('discountInput').value||'').trim().toUpperCase();
   const msg=document.getElementById('discountMsg');
   if(!raw){ msg.textContent=''; return; }
@@ -1495,8 +1514,26 @@ function applyDiscountCode(){
   // though it's genuinely valid — never let a stale local cache silently
   // block a real code from ever reaching the server.
   appliedDiscountCode=raw;
-  if(DISCOUNT_CODES[raw]!=null){
-    appliedDiscountPct=DISCOUNT_CODES[raw];
+  let pct=DISCOUNT_CODES[raw]!=null ? DISCOUNT_CODES[raw] : null;
+  if(pct==null && !ordersUnavailableReason()){
+    msg.style.color='';
+    msg.textContent='Checking…';
+    try{
+      const resp=await fetch(withAuth('/api/check_discount?code='+encodeURIComponent(raw)));
+      const data=await resp.json();
+      if(resp.ok && data.valid) pct=data.pct;
+      else if(resp.ok){
+        appliedDiscountPct=0;
+        appliedDiscountCode='';
+        msg.style.color='#f87171';
+        msg.textContent="❌ This code isn't valid or has expired.";
+        buildPaymentPage();
+        return;
+      }
+    }catch(e){ /* offline or old bot: fall through, the order check still applies */ }
+  }
+  if(pct!=null){
+    appliedDiscountPct=pct;
     msg.style.color='#4ade80';
     msg.textContent=`✅ ${appliedDiscountPct}% off applied!`;
   }else{

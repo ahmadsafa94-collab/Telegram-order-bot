@@ -96,7 +96,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "21"
+MINI_APP_VERSION = "22"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -2535,7 +2535,7 @@ def db_set_receipt_references(order_id: int, references: list):
 
 def db_reference_already_used(reference: str, exclude_order_id: int) -> bool:
     """True if this exact UTR/transaction reference already appears on a
-    DIFFERENT order that's paid or awaiting confirmation — the single
+    DIFFERENT order that's paid, delivered or awaiting confirmation — the single
     strongest fraud signal here: reusing one real receipt across multiple
     'purchases'. Rejected orders don't count, since a customer might
     legitimately resubmit a corrected receipt with the same reference
@@ -2545,7 +2545,7 @@ def db_reference_already_used(reference: str, exclude_order_id: int) -> bool:
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
         "SELECT receipt_reference FROM orders WHERE id != ? "
-        "AND status IN ('paid', 'awaiting_confirmation') AND receipt_reference IS NOT NULL",
+        "AND status IN ('paid', 'delivered', 'awaiting_confirmation') AND receipt_reference IS NOT NULL",
         (exclude_order_id,),
     ).fetchall()
     conn.close()
@@ -3009,9 +3009,12 @@ def _shop_url(user_id: int = 0) -> str:
 
         oos_ids = [r[0] for r in oos_rows]
 
+        # Login details are not put in the URL (it can be seen in link
+        # previews, history and logs): the Mini App fetches them from
+        # /api/delivery with the customer's token when tapped. 1 = has details.
         delivered = [
-            [MENU.get(iid, (iid,))[0], dat[:10] if dat else "", msg or "", oid]
-            for _, iid, dat, msg, oid in del_rows
+            [MENU.get(iid, (iid,))[0], dat[:10] if dat else "", 1 if (msg or "").strip() else 0, oid, did]
+            for did, iid, dat, msg, oid in del_rows
         ]
         pending = [
             # If the ORDER hasn't been paid yet (any of UNPAID_ORDER_STATUSES),
@@ -3041,7 +3044,6 @@ def _shop_url(user_id: int = 0) -> str:
         # at checkout regardless — the client-side numbers are only ever
         # used for display, never trusted for the actual charge.
         credits_balance = db_get_credits(user_id)
-        active_codes = db_active_discount_codes()
 
         # Coworker discount — if this Telegram account is logged in via
         # /coworker, embed their admin-set rate so the Mini App can show
@@ -3069,7 +3071,6 @@ def _shop_url(user_id: int = 0) -> str:
             "po": price_overrides,
             "rm": removed_ids,
             "cr": credits_balance,
-            "dc": active_codes,
             "api": BOT_API_URL,
             "cw": coworker_pct,
             "cwp": coworker_imd_prices,
@@ -9436,6 +9437,54 @@ async def http_my_order_detail(request):
     }, headers=_imd_search_cors_headers())
 
 
+async def http_delivery(request):
+    """The delivered login message for one of the authenticated customer's
+    deliveries (the Mini App's "Tap to view credentials"). Ownership-checked."""
+    from aiohttp import web
+    headers = _imd_search_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"error": "Unauthorized"}, status=401, headers=headers)
+    try:
+        delivery_id = int(request.query.get("delivery_id", "0"))
+    except ValueError:
+        delivery_id = 0
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT message FROM deliveries WHERE id = ? AND user_id = ?", (delivery_id, user_id)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return web.json_response({"error": "Not found"}, status=404, headers=headers)
+    return web.json_response({"credentials": row[0] or ""}, headers=headers)
+
+
+# Discount code checks per customer: (window start, count). Limits guessing codes
+# one by one; the real check still happens when the order is placed.
+_discount_checks: dict = {}
+DISCOUNT_CHECKS_PER_WINDOW = 15
+DISCOUNT_CHECK_WINDOW_SECONDS = 600
+
+
+async def http_check_discount(request):
+    """Whether a discount code is valid right now, for the authenticated
+    customer's Mini App. Replaces shipping every active code in the launch URL."""
+    from aiohttp import web
+    headers = _imd_search_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"error": "Unauthorized"}, status=401, headers=headers)
+    now = datetime.utcnow().timestamp()
+    start, count = _discount_checks.get(user_id, (now, 0))
+    if now - start > DISCOUNT_CHECK_WINDOW_SECONDS:
+        start, count = now, 0
+    if count >= DISCOUNT_CHECKS_PER_WINDOW:
+        return web.json_response({"error": "Too many attempts, try again later"}, status=429, headers=headers)
+    _discount_checks[user_id] = (start, count + 1)
+    pct = db_check_discount_code((request.query.get("code") or "").strip().upper())
+    return web.json_response({"valid": pct is not None, "pct": pct or 0}, headers=headers)
+
+
 async def http_my_purchase_history(request):
     """Day/month/year/lifetime order count + spend for the authenticated
     customer — the data behind the Orders tab's history icon."""
@@ -9467,6 +9516,10 @@ async def start_api_server(application):
     api_app.router.add_get("/api/my_orders", http_my_orders)
     api_app.router.add_options("/api/my_orders", http_imd_search_options)
     api_app.router.add_get("/api/my_order_detail", http_my_order_detail)
+    api_app.router.add_get("/api/delivery", http_delivery)
+    api_app.router.add_options("/api/delivery", http_imd_search_options)
+    api_app.router.add_get("/api/check_discount", http_check_discount)
+    api_app.router.add_options("/api/check_discount", http_imd_search_options)
     api_app.router.add_options("/api/my_order_detail", http_imd_search_options)
     api_app.router.add_get("/api/my_purchase_history", http_my_purchase_history)
     api_app.router.add_options("/api/my_purchase_history", http_imd_search_options)
@@ -13571,7 +13624,7 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         _, order_id, _, item_id, unit_no, state, info_json = row
         item_name = MENU.get(item_id, (item_id,))[0]
         ticket_id = db_create_ticket(
-            user_id, username, category="order",
+            user_id, update.effective_user.username, category="order",
             subscription_item_id=item_id,
             subscription_label=f"{item_name} (Order #{order_id})",
         )
