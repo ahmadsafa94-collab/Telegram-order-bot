@@ -453,19 +453,7 @@ function applyColorScheme(){
 applyColorScheme();
 try { tg.onEvent && tg.onEvent('themeChanged', applyColorScheme); } catch(e) {}
 
-// ── Auth (uid/tok/api) — its own short query params, deliberately kept
-// OUT of the subs= blob below. That blob carries every delivered item's
-// full credential text and only grows as a customer accumulates orders —
-// long enough, for an established customer, to get corrupted or truncated
-// in transit, which fails JSON.parse(atob(...)) below and leaves SUBS_DATA
-// null. If auth lived inside it, a broken subs= would silently break
-// checkout too ("Unauthorized" on I've Paid). Reading these independently
-// means the Mini App can always authenticate even when subs= can't be
-// parsed at all. ──────────────────────────────────────────────────────
 const _qs = new URLSearchParams(window.location.search);
-const AUTH_UID = _qs.get('uid') || '';
-const AUTH_TOK = _qs.get('tok') || '';
-const API_BASE = _qs.get('api') || '';
 
 // ── Load subscription data from URL query param ──────────────────────
 // The bot encodes the user's subscriptions + custom catalog items as
@@ -480,6 +468,26 @@ try {
     SUBS_DATA  = JSON.parse(atob(b64));
   }
 } catch(e) { /* ignore parse errors */ }
+
+// ── Auth (uid/tok/api) — its own short query params, deliberately kept
+// OUT of the subs= blob above in current links. That blob carries every
+// delivered item's full credential text and only grows as a customer
+// accumulates orders — long enough, for an established customer, to get
+// corrupted or truncated in transit, which fails JSON.parse(atob(...))
+// above and leaves SUBS_DATA null. If auth lived only inside it, a broken
+// subs= would silently break checkout too ("Unauthorized" on I've Paid).
+// The SUBS_DATA.uid/.tok/.api fallback below is for a customer's Telegram
+// "SHOP" button that is still pointing at a link generated before this
+// change — that persistent keyboard button never refreshes itself, so
+// without this fallback its holder would permanently get an empty
+// API_BASE (every API call, including I've Paid, then goes to a bogus
+// relative path on this static page's own origin instead of the bot, and
+// the 404 HTML page that comes back isn't JSON either — "Unexpected
+// response from server." all over again, forever, for exactly that
+// customer, with no fresh link ever fixing it on its own). ─────────────
+const AUTH_UID = _qs.get('uid') || (SUBS_DATA && SUBS_DATA.uid) || '';
+const AUTH_TOK = _qs.get('tok') || (SUBS_DATA && SUBS_DATA.tok) || '';
+const API_BASE = _qs.get('api') || (SUBS_DATA && SUBS_DATA.api) || '';
 
 // Credit balance and active discount codes — point-in-time snapshot from
 // page load, used only for display/estimation. The server re-verifies
