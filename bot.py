@@ -14015,13 +14015,20 @@ async def http_submit_order(request):
     if not isinstance(data, dict) or not data.get("items"):
         return web.json_response({"ok": False, "error": "Your cart was empty."}, status=400, headers=_post_cors_headers())
 
-    application = request.app["application"]
-    username = db_get_username(user_id)
-    context = CallbackContext(application, chat_id=user_id, user_id=user_id)
+    # Everything below must always resolve to a JSON response — an
+    # unhandled exception anywhere in here (a locked DB connection, a bad
+    # lookup, anything) would otherwise escape as aiohttp's default
+    # plain-text/HTML 500 page, which the Mini App can't parse as JSON and
+    # shows as "Unexpected response from server." with no way to tell what
+    # actually happened. Wrapping the whole thing, not just the order-
+    # creation call, is what actually guarantees that never happens.
     try:
+        application = request.app["application"]
+        username = db_get_username(user_id)
+        context = CallbackContext(application, chat_id=user_id, user_id=user_id)
         result = await process_full_order(context, user_id, username, data)
     except Exception:
-        logger.exception("http_submit_order: process_full_order raised for user %s", user_id)
+        logger.exception("http_submit_order: failed to place order for user %s", user_id)
         return web.json_response(
             {"ok": False, "error": "Something went wrong placing your order — please try again or contact support."},
             status=500, headers=_post_cors_headers(),
