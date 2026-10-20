@@ -13622,12 +13622,29 @@ async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     _, order_id, user_id, item_id, unit_no, state, info_json = row
-    context.user_data["awaiting_credentials_fulfilment"] = fulfilment_id
-
     name = MENU.get(item_id, (item_id,))[0]
+
+    if item_id in IMD_TRIGGER_ITEMS and not query.data.startswith("delivertext:"):
+        # Typed text is forwarded to the customer as-is, so a bare username
+        # typed here was "delivered" without any renewal on iMD (order #461).
+        # For iMD, offer the real thing first.
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"{name} (Order #{order_id}): what should I do?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🤖 Renew an account on iMD now", callback_data=f"imdmanmode:{fulfilment_id}:renew:auto")],
+                [InlineKeyboardButton("🤖 Register a new account on iMD now", callback_data=f"imdmanmode:{fulfilment_id}:new:auto")],
+                [InlineKeyboardButton("✍️ Just send my text to the customer", callback_data=f"delivertext:{fulfilment_id}")],
+            ]),
+        )
+        return
+
+    clear_admin_flow_state(context.user_data)
+    context.user_data["awaiting_credentials_fulfilment"] = fulfilment_id
+    note = "\nYour message is sent to the customer exactly as typed; iMD isn't touched." if item_id in IMD_TRIGGER_ITEMS else ""
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
-        text=f"Reply with the account details for {name} (Order #{order_id}).",
+        text=f"Reply with the account details for {name} (Order #{order_id}).{note}",
     )
 
 
@@ -15246,6 +15263,7 @@ def main():
     app.add_handler(CallbackQueryHandler(imd_manual_cred_start, pattern=r"^imdmancred:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_type_choice, pattern=r"^imdmantype:"))
     app.add_handler(CallbackQueryHandler(imd_manual_mode_choice, pattern=r"^imdmanmode:"))
+    app.add_handler(CallbackQueryHandler(deliver_start, pattern=r"^delivertext:"))
     app.add_handler(CallbackQueryHandler(admin_sales_report, pattern=r"^sales:"))
     app.add_handler(CallbackQueryHandler(admin_sales_excel, pattern=r"^salesxlsx$"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
