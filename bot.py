@@ -10111,7 +10111,9 @@ async def refresh_admin_keyboard(context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
-            text="\u2800",  # blank Braille pattern: invisible, but unlike a zero-width space Telegram counts it as text
+            # Telegram rejects blank text (even U+2800: "Text must be non-empty"),
+            # so the carrier message has to show something.
+            text="🔄",
             reply_markup=admin_menu_keyboard(),
         )
     except Exception:
@@ -10160,10 +10162,13 @@ async def tickets_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = _tickets_list_keyboard(status)
     label = "Resolved" if status == "resolved" else "Unresolved"
-    if not db_list_tickets(status):
-        await query.edit_message_text(f"No {label.lower()} tickets.", reply_markup=keyboard)
+    text = f"{label} tickets:" if db_list_tickets(status) else f"No {label.lower()} tickets."
+    if query.message and query.message.photo:
+        # Back from a ticket shown with its screenshot: a photo message
+        # can't be edited into text, so send the list as a new message.
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text, reply_markup=keyboard)
         return
-    await query.edit_message_text(f"{label} tickets:", reply_markup=keyboard)
+    await query.edit_message_text(text, reply_markup=keyboard)
 
 
 async def tickets_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
