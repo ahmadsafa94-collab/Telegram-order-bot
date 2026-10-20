@@ -1084,6 +1084,12 @@ def db_init():
         )
         """
     )
+    # Added later so an edited answer can update the customer's original
+    # resolution message in place instead of only sending a follow-up.
+    try:
+        conn.execute("ALTER TABLE tickets ADD COLUMN resolution_message_id INTEGER")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS deliveries (
@@ -2131,11 +2137,12 @@ def db_set_ticket_message(ticket_id: int, message: str = None, photo_file_id: st
 def db_get_ticket(ticket_id: int):
     """Returns (id, user_id, username, category, subscription_item_id,
     subscription_label, self_help, message, photo_file_id, status,
-    resolution_message, created_at, resolved_at)."""
+    resolution_message, created_at, resolved_at, resolution_message_id)."""
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
         "SELECT id, user_id, username, category, subscription_item_id, subscription_label, "
-        "self_help, message, photo_file_id, status, resolution_message, created_at, resolved_at "
+        "self_help, message, photo_file_id, status, resolution_message, created_at, resolved_at, "
+        "resolution_message_id "
         "FROM tickets WHERE id = ?",
         (ticket_id,),
     ).fetchone()
@@ -2154,11 +2161,40 @@ def db_list_tickets(status: str):
     return rows
 
 
-def db_resolve_ticket(ticket_id: int, resolution_message: str):
+def db_resolve_ticket(ticket_id: int, resolution_message: str, resolution_message_id: int = None):
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
-        "UPDATE tickets SET status = 'resolved', resolution_message = ?, resolved_at = ? WHERE id = ?",
-        (resolution_message, datetime.utcnow().isoformat(), ticket_id),
+        "UPDATE tickets SET status = 'resolved', resolution_message = ?, "
+        "resolution_message_id = ?, resolved_at = ? WHERE id = ?",
+        (resolution_message, resolution_message_id, datetime.utcnow().isoformat(), ticket_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_update_ticket_resolution(ticket_id: int, resolution_message: str):
+    """Updates just the stored answer text — used by 'Edit Answer', which
+    only ever runs on an already-resolved ticket (status/resolved_at/
+    resolution_message_id stay as they were)."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE tickets SET resolution_message = ? WHERE id = ?",
+        (resolution_message, ticket_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_set_ticket_resolution_message_id(ticket_id: int, message_id: int):
+    """Records which customer-chat message carries the closing text, once
+    it's actually been sent — _close_ticket resolves the ticket first (so
+    it's marked resolved even if the send below fails) and only learns the
+    message_id after a successful send, so this is a separate, narrower
+    update rather than folding it into db_resolve_ticket."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE tickets SET resolution_message_id = ? WHERE id = ?",
+        (message_id, ticket_id),
     )
     conn.commit()
     conn.close()
@@ -3029,6 +3065,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_comment_for_order",
     "awaiting_reject_comment_for_order",
     "awaiting_ticket_resolution",
+    "awaiting_ticket_edit_answer",
     "awaiting_credentials_fulfilment",
     "awaiting_admin_message_for_order",
     "awaiting_new_sub_field", "new_sub_data",
@@ -4526,7 +4563,8 @@ async def _submit_ticket(context: ContextTypes.DEFAULT_TYPE, chat_id: int, photo
     if ADMIN_CHAT_ID:
         ticket = db_get_ticket(ticket_id)
         (_, user_id, username, category, sub_item_id, sub_label, self_help,
-         message, photo, status, resolution, created_at, resolved_at) = ticket
+         message, photo, status, resolution, created_at, resolved_at,
+         _resolution_message_id) = ticket
         who = f"@{username}" if username else str(user_id)
         caption = (
             f"🎫 New ticket #{ticket_id} — {who}\n"
@@ -10161,7 +10199,8 @@ async def ticket_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     (_, user_id, username, category, sub_item_id, sub_label, self_help,
-     message, photo, status, resolution, created_at, resolved_at) = ticket
+     message, photo, status, resolution, created_at, resolved_at,
+     _resolution_message_id) = ticket
     who = f"@{username}" if username else str(user_id)
 
     text = (
@@ -10178,6 +10217,8 @@ async def ticket_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     if status == "unresolved":
         buttons.append([InlineKeyboardButton("✅ Mark Resolved", callback_data=f"ticketresolve:{ticket_id}")])
+    elif status == "resolved":
+        buttons.append([InlineKeyboardButton("✏️ Edit Answer", callback_data=f"ticketeditanswer:{ticket_id}")])
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"tickets:{status}")])
 
     if photo:
@@ -10230,10 +10271,13 @@ async def _close_ticket(context: ContextTypes.DEFAULT_TYPE, ticket_id: int, reso
         return f"Ticket #{ticket_id} was already resolved."
     db_resolve_ticket(ticket_id, resolution_text)
     try:
-        await context.bot.send_message(
+        sent = await context.bot.send_message(
             chat_id=ticket[1],
             text=f"✅ Your ticket #{ticket_id} has been resolved:\n\n{resolution_text}",
         )
+        # Captured so a later 'Edit Answer' can correct this exact message
+        # in place instead of only sending a follow-up.
+        db_set_ticket_resolution_message_id(ticket_id, sent.message_id)
         note = "and the customer notified"
     except Exception:
         logger.exception("Couldn't send ticket #%s resolution to the customer", ticket_id)
@@ -10308,6 +10352,75 @@ async def ticket_resolution_reply(update: Update, context: ContextTypes.DEFAULT_
         return
 
     await update.message.reply_text(await _close_ticket(context, ticket_id, update.message.text))
+
+
+async def ticket_edit_answer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '✏️ Edit Answer' on an already-resolved ticket.
+    Prompts for the corrected text, matching the 'Edit credentials' flow
+    but targeting the ticket's resolution message."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    ticket_id = int(query.data.split(":", 1)[1])
+    ticket = db_get_ticket(ticket_id)
+    if not ticket:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That ticket no longer exists.")
+        return
+
+    resolution = ticket[10]
+    context.user_data["awaiting_ticket_edit_answer"] = ticket_id
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=(
+            f"Reply with the corrected answer for ticket #{ticket_id}.\n\n"
+            f"Current:\n{resolution}"
+        ),
+    )
+
+
+async def ticket_edit_answer_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Catches the admin's next text message after tapping 'Edit Answer'
+    and applies it: edits the original resolution message in the
+    customer's chat when possible, and updates the stored record too."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    ticket_id = context.user_data.pop("awaiting_ticket_edit_answer", None)
+    if not ticket_id:
+        return  # admin isn't in the middle of editing anything
+
+    ticket = db_get_ticket(ticket_id)
+    if not ticket:
+        await update.message.reply_text("That ticket no longer exists.")
+        return
+
+    user_id = ticket[1]
+    message_id = ticket[13]
+    new_text = update.message.text
+    new_body = f"✅ Your ticket #{ticket_id} has been resolved:\n\n{new_text}"
+
+    edited_in_place = False
+    if message_id:
+        try:
+            await context.bot.edit_message_text(chat_id=user_id, message_id=message_id, text=new_body)
+            edited_in_place = True
+        except Exception:
+            logger.exception("Failed to edit resolution message for ticket %s, user %s", ticket_id, user_id)
+
+    if not edited_in_place:
+        # Can't edit in place (message too old, deleted, or its id was
+        # never captured — e.g. a self-resolved ticket) — send the
+        # correction as a new message instead.
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"✏️ Updated answer for ticket #{ticket_id}:\n\n{new_text}",
+        )
+
+    db_update_ticket_resolution(ticket_id, new_text)
+    await update.message.reply_text(f"✅ Updated the answer for ticket #{ticket_id}.")
 
 
 def _short_submitted(created_at: str) -> str:
@@ -12070,6 +12183,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if context.user_data.get("awaiting_ticket_resolution"):
             await ticket_resolution_reply(update, context)
+            return
+        if context.user_data.get("awaiting_ticket_edit_answer"):
+            await ticket_edit_answer_reply(update, context)
             return
         if context.user_data.get("awaiting_credentials_fulfilment"):
             await credentials_reply(update, context)
@@ -14946,6 +15062,7 @@ def main():
     app.add_handler(CallbackQueryHandler(tickets_resolve_all_confirm, pattern=r"^tickets_resolveall$"))
     app.add_handler(CallbackQueryHandler(tickets_resolve_all_do, pattern=r"^tickets_resolveall_yes$"))
     app.add_handler(CallbackQueryHandler(ticket_skip_step, pattern=r"^ticketskip:"))
+    app.add_handler(CallbackQueryHandler(ticket_edit_answer_start, pattern=r"^ticketeditanswer:"))
     app.add_handler(CallbackQueryHandler(pay_with_stars, pattern=r"^pay_stars:"))
     app.add_handler(CallbackQueryHandler(local_pay_start, pattern=r"^local_pay:"))
     app.add_handler(CallbackQueryHandler(country_missing_start, pattern=r"^country_missing:"))
