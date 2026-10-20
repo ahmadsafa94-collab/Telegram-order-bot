@@ -11681,11 +11681,50 @@ async def imd_manual_cred_type_choice(update: Update, context: ContextTypes.DEFA
     _, order_id, user_id, item_id, unit_no, state, info_json = row
     name = MENU.get(item_id, (item_id,))[0]
 
+    # Ask how before asking for anything: typing a username here used to
+    # only *send* it to the customer, which read like "renew this account"
+    # but never touched iMD (order #461 was "delivered" without a renewal).
+    action = "Renew" if is_renew else "Register"
+    await query.edit_message_text(
+        f"{name} (Order #{order_id}): how should I do it?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🤖 {action} on iMD now (uses a serial)",
+                                  callback_data=f"imdmanmode:{fulfilment_id}:{choice}:auto")],
+            [InlineKeyboardButton("📨 Already done on iMD, just send the details",
+                                  callback_data=f"imdmanmode:{fulfilment_id}:{choice}:send")],
+        ]),
+    )
+
+
+async def imd_manual_mode_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin picked 'do it on iMD now' or 'just send the details' — now ask
+    for the username."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    _, fulfilment_id_str, choice, mode = query.data.split(":", 3)
+    fulfilment_id = int(fulfilment_id_str)
+    is_renew = choice == "renew"
+    row = db_get_fulfilment(fulfilment_id)
+    if not row:
+        await query.edit_message_text("That item no longer exists.")
+        return
+    order_id, item_id = row[1], row[3]
+    name = MENU.get(item_id, (item_id,))[0]
+
+    clear_admin_flow_state(context.user_data)
     context.user_data["imd_manual_cred"] = {
-        "fulfilment_id": fulfilment_id, "step": "username", "is_renew": is_renew,
+        "fulfilment_id": fulfilment_id, "step": "username", "is_renew": is_renew, "mode": mode,
     }
     prompt = "previous username" if is_renew else "username"
-    await query.edit_message_text(f"What's the {prompt} for {name} (Order #{order_id})?")
+    note = (
+        "\nI'll run it on iMD and deliver only once iMD confirms it."
+        if mode == "auto" else "\nThis only sends the details to the customer; iMD isn't touched."
+    )
+    await query.edit_message_text(f"What's the {prompt} for {name} (Order #{order_id})?{note}")
 
 
 async def imd_manual_cred_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11709,21 +11748,87 @@ async def imd_manual_cred_reply(update: Update, context: ContextTypes.DEFAULT_TY
     name = MENU.get(item_id, (item_id,))[0]
     is_renew = state["is_renew"]
 
+    auto = state.get("mode") == "auto"
+
     if state["step"] == "username":
         state["username"] = update.message.text.strip()
         if is_renew:
-            # Renewals have no password to ask for — go straight to delivery.
+            # Renewals have no password to ask for.
             context.user_data.pop("imd_manual_cred", None)
-            await _finish_imd_manual_delivery(context, order_id, user_id, item_id, fulfilment_id, state["username"], None)
+            if auto:
+                await _start_imd_manual_automation(
+                    context, order_id, user_id, item_id, fulfilment_id,
+                    {"account_type": "renew", "prev_username": state["username"]},
+                )
+            else:
+                await _finish_imd_manual_delivery(context, order_id, user_id, item_id, fulfilment_id, state["username"], None)
         else:
             state["step"] = "password"
             await update.message.reply_text(f"What's the password for {name} (Order #{order_id})?")
         return
 
-    # step == "password"
-    password = update.message.text.strip()
+    if state["step"] == "password":
+        state["password"] = update.message.text.strip()
+        if auto:
+            # iMD's registration form also needs an email.
+            state["step"] = "email"
+            await update.message.reply_text(f"What's the email for {name} (Order #{order_id})?")
+            return
+        context.user_data.pop("imd_manual_cred", None)
+        await _finish_imd_manual_delivery(context, order_id, user_id, item_id, fulfilment_id, state["username"], state["password"])
+        return
+
+    # step == "email" (register on iMD now)
     context.user_data.pop("imd_manual_cred", None)
-    await _finish_imd_manual_delivery(context, order_id, user_id, item_id, fulfilment_id, state["username"], password)
+    await _start_imd_manual_automation(
+        context, order_id, user_id, item_id, fulfilment_id,
+        {"account_type": "new", "username": state["username"], "password": state["password"],
+         "email": update.message.text.strip()},
+    )
+
+
+async def _start_imd_manual_automation(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int,
+                                       item_id: str, fulfilment_id: int, info: dict):
+    """Runs the admin's typed details through the same iMD automation as a
+    shop order (run_imd_registration): a serial is used, and the customer
+    is only told once iMD confirms. Failures come back with the usual
+    Retry / Send iMD Details Now buttons."""
+    name = MENU.get(item_id, (item_id,))[0]
+    pending = context.application.bot_data.setdefault("pending_registrations", {})
+    running = pending.get(order_id)
+    if isinstance(running, dict) and running.get("fulfilment_id") not in (None, fulfilment_id):
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"⚠️ Another iMD item of order #{order_id} is still being processed. Try again once it's done.",
+        )
+        return
+
+    db_set_fulfilment_info(fulfilment_id, info)
+    db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
+    is_renew = info["account_type"] == "renew"
+    reg_data = {
+        "duration": IMD_DURATION_MAP.get(item_id, "6m" if "6m" in item_id else "1y"),
+        "is_renew": is_renew,
+        "order_id": order_id,
+        "item_id": item_id,
+        "fulfilment_id": fulfilment_id,
+        "user_id": user_id,
+    }
+    if is_renew:
+        reg_data["prev_username"] = info["prev_username"]
+    else:
+        reg_data.update({k: info[k] for k in ("email", "username", "password")})
+    pending[order_id] = reg_data
+
+    who = info.get("prev_username") or info.get("username")
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=(
+            f"⏳ {'Renewing' if is_renew else 'Registering'} {who} on iMD for {name} (Order #{order_id})… "
+            "You'll get the result here; the customer is only told once iMD confirms."
+        ),
+    )
+    context.application.create_task(run_imd_registration(context, order_id))
 
 
 async def _finish_imd_manual_delivery(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int,
@@ -13891,7 +13996,7 @@ def _build_order_lookup_view(order_id: int):
     # each, for when automatic registration never went through (or wasn't
     # tried) and there's nothing on file to fall back on.
     pending_imd_rows = conn.execute(
-        "SELECT id, item_id, unit_no FROM fulfilment WHERE order_id = ? AND state != 'delivered'",
+        "SELECT id, item_id, unit_no, state FROM fulfilment WHERE order_id = ?",
         (oid,),
     ).fetchall()
     conn.close()
@@ -13913,14 +14018,15 @@ def _build_order_lookup_view(order_id: int):
         buttons.append(
             [InlineKeyboardButton(f"✏️ Edit {name}", callback_data=f"editdeliv:{delivery_id}")]
         )
-    for fulfilment_id, item_id, unit_no in pending_imd_rows:
+    for fulfilment_id, item_id, unit_no, fstate in pending_imd_rows:
         if item_id not in IMD_TRIGGER_ITEMS:
             continue
         name = MENU.get(item_id, (item_id,))[0]
         suffix = f" #{unit_no}" if unit_no > 1 else ""
-        buttons.append(
-            [InlineKeyboardButton(f"🔑 Deliver {name}{suffix} Manually", callback_data=f"imdmancred:{fulfilment_id}")]
-        )
+        # Also on delivered units, so one that was "delivered" without
+        # actually being renewed/registered on iMD can still be done.
+        label = f"🔁 {name}{suffix}: renew/register again" if fstate == "delivered" else f"🔑 {name}{suffix}: renew/register or deliver"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"imdmancred:{fulfilment_id}")])
     # Available regardless of status — including already-delivered orders,
     # which is the whole point: a bad/duplicate/test order sometimes isn't
     # caught until after delivery, and until now there was no way to remove
@@ -15139,6 +15245,7 @@ def main():
     app.add_handler(CallbackQueryHandler(imd_manual_deliver, pattern=r"^imddeliver:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_start, pattern=r"^imdmancred:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_type_choice, pattern=r"^imdmantype:"))
+    app.add_handler(CallbackQueryHandler(imd_manual_mode_choice, pattern=r"^imdmanmode:"))
     app.add_handler(CallbackQueryHandler(admin_sales_report, pattern=r"^sales:"))
     app.add_handler(CallbackQueryHandler(admin_sales_excel, pattern=r"^salesxlsx$"))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
