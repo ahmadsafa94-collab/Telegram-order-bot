@@ -9475,8 +9475,15 @@ async def http_create_order(request):
 
     JSON body: {user_id, items: {item_id: quantity}, payment_method}.
     If the customer already has an unpaid order, nothing is created and that
-    order is returned (409 with order_id) so the receipt goes to it instead."""
+    order is returned (409 with order_id) so the receipt goes to it instead.
+
+    With owner_confirmed: true (only sent when the owner told the reply bot
+    the payment is confirmed), the order is created already paid, with
+    payer_name, and the optional info {account_type, ...fields} saved on the
+    first unit, so delivery starts straight away (an iMD renewal runs on iMD)
+    instead of waiting for a receipt."""
     from aiohttp import web
+    from telegram.ext import CallbackContext
 
     if not _reply_bot_authorized(request):
         return web.json_response({"error": "Unauthorized"}, status=401)
@@ -9485,6 +9492,9 @@ async def http_create_order(request):
         user_id = int(body["user_id"])
         requested = {str(k): int(v) for k, v in (body.get("items") or {}).items()}
         payment_method = str(body.get("payment_method") or "").strip()
+        owner_confirmed = body.get("owner_confirmed") is True
+        payer_name = str(body.get("payer_name") or "").strip()[:100]
+        info = {str(k): str(v).strip() for k, v in (body.get("info") or {}).items()}
     except (ValueError, KeyError, TypeError, AttributeError):
         return web.json_response({"error": "invalid request body"}, status=400)
 
@@ -9510,6 +9520,14 @@ async def http_create_order(request):
             {"error": f"order between 1 and {CREATE_ORDER_MAX_UNITS} subscriptions"}, status=400
         )
 
+    # Account details for the first unit that takes any, checked before anything is created.
+    first_unit = next((i for i in order_items if _register_kind(i) is not None), None)
+    clean_info = None
+    if owner_confirmed and info and first_unit:
+        clean_info, problem = _clean_register_info(_register_kind(first_unit), info)
+        if problem:
+            return web.json_response(problem, status=400)
+
     if not db_user_exists(user_id):
         return web.json_response(
             {"error": "the customer hasn't started the shop bot yet"}, status=409
@@ -9522,7 +9540,7 @@ async def http_create_order(request):
     ).fetchone()
     user_row = conn.execute("SELECT username FROM users WHERE user_id = ?", (user_id,)).fetchone()
     conn.close()
-    if existing:
+    if existing and not owner_confirmed:
         return web.json_response(
             {"error": "the customer already has an unpaid order", "order_id": existing[0]}, status=409
         )
@@ -9538,6 +9556,49 @@ async def http_create_order(request):
         conn.close()
 
     lines = [f"{qty}x {MENU[i][0]}" for i, qty in order_items.items()]
+    if owner_confirmed:
+        application = request.app["application"]
+        if payer_name:
+            db_set_payer_name(order_id, payer_name)
+        db_add_fulfilment_items(order_id, user_id, order_items)
+        if clean_info is not None:
+            conn = sqlite3.connect(DB_PATH)
+            row = conn.execute(
+                "SELECT id FROM fulfilment WHERE order_id = ? AND item_id = ? AND state = 'needs_info' ORDER BY id LIMIT 1",
+                (order_id, first_unit),
+            ).fetchone()
+            conn.close()
+            if row:
+                db_set_fulfilment_info(row[0], clean_info)
+        try:
+            await application.bot.send_message(
+                chat_id=user_id,
+                text=f"🧾 Order #{order_id} was created for you through our support chat:\n" + "\n".join(lines)
+                + f"\n\nTotal: {CURRENCY}{total:.2f}\nPayment method: {payment_method}",
+            )
+        except Exception:
+            logger.exception("create_order: couldn't notify customer %s about order #%s", user_id, order_id)
+        if ADMIN_CHAT_ID:
+            try:
+                await application.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(
+                        f"✅ Order #{order_id} created as paid on your instruction (support chat), no receipt.\n"
+                        + "\n".join(lines) + f"\nCustomer ID: {user_id}\nPayment: {payment_method}"
+                        + (f", payer {payer_name}" if payer_name else "")
+                    ),
+                )
+            except Exception:
+                logger.exception("create_order: couldn't notify the admin about order #%s", order_id)
+        # Same as the admin's Confirm: marks it paid and starts delivery, which
+        # uses the saved details (an iMD unit with details registers/renews on iMD).
+        context = CallbackContext(application, chat_id=user_id, user_id=user_id)
+        application.create_task(
+            finalize_order_confirmation(context, order_id, user_id, json.dumps(order_items))
+        )
+        logger.info("create_order: order #%s for %s created as paid on the owner's instruction", order_id, user_id)
+        return web.json_response({"ok": True, "order_id": order_id, "total": total,
+                                  "payment_method": payment_method, "confirmed": True})
     try:
         await request.app["application"].bot.send_message(
             chat_id=user_id,
@@ -9562,6 +9623,31 @@ REGISTER_FIELDS = {
     ("generic", "new"): [f for f, _ in GENERIC_FIELDS],
     ("generic", "renew"): [f for f, _ in RENEWAL_FIELDS],
 }
+
+
+def _clean_register_info(kind: str, info: dict):
+    """Validates account details sent by the reply bot for one unit.
+    Returns (clean info, None) or (None, error body)."""
+    if kind == "none":
+        return {"account_type": "new"}, None
+    account_type = (info.get("account_type") or "new").lower()
+    if account_type in ("renewal", "renew", "existing"):
+        account_type = "renew"
+    if account_type not in ("new", "renew"):
+        return None, {"error": "account_type must be new or renew"}
+    fields = REGISTER_FIELDS[(kind, account_type)]
+    missing = [f for f in fields if not info.get(f)]
+    if missing:
+        return None, {"error": "missing account details: " + ", ".join(missing), "required": fields}
+    clean = {"account_type": account_type, **{f: info[f] for f in fields}}
+    problem = None
+    if account_type == "new" and kind == "imd" and re.search(r"\s", clean["username"]):
+        problem = "the username can't contain spaces"
+    elif account_type == "new" and kind == "generic":
+        problem = validate_generic_username(clean["username"]) or validate_generic_password(clean["password"])
+    if problem:
+        return None, {"error": re.split(r"\s*Please choose", problem)[0].strip(), "required": fields}
+    return clean, None
 
 
 def _register_kind(item_id: str):
@@ -9634,28 +9720,9 @@ async def http_register_account(request):
     fulfilment_id, item_id = rows[0]
     kind = _register_kind(item_id)
 
-    if kind == "none":
-        clean = {"account_type": "new"}
-    else:
-        account_type = (info.get("account_type") or "new").lower()
-        if account_type in ("renewal", "renew", "existing"):
-            account_type = "renew"
-        if account_type not in ("new", "renew"):
-            return web.json_response({"error": "account_type must be new or renew"}, status=400)
-        fields = REGISTER_FIELDS[(kind, account_type)]
-        missing = [f for f in fields if not info.get(f)]
-        if missing:
-            return web.json_response(
-                {"error": "missing account details: " + ", ".join(missing), "required": fields}, status=400
-            )
-        clean = {"account_type": account_type, **{f: info[f] for f in fields}}
-        problem = None
-        if account_type == "new" and kind == "imd" and re.search(r"\s", clean["username"]):
-            problem = "the username can't contain spaces"
-        elif account_type == "new" and kind == "generic":
-            problem = validate_generic_username(clean["username"]) or validate_generic_password(clean["password"])
-        if problem:
-            return web.json_response({"error": re.split(r"\s*Please choose", problem)[0].strip(), "required": fields}, status=400)
+    clean, problem = _clean_register_info(kind, info)
+    if problem:
+        return web.json_response(problem, status=400)
 
     application = request.app["application"]
     # Drop any half-finished form for this unit in the customer's session,
