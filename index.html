@@ -1747,11 +1747,18 @@ function submitOrder(){
   fetch(withAuth('/api/submit_order'),{
     method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),
   }).then(r=>r.json().catch(()=>({ok:false,error:'Unexpected response from server.'})).then(j=>({status:r.status,body:j})))
-    .then(({body})=>{
+    .then(({status,body})=>{
       if(body&&body.ok){
         tg.close();
       }else{
-        showToast((body&&body.error)||'Could not place your order. Please try again.');
+        // A 401 here means the signed token embedded in this page's link
+        // no longer verifies — e.g. the bot's Telegram token was rotated
+        // after this link was generated. "Unauthorized" means nothing to
+        // a customer; tell them the one thing that actually fixes it.
+        const msg = status===401
+          ? 'Your session has expired — please close this and reopen the Shop from the bot chat.'
+          : (body&&body.error)||'Could not place your order. Please try again.';
+        showToast(msg);
         _submittingOrder=false;
         if(sub){sub.textContent=prevLabel;sub.disabled=false;sub.style.opacity='1';}
       }
