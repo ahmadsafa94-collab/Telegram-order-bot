@@ -3080,6 +3080,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_ticket_edit_answer",
     "awaiting_credentials_fulfilment",
     "awaiting_admin_message_for_order",
+    "awaiting_edit_delivery",
     "awaiting_new_sub_field", "new_sub_data",
     "awaiting_book_price_for", "awaiting_book_message_for",
     "awaiting_stock_edit_field", "stock_edit_item_id", "stock_edit_name", "stock_edit_duration",
@@ -13835,6 +13836,7 @@ async def edit_delivery_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     _, order_id, user_id, item_id, message, message_id, delivered_at = row
+    clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_edit_delivery"] = delivery_id
 
     name = MENU.get(item_id, (item_id,))[0]
@@ -13844,7 +13846,29 @@ async def edit_delivery_start(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"Reply with the corrected account details for {name} (Order #{order_id}).\n\n"
             f"Current:\n{message}"
         ),
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Cancel", callback_data=f"editdeliv_cancel:{delivery_id}")]]
+        ),
     )
+
+
+async def edit_delivery_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin backed out of 'Edit credentials' before typing anything —
+    clears the waiting state so their next message isn't mistakenly
+    applied as this delivery's new credentials."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    delivery_id = int(query.data.split(":", 1)[1])
+    if context.user_data.get("awaiting_edit_delivery") == delivery_id:
+        context.user_data.pop("awaiting_edit_delivery", None)
+    try:
+        await query.edit_message_text("Cancelled — no changes made.")
+    except Exception:
+        pass
 
 
 async def edit_delivery_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15324,6 +15348,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_comment_start, pattern=r"^admin_comment:"))
     app.add_handler(CallbackQueryHandler(deliver_start, pattern=r"^deliver:"))
     app.add_handler(CallbackQueryHandler(edit_delivery_start, pattern=r"^editdeliv:"))
+    app.add_handler(CallbackQueryHandler(edit_delivery_cancel, pattern=r"^editdeliv_cancel:"))
     app.add_handler(CallbackQueryHandler(reg_go, pattern=r"^reg_go:"))
     app.add_handler(CallbackQueryHandler(imd_registration_type_choice, pattern=r"^imdregtype:"))
     app.add_handler(CallbackQueryHandler(add_serials_pick_duration, pattern=r"^addser:"))
