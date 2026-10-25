@@ -1902,9 +1902,9 @@ _KEEP = object()  # sentinel: "leave this field as it currently is" (vs. None, w
 
 def db_set_coworker_imd_prices(coworker_id: int, imd_6m_price, imd_1y_price, imd_2y_price=_KEEP):
     """Any argument can be left unchanged by passing the _KEEP sentinel
-    (see coworker_imdprice_field_reply) — only the fields actually being
-    updated are written. Passing None clears that field (reverting that
-    duration back to the regular percentage discount)."""
+    (see coworker_editprice_imd_field_reply) — only the fields actually
+    being updated are written. Passing None clears that field (reverting
+    that duration back to the regular percentage discount)."""
     conn = sqlite3.connect(DB_PATH)
     if imd_6m_price is not _KEEP:
         conn.execute("UPDATE coworkers SET imd_6m_price = ? WHERE id = ?", (imd_6m_price, coworker_id))
@@ -1912,6 +1912,13 @@ def db_set_coworker_imd_prices(coworker_id: int, imd_6m_price, imd_1y_price, imd
         conn.execute("UPDATE coworkers SET imd_1y_price = ? WHERE id = ?", (imd_1y_price, coworker_id))
     if imd_2y_price is not _KEEP:
         conn.execute("UPDATE coworkers SET imd_2y_price = ? WHERE id = ?", (imd_2y_price, coworker_id))
+    conn.commit()
+    conn.close()
+
+
+def db_set_coworker_discount_pct(coworker_id: int, pct: float):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE coworkers SET discount_pct = ? WHERE id = ?", (pct, coworker_id))
     conn.commit()
     conn.close()
 
@@ -2975,13 +2982,29 @@ def md_escape(text: str) -> str:
     return text
 
 
-def format_cart(cart: dict) -> str:
+def _coworker_unit_price(item_id: str, user_id: int) -> float:
+    """MENU price for this item, with the customer's coworker fixed-$ (iMD)
+    or percentage pricing applied if they're currently logged in as a
+    coworker via /coworker — the same rule applied at actual checkout, so
+    the in-chat basket preview and the final order total always agree."""
+    base_price = MENU[item_id][1]
+    coworker_login = db_get_user_coworker(user_id) if user_id else None
+    if not coworker_login:
+        return base_price
+    _, _, coworker_pct, imd_6m_price, imd_1y_price, imd_2y_price = coworker_login
+    fixed_prices = {"imd_6m": imd_6m_price, "imd_1y": imd_1y_price, "imd_2y": imd_2y_price}
+    fixed = fixed_prices.get(item_id)
+    return fixed if fixed is not None else round(base_price * (1 - coworker_pct / 100), 2)
+
+
+def format_cart(cart: dict, user_id: int = 0) -> str:
     if not cart:
         return "Your cart is empty."
     lines = []
     total = 0.0
     for item_id, qty in cart.items():
-        name, price = MENU[item_id]
+        name = MENU[item_id][0]
+        price = _coworker_unit_price(item_id, user_id)
         subtotal = price * qty
         total += subtotal
         lines.append(f"{qty}x {name} — {CURRENCY}{subtotal:.2f}")
@@ -2989,8 +3012,8 @@ def format_cart(cart: dict) -> str:
     return "\n".join(lines)
 
 
-def cart_total(cart: dict) -> float:
-    return sum(MENU[item_id][1] * qty for item_id, qty in cart.items())
+def cart_total(cart: dict, user_id: int = 0) -> float:
+    return round(sum(_coworker_unit_price(item_id, user_id) * qty for item_id, qty in cart.items()), 2)
 
 
 def menu_keyboard() -> InlineKeyboardMarkup:
@@ -3167,8 +3190,8 @@ ADMIN_FLOW_KEYS = [
     "awaiting_discount_field", "discount_data",
     "awaiting_resend_message_for_fulfilment",
     "awaiting_coworker_add_field", "coworker_add_data",
-    "awaiting_coworker_imdprice_field", "coworker_imdprice_coworker_id", "coworker_imdprice_6m",
-    "coworker_imdprice_1y",
+    "awaiting_coworker_editprice_pct",
+    "awaiting_coworker_editprice_imd_field", "coworker_editprice_imd_duration",
     "awaiting_coworker_editlogin_field", "coworker_editlogin_id",
 ]
 
@@ -3550,7 +3573,7 @@ async def main_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == BASKET_LABEL:
         cart = context.user_data.setdefault("cart", {})
         await update.message.reply_text(
-            format_cart(cart), parse_mode=ParseMode.MARKDOWN, reply_markup=cart_keyboard(cart)
+            format_cart(cart, update.effective_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=cart_keyboard(cart)
         )
 
     elif text == ANNOUNCEMENTS_LABEL:
@@ -4846,7 +4869,7 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Tap an item below to add it to your order.\n\n"
             f"✅ Added to the basket: {name}\n"
             f"🧺 Basket: {total_units} item{'s' if total_units != 1 else ''} — "
-            f"{CURRENCY}{cart_total(cart):.2f}"
+            f"{CURRENCY}{cart_total(cart, query.from_user.id):.2f}"
         )
         try:
             await query.edit_message_text(summary, reply_markup=menu_keyboard())
@@ -4865,13 +4888,13 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if cart[item_id] <= 0:
                 del cart[item_id]
         await query.edit_message_text(
-            format_cart(cart), parse_mode=ParseMode.MARKDOWN, reply_markup=cart_keyboard(cart)
+            format_cart(cart, query.from_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=cart_keyboard(cart)
         )
         return
 
     if data == "view_cart":
         await query.edit_message_text(
-            format_cart(cart), parse_mode=ParseMode.MARKDOWN, reply_markup=cart_keyboard(cart)
+            format_cart(cart, query.from_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=cart_keyboard(cart)
         )
         return
 
@@ -4976,9 +4999,15 @@ async def start_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Your cart is empty. Add something first!", reply_markup=menu_keyboard())
         return
 
-    total = cart_total(cart)
     user = query.from_user
+    total = cart_total(cart, user.id)
     order_id = db_create_order(user.id, user.username or user.first_name, cart, total)
+    coworker_login = db_get_user_coworker(user.id)
+    if coworker_login:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE orders SET coworker_id = ? WHERE id = ?", (coworker_login[0], order_id))
+        conn.commit()
+        conn.close()
     context.user_data["last_order_id"] = order_id
 
     text, keyboard = pre_payment_view(order_id)
@@ -9554,17 +9583,7 @@ def _reply_bot_order_total(user_id: int, order_items: dict) -> float:
     """Server-side price for an order created by the reply bot: MENU prices,
     with this customer's coworker pricing applied the same way as a Mini App
     checkout (no credits or discount codes)."""
-    coworker_login = db_get_user_coworker(user_id)
-    if not coworker_login:
-        return round(sum(MENU[i][1] * q for i, q in order_items.items()), 2)
-    _, _, coworker_pct, imd_6m_price, imd_1y_price, imd_2y_price = coworker_login
-    fixed_prices = {"imd_6m": imd_6m_price, "imd_1y": imd_1y_price, "imd_2y": imd_2y_price}
-    total = 0.0
-    for item_id, qty in order_items.items():
-        fixed = fixed_prices.get(item_id)
-        unit_price = fixed if fixed is not None else round(MENU[item_id][1] * (1 - coworker_pct / 100), 2)
-        total += unit_price * qty
-    return round(total, 2)
+    return round(sum(_coworker_unit_price(i, user_id) * q for i, q in order_items.items()), 2)
 
 
 async def http_create_order(request):
@@ -10854,7 +10873,7 @@ async def coworker_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👁 Preview Shop as This Coworker", callback_data=f"coworker_preview:{coworker_id}")]
     )
     buttons.append(
-        [InlineKeyboardButton("✏️ Edit iMD Prices", callback_data=f"coworker_imdprice:{coworker_id}")]
+        [InlineKeyboardButton("✏️ Edit Prices", callback_data=f"coworker_editprice:{coworker_id}")]
     )
     buttons.append(
         [InlineKeyboardButton("🔑 Edit Username/Password", callback_data=f"coworker_editlogin:{coworker_id}")]
@@ -11137,11 +11156,14 @@ async def coworker_pending_list(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
-async def coworker_imdprice_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin tapped '✏️ Edit iMD Prices' — walks 6-Month then 1-Year then
-    2-Year, each either a new fixed price, /clear to remove the override
-    (reverting that duration back to the percentage discount), or /skip
-    to leave it unchanged."""
+_IMD_DURATION_LABELS = {"6m": "6-Month", "1y": "1-Year", "2y": "2-Year"}
+_IMD_DURATION_FIELDS = {"6m": "imd_6m_price", "1y": "imd_1y_price", "2y": "imd_2y_price"}
+
+
+async def coworker_editprice_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '✏️ Edit Prices' — offers a choice between editing the
+    overall percentage discount or iMD's per-duration fixed prices, instead
+    of forcing a walk through every field every time."""
     query = update.callback_query
     if query.from_user.id != ADMIN_CHAT_ID:
         await query.answer("Not authorized.", show_alert=True)
@@ -11151,36 +11173,142 @@ async def coworker_imdprice_start(update: Update, context: ContextTypes.DEFAULT_
     coworker_id = int(query.data.split(":", 1)[1])
     coworker = db_get_coworker(coworker_id)
     if not coworker:
-        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That coworker no longer exists.")
+        await query.edit_message_text("That coworker no longer exists.")
+        return
+
+    _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price, imd_2y_price = coworker
+    await query.edit_message_text(
+        f"What would you like to edit for {name}?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"💯 Percentage Discount ({discount_pct:.0f}%)",
+                                   callback_data=f"coworker_editprice_pct:{coworker_id}")],
+            [InlineKeyboardButton("🔬 iMD Fixed Prices", callback_data=f"coworker_editprice_imdmenu:{coworker_id}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"coworker:{coworker_id}")],
+        ]),
+    )
+
+
+async def coworker_editprice_pct_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '💯 Percentage Discount' — asks for the new overall %."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    coworker_id = int(query.data.split(":", 1)[1])
+    coworker = db_get_coworker(coworker_id)
+    if not coworker:
+        await query.edit_message_text("That coworker no longer exists.")
         return
 
     clear_admin_flow_state(context.user_data)
-    context.user_data["awaiting_coworker_imdprice_field"] = "imd_6m_price"
-    context.user_data["coworker_imdprice_coworker_id"] = coworker_id
-
+    context.user_data["awaiting_coworker_editprice_pct"] = coworker_id
     _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price, imd_2y_price = coworker
-    current = f"{CURRENCY}{imd_6m_price:.2f}" if imd_6m_price is not None else f"not set (using {discount_pct:.0f}% off)"
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
         text=(
-            f"iMD 6-Month price for {name} — currently {current}.\n"
-            "Send a new price, /clear to remove the override, or /skip to leave unchanged:"
+            f"Percentage discount for {name} — currently {discount_pct:.0f}%.\n"
+            "Send a new number between 1 and 100:"
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Cancel", callback_data=f"coworker_editprice_cancel:{coworker_id}")]]
         ),
     )
 
 
-async def coworker_imdprice_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Walks imd_6m_price -> imd_1y_price -> imd_2y_price, one message at a
-    time, then saves whichever fields weren't left as /skip."""
-    field = context.user_data.get("awaiting_coworker_imdprice_field")
-    coworker_id = context.user_data.get("coworker_imdprice_coworker_id")
-    if not field or not coworker_id:
+async def coworker_editprice_pct_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    coworker_id = context.user_data.get("awaiting_coworker_editprice_pct")
+    if not coworker_id:
+        return
+    text = update.message.text.strip()
+    try:
+        pct = float(text)
+        if not (0 < pct <= 100):
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Send a number between 1 and 100:")
+        return
+
+    context.user_data.pop("awaiting_coworker_editprice_pct", None)
+    db_set_coworker_discount_pct(coworker_id, pct)
+    coworker = db_get_coworker(coworker_id)
+    name = coworker[1] if coworker else "that coworker"
+    await update.message.reply_text(f"✅ Updated {name}'s percentage discount to {pct:.0f}%.")
+
+
+async def coworker_editprice_imdmenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '🔬 iMD Fixed Prices' — offers 6-Month / 1-Year / 2-Year,
+    each edited independently instead of a forced walk through all three."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    coworker_id = int(query.data.split(":", 1)[1])
+    coworker = db_get_coworker(coworker_id)
+    if not coworker:
+        await query.edit_message_text("That coworker no longer exists.")
+        return
+
+    _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price, imd_2y_price = coworker
+    prices = {"6m": imd_6m_price, "1y": imd_1y_price, "2y": imd_2y_price}
+    buttons = []
+    for key, label in _IMD_DURATION_LABELS.items():
+        price = prices[key]
+        current = f"{CURRENCY}{price:.2f}" if price is not None else f"{discount_pct:.0f}% off"
+        buttons.append([InlineKeyboardButton(
+            f"iMD {label} — {current}", callback_data=f"coworker_editprice_imd:{coworker_id}:{key}"
+        )])
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"coworker_editprice:{coworker_id}")])
+    await query.edit_message_text(f"Which iMD duration for {name}?", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def coworker_editprice_imd_field_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin picked one iMD duration — asks for its new fixed price."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    _, coworker_id_str, duration = query.data.split(":", 2)
+    coworker_id = int(coworker_id_str)
+    coworker = db_get_coworker(coworker_id)
+    if not coworker:
+        await query.edit_message_text("That coworker no longer exists.")
+        return
+
+    clear_admin_flow_state(context.user_data)
+    context.user_data["awaiting_coworker_editprice_imd_field"] = coworker_id
+    context.user_data["coworker_editprice_imd_duration"] = duration
+
+    _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price, imd_2y_price = coworker
+    prices = {"6m": imd_6m_price, "1y": imd_1y_price, "2y": imd_2y_price}
+    price = prices[duration]
+    current = f"{CURRENCY}{price:.2f}" if price is not None else f"not set (using {discount_pct:.0f}% off)"
+    label = _IMD_DURATION_LABELS[duration]
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=(
+            f"iMD {label} price for {name} — currently {current}.\n"
+            "Send a new price, or /clear to remove the override:"
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Cancel", callback_data=f"coworker_editprice_cancel:{coworker_id}")]]
+        ),
+    )
+
+
+async def coworker_editprice_imd_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    coworker_id = context.user_data.get("awaiting_coworker_editprice_imd_field")
+    duration = context.user_data.get("coworker_editprice_imd_duration")
+    if not coworker_id or not duration:
         return
     text = update.message.text.strip()
 
-    if text == "/skip":
-        value = _KEEP
-    elif text == "/clear":
+    if text == "/clear":
         value = None
     else:
         try:
@@ -11188,50 +11316,41 @@ async def coworker_imdprice_field_reply(update: Update, context: ContextTypes.DE
             if value < 0:
                 raise ValueError
         except ValueError:
-            await update.message.reply_text("Send a number, /clear, or /skip:")
+            await update.message.reply_text("Send a number, or /clear:")
             return
 
-    if field == "imd_6m_price":
-        context.user_data["coworker_imdprice_6m"] = value
-        context.user_data["awaiting_coworker_imdprice_field"] = "imd_1y_price"
-        coworker = db_get_coworker(coworker_id)
-        _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price, imd_2y_price = coworker
-        current = f"{CURRENCY}{imd_1y_price:.2f}" if imd_1y_price is not None else f"not set (using {discount_pct:.0f}% off)"
-        await update.message.reply_text(
-            f"iMD 1-Year price for {name} — currently {current}.\n"
-            "Send a new price, /clear to remove the override, or /skip to leave unchanged:"
-        )
-        return
+    context.user_data.pop("awaiting_coworker_editprice_imd_field", None)
+    context.user_data.pop("coworker_editprice_imd_duration", None)
 
-    if field == "imd_1y_price":
-        context.user_data["coworker_imdprice_1y"] = value
-        context.user_data["awaiting_coworker_imdprice_field"] = "imd_2y_price"
-        coworker = db_get_coworker(coworker_id)
-        _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price, imd_2y_price = coworker
-        current = f"{CURRENCY}{imd_2y_price:.2f}" if imd_2y_price is not None else f"not set (using {discount_pct:.0f}% off)"
-        await update.message.reply_text(
-            f"iMD 2-Year price for {name} — currently {current}.\n"
-            "Send a new price, /clear to remove the override, or /skip to leave unchanged:"
-        )
-        return
-
-    # field == "imd_2y_price"
-    imd_6m_value = context.user_data.pop("coworker_imdprice_6m", _KEEP)
-    imd_1y_value = context.user_data.pop("coworker_imdprice_1y", _KEEP)
-    context.user_data.pop("awaiting_coworker_imdprice_field", None)
-    context.user_data.pop("coworker_imdprice_coworker_id", None)
-
-    db_set_coworker_imd_prices(coworker_id, imd_6m_value, imd_1y_value, value)
+    kwargs = {"imd_6m_price": _KEEP, "imd_1y_price": _KEEP, "imd_2y_price": _KEEP}
+    kwargs[_IMD_DURATION_FIELDS[duration]] = value
+    db_set_coworker_imd_prices(
+        coworker_id, kwargs["imd_6m_price"], kwargs["imd_1y_price"], kwargs["imd_2y_price"]
+    )
 
     coworker = db_get_coworker(coworker_id)
     _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price, imd_2y_price = coworker
-    imd_6m_label = f"{CURRENCY}{imd_6m_price:.2f}" if imd_6m_price is not None else f"{discount_pct:.0f}% off (no override)"
-    imd_1y_label = f"{CURRENCY}{imd_1y_price:.2f}" if imd_1y_price is not None else f"{discount_pct:.0f}% off (no override)"
-    imd_2y_label = f"{CURRENCY}{imd_2y_price:.2f}" if imd_2y_price is not None else f"{discount_pct:.0f}% off (no override)"
-    await update.message.reply_text(
-        f"✅ Updated {name}'s iMD pricing.\n"
-        f"iMD 6-Month: {imd_6m_label}\niMD 1-Year: {imd_1y_label}\niMD 2-Year: {imd_2y_label}"
-    )
+    prices = {"6m": imd_6m_price, "1y": imd_1y_price, "2y": imd_2y_price}
+    new_price = prices[duration]
+    label = _IMD_DURATION_LABELS[duration]
+    new_label = f"{CURRENCY}{new_price:.2f}" if new_price is not None else f"{discount_pct:.0f}% off (no override)"
+    await update.message.reply_text(f"✅ Updated {name}'s iMD {label} price to {new_label}.")
+
+
+async def coworker_editprice_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin backed out of a price-entry prompt before typing anything."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    context.user_data.pop("awaiting_coworker_editprice_pct", None)
+    context.user_data.pop("awaiting_coworker_editprice_imd_field", None)
+    context.user_data.pop("coworker_editprice_imd_duration", None)
+    try:
+        await query.edit_message_text("Cancelled — no changes made.")
+    except Exception:
+        pass
 
 
 async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -12604,8 +12723,11 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get("awaiting_coworker_add_field"):
             await coworker_add_field_reply(update, context)
             return
-        if context.user_data.get("awaiting_coworker_imdprice_field"):
-            await coworker_imdprice_field_reply(update, context)
+        if context.user_data.get("awaiting_coworker_editprice_pct"):
+            await coworker_editprice_pct_reply(update, context)
+            return
+        if context.user_data.get("awaiting_coworker_editprice_imd_field"):
+            await coworker_editprice_imd_field_reply(update, context)
             return
         if context.user_data.get("awaiting_coworker_editlogin_field"):
             await coworker_editlogin_reply(update, context)
@@ -15733,7 +15855,11 @@ def main():
     app.add_handler(CallbackQueryHandler(coworker_add_start, pattern=r"^coworker_add$"))
     app.add_handler(CallbackQueryHandler(coworker_back, pattern=r"^coworker_back$"))
     app.add_handler(CallbackQueryHandler(coworker_pending_list, pattern=r"^coworker_pending:"))
-    app.add_handler(CallbackQueryHandler(coworker_imdprice_start, pattern=r"^coworker_imdprice:"))
+    app.add_handler(CallbackQueryHandler(coworker_editprice_start, pattern=r"^coworker_editprice:"))
+    app.add_handler(CallbackQueryHandler(coworker_editprice_pct_start, pattern=r"^coworker_editprice_pct:"))
+    app.add_handler(CallbackQueryHandler(coworker_editprice_imdmenu, pattern=r"^coworker_editprice_imdmenu:"))
+    app.add_handler(CallbackQueryHandler(coworker_editprice_imd_field_start, pattern=r"^coworker_editprice_imd:"))
+    app.add_handler(CallbackQueryHandler(coworker_editprice_cancel, pattern=r"^coworker_editprice_cancel:"))
     app.add_handler(CallbackQueryHandler(coworker_editlogin_start, pattern=r"^coworker_editlogin:"))
     app.add_handler(CallbackQueryHandler(coworker_editfield_choice, pattern=r"^coworker_editfield:"))
     app.add_handler(CallbackQueryHandler(coworker_delete_confirm, pattern=r"^coworker_del:"))
