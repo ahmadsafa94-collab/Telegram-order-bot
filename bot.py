@@ -11065,7 +11065,12 @@ async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
         flag = "📝" if state == "awaiting_delivery" else "⌛"
         who = f"@{username}" if username else str(user_id)
         label = f"{flag} {name}{suffix} — {who} (#{order_id}) — {_short_submitted(created_at)}"
-        buttons.append([InlineKeyboardButton(label[:64], callback_data=f"apend:{fid}")])
+        # 💬 jumps straight to messaging this customer, without first
+        # opening the item's own detail view just to reach that button.
+        buttons.append([
+            InlineKeyboardButton(label[:60], callback_data=f"apend:{fid}"),
+            InlineKeyboardButton("💬", callback_data=f"admin_msg:{order_id}"),
+        ])
 
     text = "Pending orders:\n📝 = details ready to deliver   ⌛ = waiting on customer"
 
@@ -11074,7 +11079,10 @@ async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
         for order_id, user_id, username, total, created_at in rejected:
             who = f"@{username}" if username else str(user_id)
             label = f"💳 {CURRENCY}{total:.2f} — {who} (#{order_id}) — {_short_submitted(created_at)}"
-            buttons.append([InlineKeyboardButton(label[:64], callback_data=f"apend_rejected:{order_id}")])
+            buttons.append([
+                InlineKeyboardButton(label[:60], callback_data=f"apend_rejected:{order_id}"),
+                InlineKeyboardButton("💬", callback_data=f"admin_msg:{order_id}"),
+            ])
 
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -11281,8 +11289,32 @@ async def admin_msg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_admin_message_for_order"] = order_id
     await context.bot.send_message(
-        chat_id=ADMIN_CHAT_ID, text=f"Type the message to send the customer about order #{order_id}:"
+        chat_id=ADMIN_CHAT_ID,
+        text=f"Type the message to send the customer about order #{order_id}:",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Cancel", callback_data=f"admin_msg_cancel:{order_id}")]]
+        ),
     )
+
+
+async def admin_msg_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin backed out of 'Message Customer' before typing anything —
+    clears the waiting state so their next message isn't mistakenly sent
+    to this customer (there's no /cancel command; this button is the only
+    way out short of typing something unintended)."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    order_id = int(query.data.split(":", 1)[1])
+    if context.user_data.get("awaiting_admin_message_for_order") == order_id:
+        context.user_data.pop("awaiting_admin_message_for_order", None)
+    try:
+        await query.edit_message_text(f"Cancelled — no message sent for order #{order_id}.")
+    except Exception:
+        pass
 
 
 async def admin_message_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -13992,13 +14024,15 @@ async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def customer_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: overview of recent orders and their delivery status."""
+    """Admin-only: recent orders, one row each — tap the order to open its
+    full detail (same as /order), or 💬 to message that customer directly
+    without opening the detail first."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT id, user_id, username, items_json, total, status, delivered_at, created_at, paid_at "
+        "SELECT id, user_id, username, items_json, status, created_at "
         "FROM orders ORDER BY id DESC LIMIT 30"
     ).fetchall()
     conn.close()
@@ -14007,26 +14041,18 @@ async def customer_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No orders yet.")
         return
 
-    lines = []
-    for order_id, user_id, username, items_json, total, status, delivered_at, created_at, paid_at in rows:
+    buttons = []
+    for order_id, user_id, username, items_json, status, created_at in rows:
         items = json.loads(items_json)
         item_names = ", ".join(MENU[i][0] for i in items if i in MENU)
-        line = (
-            f"#{order_id} {username or 'unknown'} (ID: {user_id}) — {item_names} — {status}\n"
-            f"   submitted {_short_submitted(created_at)}"
-        )
-        if paid_at:
-            line += f" · paid {_short_submitted(paid_at)}"
-        elif status in ("paid", "delivered"):
-            line += " · paid ?"
-        if delivered_at:
-            line += f" · credentials sent {_short_submitted(delivered_at)}"
-        lines.append(line)
+        who = f"@{username}" if username else str(user_id)
+        label = f"#{order_id} {who} — {item_names} — {status} — {_short_submitted(created_at)}"
+        buttons.append([
+            InlineKeyboardButton(label[:60], callback_data=f"ordlkview:{order_id}"),
+            InlineKeyboardButton("💬", callback_data=f"admin_msg:{order_id}"),
+        ])
 
-    # Telegram caps messages at 4096 chars — chunk if the list gets long.
-    text = "\n".join(lines)
-    for i in range(0, len(text), 3500):
-        await update.message.reply_text(text[i:i + 3500])
+    await update.message.reply_text("Recent orders:", reply_markup=InlineKeyboardMarkup(buttons))
 
 
 def _build_order_lookup_view(order_id: int):
@@ -14142,6 +14168,26 @@ async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text, keyboard = view
     await update.message.reply_text(text, reply_markup=keyboard)
+
+
+async def order_lookup_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Opens an order's full detail from a list button (Recent Orders) —
+    same render as /order, reachable by tapping instead of typing the
+    order number."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    order_id = int(query.data.split(":", 1)[1])
+    view = _build_order_lookup_view(order_id)
+    if not view:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"Order #{order_id} not found.")
+        return
+
+    text, keyboard = view
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text, reply_markup=keyboard)
 
 
 async def order_lookup_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15300,12 +15346,14 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_pending_rejected_detail, pattern=r"^apend_rejected:"))
     app.add_handler(CallbackQueryHandler(rejected_order_delete_confirm, pattern=r"^orderdel:"))
     app.add_handler(CallbackQueryHandler(rejected_order_delete_execute, pattern=r"^orderdel_yes:"))
+    app.add_handler(CallbackQueryHandler(order_lookup_view, pattern=r"^ordlkview:"))
     app.add_handler(CallbackQueryHandler(order_lookup_delete_confirm, pattern=r"^ordlkdel:"))
     app.add_handler(CallbackQueryHandler(order_lookup_delete_cancel, pattern=r"^ordlkdel_cancel:"))
     app.add_handler(CallbackQueryHandler(order_lookup_delete_execute, pattern=r"^ordlkdel_yes:"))
     app.add_handler(CallbackQueryHandler(pending_delete_confirm, pattern=r"^pdel:"))
     app.add_handler(CallbackQueryHandler(pending_delete_execute, pattern=r"^pdel_yes:"))
     app.add_handler(CallbackQueryHandler(admin_msg_start, pattern=r"^admin_msg:"))
+    app.add_handler(CallbackQueryHandler(admin_msg_cancel, pattern=r"^admin_msg_cancel:"))
     app.add_handler(CallbackQueryHandler(customer_reply_start, pattern=r"^cust_reply:"))
     app.add_handler(CallbackQueryHandler(inbox_list, pattern=r"^inbox:"))
     app.add_handler(CallbackQueryHandler(inbox_message_detail, pattern=r"^inboxmsg:"))
