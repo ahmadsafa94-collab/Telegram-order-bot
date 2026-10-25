@@ -488,6 +488,10 @@ try {
 const AUTH_UID = _qs.get('uid') || (SUBS_DATA && SUBS_DATA.uid) || '';
 const AUTH_TOK = _qs.get('tok') || (SUBS_DATA && SUBS_DATA.tok) || '';
 const API_BASE = _qs.get('api') || (SUBS_DATA && SUBS_DATA.api) || '';
+// Admin-only: set when this is a '👁 Preview Shop as This Coworker' link,
+// so My Orders/purchase history can show THAT coworker's data too, not
+// just the catalog's preview pricing — see withAuth() below.
+const PREVIEW_CW = _qs.get('previewcw') || '';
 
 // Credit balance and active discount codes — point-in-time snapshot from
 // page load, used only for display/estimation. The server re-verifies
@@ -1176,8 +1180,10 @@ function switchCat(id){
 function apiBase(){ return API_BASE; }
 function withAuth(pathAndQuery){
   const sep = pathAndQuery.includes('?') ? '&' : '?';
-  return apiBase()+pathAndQuery+sep+'uid='+encodeURIComponent(AUTH_UID)+
+  let url = apiBase()+pathAndQuery+sep+'uid='+encodeURIComponent(AUTH_UID)+
     '&tok='+encodeURIComponent(AUTH_TOK);
+  if (PREVIEW_CW) url += '&previewcw='+encodeURIComponent(PREVIEW_CW);
+  return url;
 }
 function ordersUnavailableReason(){
   if(!apiBase()) return "Orders aren't available right now — please try again later.";
