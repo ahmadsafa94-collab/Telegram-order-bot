@@ -1696,6 +1696,18 @@ def db_user_exists(user_id: int) -> bool:
     return row is not None
 
 
+def db_get_user_seen(user_id: int):
+    """(first_seen, last_seen) ISO timestamps if this id has ever sent
+    /start to the bot, else None. The only reliable "has this person
+    messaged me before" signal — independent of whether they ever
+    ordered, since an order can now also be created on a customer's
+    behalf (e.g. /api/create_order) without them ever messaging the bot."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT first_seen, last_seen FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    return row
+
+
 def db_upsert_user(user_id: int, username: str):
     """Records that this person has used the bot — the recipient list for
     broadcasts. Called on every /start, so it stays current."""
@@ -11087,6 +11099,17 @@ async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 
+def _dm_button(username: str):
+    """A direct-DM URL button for a customer who has a public @username —
+    opens a real Telegram chat with them, not mediated by the bot at all.
+    None when there's no username: Telegram has no way to start a chat
+    with a bare numeric user ID (privacy rules block it unless that
+    person has messaged you or shares a group with you first)."""
+    if not username:
+        return None
+    return InlineKeyboardButton(f"🔗 Open @{username}'s DM", url=f"https://t.me/{username}")
+
+
 async def admin_pending_rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Detail view for a 'Payment Pending' (rejected-receipt) order —
     lets the admin confirm it after all if the customer resubmitted, or
@@ -11119,9 +11142,12 @@ async def admin_pending_rejected_detail(update: Update, context: ContextTypes.DE
     buttons = [
         [InlineKeyboardButton("✅ Confirm Payment", callback_data=f"admin_confirm:{order_id}")],
         [InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{order_id}")],
-        [InlineKeyboardButton("🗑 Delete Order", callback_data=f"orderdel:{order_id}")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="apend_back")],
     ]
+    dm_btn = _dm_button(username)
+    if dm_btn:
+        buttons.append([dm_btn])
+    buttons.append([InlineKeyboardButton("🗑 Delete Order", callback_data=f"orderdel:{order_id}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="apend_back")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 
@@ -11459,6 +11485,9 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("📨 Ask to Resend Credentials", callback_data=f"askresend:{fulfilment_id}")]
         )
     buttons.append([InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{order_id}")])
+    dm_btn = _dm_button(username)
+    if dm_btn:
+        buttons.append([dm_btn])
     buttons.append([InlineKeyboardButton("🗑 Delete", callback_data=f"pdel:{fulfilment_id}")])
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="apend_back")])
 
@@ -13941,7 +13970,10 @@ async def serials_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only: full picture for one customer — delivered and pending
-    shown separately, each with the details they submitted."""
+    shown separately, each with the details they submitted, plus whether
+    this id has ever actually messaged the bot at all (independent of
+    orders — an order can now be created on a customer's behalf without
+    them ever messaging the bot, e.g. /api/create_order)."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
@@ -13950,19 +13982,27 @@ async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     query_arg = context.args[0]
-    conn = sqlite3.connect(DB_PATH)
     if query_arg.startswith("@"):
+        uname = query_arg[1:]
+        conn = sqlite3.connect(DB_PATH)
         row = conn.execute(
-            "SELECT user_id FROM orders WHERE username = ? ORDER BY id DESC LIMIT 1",
-            (query_arg[1:],),
+            "SELECT user_id FROM orders WHERE username = ? ORDER BY id DESC LIMIT 1", (uname,)
         ).fetchone()
+        if not row:
+            # No order under this username — but they may still have
+            # messaged the bot (sent /start) without ever ordering.
+            row = conn.execute(
+                "SELECT user_id FROM users WHERE username = ? ORDER BY last_seen DESC LIMIT 1", (uname,)
+            ).fetchone()
         conn.close()
         if not row:
-            await update.message.reply_text(f"No orders found for {query_arg}.")
+            await update.message.reply_text(
+                f"No record of {query_arg} at all — no orders, and this bot has no username "
+                "match on file (they may have never messaged it, or changed their username since)."
+            )
             return
         user_id = row[0]
     else:
-        conn.close()
         try:
             user_id = int(query_arg)
         except ValueError:
@@ -13972,12 +14012,21 @@ async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     delivered = db_user_delivered_units(user_id)
     pending = db_user_pending_items(user_id)
     credits = db_get_credits(user_id)
+    seen = db_get_user_seen(user_id)
 
-    if not delivered and not pending and not credits:
-        await update.message.reply_text(f"No orders found for {query_arg}.")
+    if not delivered and not pending and not credits and not seen:
+        await update.message.reply_text(
+            f"No record of {query_arg} (ID: {user_id}) at all — they've never messaged this bot "
+            "and have no orders or credits on file."
+        )
         return
 
     parts = [f"Customer {query_arg} (ID: {user_id})"]
+    if seen:
+        first_seen, last_seen = seen
+        parts.append(f"💬 Messaged this bot — first seen {first_seen[:19]}, last seen {last_seen[:19]}")
+    else:
+        parts.append("⚠️ Has never sent /start to this bot (no message history on file)")
     parts.append(f"💳 Credits: {credits} ({CURRENCY}{credits * CREDIT_VALUE_USD})")
 
     parts.append("\n✅ DELIVERED")
@@ -14011,11 +14060,27 @@ async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "SELECT id FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,)
     ).fetchone()
     conn.close()
-    buttons = None
+    button_rows = []
     if latest_order:
-        buttons = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{latest_order[0]}")]]
+        button_rows.append(
+            [InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{latest_order[0]}")]
         )
+    # db_get_username only knows usernames from direct /start contact —
+    # fall back to the order record for a customer created on their
+    # behalf (e.g. /api/create_order) who never messaged the bot.
+    dm_username = db_get_username(user_id)
+    if not dm_username:
+        conn = sqlite3.connect(DB_PATH)
+        uname_row = conn.execute(
+            "SELECT username FROM orders WHERE user_id = ? AND username IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1", (user_id,)
+        ).fetchone()
+        conn.close()
+        dm_username = uname_row[0] if uname_row else None
+    dm_btn = _dm_button(dm_username)
+    if dm_btn:
+        button_rows.append([dm_btn])
+    buttons = InlineKeyboardMarkup(button_rows) if button_rows else None
     for i in range(0, len(text), 3500):
         chunk_end = i + 3500 >= len(text)
         await update.message.reply_text(
@@ -14112,6 +14177,9 @@ def _build_order_lookup_view(order_id: int):
     conn.close()
 
     buttons = [[InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{oid}")]]
+    dm_btn = _dm_button(username)
+    if dm_btn:
+        buttons.append([dm_btn])
     if status not in ("paid", "delivered"):
         # Lets the admin force an order through even though nothing here
         # confirmed the payment — e.g. the customer paid through a channel
