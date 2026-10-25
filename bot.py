@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "25"
+MINI_APP_VERSION = "26"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -3265,6 +3265,11 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
         f"&uid={user_id}&tok={_mini_app_token(user_id)}&api={_urlquote(BOT_API_URL, safe='')}"
         if user_id else ""
     )
+    # Lets the preview Shop's 'My Orders'/purchase history also show that
+    # coworker's data, even though the admin (the real requester here)
+    # isn't actually logged in as them — see _effective_preview_coworker_id.
+    if preview_coworker_id:
+        auth_params += f"&previewcw={preview_coworker_id}"
 
     # Always include custom catalog items so the Mini App catalog stays in sync.
     # Name/price come from MENU so 📦 Manage Stock → Edit applies to them too,
@@ -9962,6 +9967,29 @@ def _verify_mini_app_token(uid_str: str, token: str):
     return user_id
 
 
+def _effective_preview_coworker_id(request, user_id: int):
+    """The coworker_id 'My Orders'/purchase-history/order-detail should use
+    for this request: normally whichever coworker this verified user_id is
+    actually logged into (via /coworker). For the admin's OWN verified
+    identity only, a ?previewcw=<coworker_id> query param lets '👁 Preview
+    Shop as This Coworker' also preview that coworker's order history —
+    otherwise the admin (who isn't a real coworker) always sees an empty
+    My Orders inside the preview, even though the catalog pricing previews
+    correctly. Trusted only when user_id itself was token-verified as
+    ADMIN_CHAT_ID, so no other caller can spoof another coworker's data by
+    adding the same query param."""
+    if user_id == ADMIN_CHAT_ID:
+        preview = request.query.get("previewcw")
+        if preview:
+            try:
+                return int(preview)
+            except ValueError:
+                return None
+        return None
+    coworker_login = db_get_user_coworker(user_id)
+    return coworker_login[0] if coworker_login else None
+
+
 async def http_my_orders(request):
     """Every paid order unit for the authenticated customer — the data
     behind the Mini App's Orders tab list."""
@@ -9970,9 +9998,9 @@ async def http_my_orders(request):
     if not user_id:
         return web.json_response({"error": "Unauthorized"}, status=401, headers=_imd_search_cors_headers())
 
-    coworker_login = db_get_user_coworker(user_id)
+    coworker_id = _effective_preview_coworker_id(request, user_id)
     rows = (
-        db_coworker_paid_fulfilment_items(coworker_login[0]) if coworker_login
+        db_coworker_paid_fulfilment_items(coworker_id) if coworker_id
         else db_user_paid_fulfilment_items(user_id)
     )
     orders = []
@@ -10003,9 +10031,9 @@ async def http_my_order_detail(request):
     except ValueError:
         fulfilment_id = 0
 
-    coworker_login = db_get_user_coworker(user_id)
+    coworker_id = _effective_preview_coworker_id(request, user_id)
     row = (
-        db_fulfilment_detail_for_coworker(fulfilment_id, coworker_login[0]) if coworker_login
+        db_fulfilment_detail_for_coworker(fulfilment_id, coworker_id) if coworker_id
         else db_fulfilment_detail_for_user(fulfilment_id, user_id)
     )
     if not row:
@@ -10102,9 +10130,9 @@ async def http_my_purchase_history(request):
     if not user_id:
         return web.json_response({"error": "Unauthorized"}, status=401, headers=_imd_search_cors_headers())
 
-    coworker_login = db_get_user_coworker(user_id)
+    coworker_id = _effective_preview_coworker_id(request, user_id)
     history = (
-        db_coworker_purchase_history(coworker_login[0]) if coworker_login
+        db_coworker_purchase_history(coworker_id) if coworker_id
         else db_user_purchase_history(user_id)
     )
     return web.json_response(history, headers=_imd_search_cors_headers())
