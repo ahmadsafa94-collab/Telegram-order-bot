@@ -1181,7 +1181,7 @@ def db_init():
     # model there. NULL means "no override set — fall back to the regular
     # percentage discount", so this is backward compatible with coworkers
     # created before this existed.
-    for column, coltype in [("imd_6m_price", "REAL"), ("imd_1y_price", "REAL")]:
+    for column, coltype in [("imd_6m_price", "REAL"), ("imd_1y_price", "REAL"), ("imd_2y_price", "REAL")]:
         try:
             conn.execute(f"ALTER TABLE coworkers ADD COLUMN {column} {coltype}")
         except sqlite3.OperationalError:
@@ -1882,13 +1882,14 @@ def _hash_coworker_password(password: str) -> str:
 
 
 def db_create_coworker(name: str, username: str, password: str, discount_pct: float,
-                        imd_6m_price: float = None, imd_1y_price: float = None) -> int:
+                        imd_6m_price: float = None, imd_1y_price: float = None,
+                        imd_2y_price: float = None) -> int:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute(
         "INSERT INTO coworkers (name, username, password_hash, discount_pct, created_at, "
-        "imd_6m_price, imd_1y_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "imd_6m_price, imd_1y_price, imd_2y_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (name, username, _hash_coworker_password(password), discount_pct, datetime.utcnow().isoformat(),
-         imd_6m_price, imd_1y_price),
+         imd_6m_price, imd_1y_price, imd_2y_price),
     )
     conn.commit()
     coworker_id = cur.lastrowid
@@ -1899,8 +1900,8 @@ def db_create_coworker(name: str, username: str, password: str, discount_pct: fl
 _KEEP = object()  # sentinel: "leave this field as it currently is" (vs. None, which means "clear it")
 
 
-def db_set_coworker_imd_prices(coworker_id: int, imd_6m_price, imd_1y_price):
-    """Either argument can be left unchanged by passing the _KEEP sentinel
+def db_set_coworker_imd_prices(coworker_id: int, imd_6m_price, imd_1y_price, imd_2y_price=_KEEP):
+    """Any argument can be left unchanged by passing the _KEEP sentinel
     (see coworker_imdprice_field_reply) — only the fields actually being
     updated are written. Passing None clears that field (reverting that
     duration back to the regular percentage discount)."""
@@ -1909,6 +1910,8 @@ def db_set_coworker_imd_prices(coworker_id: int, imd_6m_price, imd_1y_price):
         conn.execute("UPDATE coworkers SET imd_6m_price = ? WHERE id = ?", (imd_6m_price, coworker_id))
     if imd_1y_price is not _KEEP:
         conn.execute("UPDATE coworkers SET imd_1y_price = ? WHERE id = ?", (imd_1y_price, coworker_id))
+    if imd_2y_price is not _KEEP:
+        conn.execute("UPDATE coworkers SET imd_2y_price = ? WHERE id = ?", (imd_2y_price, coworker_id))
     conn.commit()
     conn.close()
 
@@ -1976,10 +1979,10 @@ def db_verify_coworker_login(username: str, password: str):
 
 def db_list_coworkers():
     """Returns (id, name, username, discount_pct, created_at, imd_6m_price,
-    imd_1y_price) for every coworker, newest first."""
+    imd_1y_price, imd_2y_price) for every coworker, newest first."""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT id, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price "
+        "SELECT id, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price, imd_2y_price "
         "FROM coworkers ORDER BY id DESC"
     ).fetchall()
     conn.close()
@@ -1988,10 +1991,10 @@ def db_list_coworkers():
 
 def db_get_coworker(coworker_id: int):
     """Returns (id, name, username, discount_pct, created_at, imd_6m_price,
-    imd_1y_price) or None."""
+    imd_1y_price, imd_2y_price) or None."""
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
-        "SELECT id, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price "
+        "SELECT id, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price, imd_2y_price "
         "FROM coworkers WHERE id = ?",
         (coworker_id,),
     ).fetchone()
@@ -2016,11 +2019,12 @@ def db_set_user_coworker(user_id: int, coworker_id: int):
 
 
 def db_get_user_coworker(user_id: int):
-    """Returns (coworker_id, name, discount_pct, imd_6m_price, imd_1y_price)
-    if this Telegram user is currently logged in as a coworker, else None."""
+    """Returns (coworker_id, name, discount_pct, imd_6m_price, imd_1y_price,
+    imd_2y_price) if this Telegram user is currently logged in as a
+    coworker, else None."""
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
-        "SELECT c.id, c.name, c.discount_pct, c.imd_6m_price, c.imd_1y_price "
+        "SELECT c.id, c.name, c.discount_pct, c.imd_6m_price, c.imd_1y_price, c.imd_2y_price "
         "FROM users u JOIN coworkers c ON c.id = u.coworker_id WHERE u.user_id = ?",
         (user_id,),
     ).fetchone()
@@ -2843,6 +2847,43 @@ def db_fulfilment_detail_for_user(fulfilment_id: int, user_id: int):
     return row
 
 
+def db_coworker_paid_fulfilment_items(coworker_id: int):
+    """Same shape as db_user_paid_fulfilment_items, but every paid order
+    tagged with this coworker_id regardless of which team member's own
+    Telegram account actually placed it — several different people can be
+    logged into the same shared coworker account (see db_set_user_coworker),
+    so 'My Orders' for a coworker means every sale under that account, not
+    just the ones this particular session's own user_id happened to submit."""
+    conn = sqlite3.connect(DB_PATH)
+    placeholders = ",".join("?" * len(UNPAID_EXCLUDED_STATUSES))
+    rows = conn.execute(
+        f"SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state, o.created_at "
+        f"FROM fulfilment f JOIN orders o ON o.id = f.order_id "
+        f"WHERE o.coworker_id = ? AND o.status NOT IN ({placeholders}) "
+        f"ORDER BY f.order_id DESC, f.id",
+        (coworker_id, *UNPAID_EXCLUDED_STATUSES),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def db_fulfilment_detail_for_coworker(fulfilment_id: int, coworker_id: int):
+    """Same as db_fulfilment_detail_for_user, but ownership-checked against
+    the order's coworker_id instead of its user_id — lets a coworker open
+    the detail of an order a teammate placed under the same shared account."""
+    conn = sqlite3.connect(DB_PATH)
+    placeholders = ",".join("?" * len(UNPAID_EXCLUDED_STATUSES))
+    row = conn.execute(
+        f"SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state, f.info_json, "
+        f"o.created_at, o.status "
+        f"FROM fulfilment f JOIN orders o ON o.id = f.order_id "
+        f"WHERE f.id = ? AND o.coworker_id = ? AND o.status NOT IN ({placeholders})",
+        (fulfilment_id, coworker_id, *UNPAID_EXCLUDED_STATUSES),
+    ).fetchone()
+    conn.close()
+    return row
+
+
 def db_user_purchase_history(user_id: int):
     """Count + total spent for this customer, bucketed into today, this
     month, this year, and lifetime — the data behind the Orders tab's
@@ -2863,6 +2904,37 @@ def db_user_purchase_history(user_id: int):
             f"SELECT COUNT(*), COALESCE(SUM(total), 0) FROM orders WHERE user_id = ? "
             f"AND created_at >= ? AND status NOT IN ({placeholders})",
             (user_id, since_iso, *UNPAID_EXCLUDED_STATUSES),
+        ).fetchone()
+        return {"count": row[0], "total": round(float(row[1] or 0), 2)}
+
+    result = {
+        "day": _bucket(day_start),
+        "month": _bucket(month_start),
+        "year": _bucket(year_start),
+        "lifetime": _bucket("0000-01-01T00:00:00"),
+    }
+    conn.close()
+    return result
+
+
+def db_coworker_purchase_history(coworker_id: int):
+    """Same shape/buckets as db_user_purchase_history, but every order
+    tagged with this coworker_id — see db_coworker_paid_fulfilment_items
+    for why that's not the same as this one team member's own user_id."""
+    offset = timedelta(hours=REPORT_UTC_OFFSET)
+    local_now = datetime.utcnow() + offset
+    day_start = (local_now.replace(hour=0, minute=0, second=0, microsecond=0) - offset).isoformat()
+    month_start = (local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) - offset).isoformat()
+    year_start = (local_now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0) - offset).isoformat()
+
+    conn = sqlite3.connect(DB_PATH)
+    placeholders = ",".join("?" * len(UNPAID_EXCLUDED_STATUSES))
+
+    def _bucket(since_iso):
+        row = conn.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(total), 0) FROM orders WHERE coworker_id = ? "
+            f"AND created_at >= ? AND status NOT IN ({placeholders})",
+            (coworker_id, since_iso, *UNPAID_EXCLUDED_STATUSES),
         ).fetchone()
         return {"count": row[0], "total": round(float(row[1] or 0), 2)}
 
@@ -3096,6 +3168,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_resend_message_for_fulfilment",
     "awaiting_coworker_add_field", "coworker_add_data",
     "awaiting_coworker_imdprice_field", "coworker_imdprice_coworker_id", "coworker_imdprice_6m",
+    "coworker_imdprice_1y",
     "awaiting_coworker_editlogin_field", "coworker_editlogin_id",
 ]
 
@@ -3263,9 +3336,10 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
             cw_row = db_get_coworker(preview_coworker_id)
             # db_get_coworker's tuple shape differs from db_get_user_coworker's
             # (id, name, username, discount_pct, created_at, imd_6m_price,
-            # imd_1y_price) vs (coworker_id, name, discount_pct, imd_6m_price,
-            # imd_1y_price) — remap to the shape the rest of this function expects.
-            coworker_login = (cw_row[0], cw_row[1], cw_row[3], cw_row[5], cw_row[6]) if cw_row else None
+            # imd_1y_price, imd_2y_price) vs (coworker_id, name, discount_pct,
+            # imd_6m_price, imd_1y_price, imd_2y_price) — remap to the shape
+            # the rest of this function expects.
+            coworker_login = (cw_row[0], cw_row[1], cw_row[3], cw_row[5], cw_row[6], cw_row[7]) if cw_row else None
         else:
             coworker_login = db_get_user_coworker(user_id)
         coworker_pct = coworker_login[2] if coworker_login else 0
@@ -3278,6 +3352,8 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
                 coworker_imd_prices["imd_6m"] = coworker_login[3]
             if coworker_login[4] is not None:
                 coworker_imd_prices["imd_1y"] = coworker_login[4]
+            if coworker_login[5] is not None:
+                coworker_imd_prices["imd_2y"] = coworker_login[5]
 
         data = {
             "d": delivered,
@@ -9481,8 +9557,8 @@ def _reply_bot_order_total(user_id: int, order_items: dict) -> float:
     coworker_login = db_get_user_coworker(user_id)
     if not coworker_login:
         return round(sum(MENU[i][1] * q for i, q in order_items.items()), 2)
-    _, _, coworker_pct, imd_6m_price, imd_1y_price = coworker_login
-    fixed_prices = {"imd_6m": imd_6m_price, "imd_1y": imd_1y_price}
+    _, _, coworker_pct, imd_6m_price, imd_1y_price, imd_2y_price = coworker_login
+    fixed_prices = {"imd_6m": imd_6m_price, "imd_1y": imd_1y_price, "imd_2y": imd_2y_price}
     total = 0.0
     for item_id, qty in order_items.items():
         fixed = fixed_prices.get(item_id)
@@ -9875,7 +9951,11 @@ async def http_my_orders(request):
     if not user_id:
         return web.json_response({"error": "Unauthorized"}, status=401, headers=_imd_search_cors_headers())
 
-    rows = db_user_paid_fulfilment_items(user_id)
+    coworker_login = db_get_user_coworker(user_id)
+    rows = (
+        db_coworker_paid_fulfilment_items(coworker_login[0]) if coworker_login
+        else db_user_paid_fulfilment_items(user_id)
+    )
     orders = []
     for fid, order_id, item_id, unit_no, state, created_at in rows:
         name, price = MENU.get(item_id, (item_id, 0))
@@ -9904,7 +9984,11 @@ async def http_my_order_detail(request):
     except ValueError:
         fulfilment_id = 0
 
-    row = db_fulfilment_detail_for_user(fulfilment_id, user_id)
+    coworker_login = db_get_user_coworker(user_id)
+    row = (
+        db_fulfilment_detail_for_coworker(fulfilment_id, coworker_login[0]) if coworker_login
+        else db_fulfilment_detail_for_user(fulfilment_id, user_id)
+    )
     if not row:
         return web.json_response({"error": "Not found"}, status=404, headers=_imd_search_cors_headers())
 
@@ -9915,11 +9999,17 @@ async def http_my_order_detail(request):
     if state == "delivered":
         # The real delivered message, not the originally-submitted form
         # data — iMD auto-registration in particular can end up with a
-        # different username than what the customer first typed.
-        for _, d_order_id, d_item_id, message, _delivered_at in db_user_deliveries(user_id):
-            if d_order_id == order_id and d_item_id == item_id:
-                credentials = message
-                break
+        # different username than what the customer first typed. Looked up
+        # by order_id+item_id (not the requester's own user_id) since a
+        # coworker can be viewing an order a teammate actually placed under
+        # their shared coworker account.
+        conn = sqlite3.connect(DB_PATH)
+        deliv = conn.execute(
+            "SELECT message FROM deliveries WHERE order_id = ? AND item_id = ? ORDER BY id LIMIT 1",
+            (order_id, item_id),
+        ).fetchone()
+        conn.close()
+        credentials = deliv[0] if deliv else None
     if credentials is None:
         credentials = (
             format_fulfilment_info(item_id, info_json) if info_json
@@ -9993,7 +10083,11 @@ async def http_my_purchase_history(request):
     if not user_id:
         return web.json_response({"error": "Unauthorized"}, status=401, headers=_imd_search_cors_headers())
 
-    history = db_user_purchase_history(user_id)
+    coworker_login = db_get_user_coworker(user_id)
+    history = (
+        db_coworker_purchase_history(coworker_login[0]) if coworker_login
+        else db_user_purchase_history(user_id)
+    )
     return web.json_response(history, headers=_imd_search_cors_headers())
 
 
@@ -10544,7 +10638,7 @@ def _paid_label(status: str, paid_at: str) -> str:
 def _coworkers_list_text_and_buttons():
     rows = db_list_coworkers()
     buttons = []
-    for coworker_id, name, username, discount_pct, created_at, _imd6, _imd1 in rows:
+    for coworker_id, name, username, discount_pct, created_at, _imd6, _imd1, _imd2 in rows:
         orders_count, revenue, pending_count = db_coworker_stats(coworker_id)
         label = f"{name} — {discount_pct:.0f}% off · {orders_count} orders"
         if pending_count:
@@ -10659,7 +10753,24 @@ async def coworker_add_field_reply(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
-    # field == "imd_1y_price"
+    if field == "imd_1y_price":
+        if text != "/skip":
+            try:
+                price = float(text)
+                if price < 0:
+                    raise ValueError
+            except ValueError:
+                await update.message.reply_text("Send a number, or /skip:")
+                return
+            data["imd_1y_price"] = price
+        context.user_data["coworker_add_data"] = data
+        context.user_data["awaiting_coworker_add_field"] = "imd_2y_price"
+        await update.message.reply_text(
+            f"{CURRENCY} iMD 2-Year price for this coworker — send a number, or /skip to use the percentage instead:"
+        )
+        return
+
+    # field == "imd_2y_price"
     if text != "/skip":
         try:
             price = float(text)
@@ -10668,12 +10779,13 @@ async def coworker_add_field_reply(update: Update, context: ContextTypes.DEFAULT
         except ValueError:
             await update.message.reply_text("Send a number, or /skip:")
             return
-        data["imd_1y_price"] = price
+        data["imd_2y_price"] = price
 
     pct = data["discount_pct"]
     coworker_id = db_create_coworker(
         data["name"], data["username"], data["password"], pct,
         imd_6m_price=data.get("imd_6m_price"), imd_1y_price=data.get("imd_1y_price"),
+        imd_2y_price=data.get("imd_2y_price"),
     )
     context.user_data.pop("awaiting_coworker_add_field", None)
     context.user_data.pop("coworker_add_data", None)
@@ -10683,6 +10795,8 @@ async def coworker_add_field_reply(update: Update, context: ContextTypes.DEFAULT
                       else f"iMD 6-Month: {pct:.0f}% off (no override set)")
     imd_lines.append(f"iMD 1-Year: {CURRENCY}{data['imd_1y_price']:.2f}" if "imd_1y_price" in data
                       else f"iMD 1-Year: {pct:.0f}% off (no override set)")
+    imd_lines.append(f"iMD 2-Year: {CURRENCY}{data['imd_2y_price']:.2f}" if "imd_2y_price" in data
+                      else f"iMD 2-Year: {pct:.0f}% off (no override set)")
 
     await update.message.reply_text(
         f"✅ Coworker *{md_escape(data['name'])}* created with {pct:.0f}% off.\n"
@@ -10709,16 +10823,18 @@ async def coworker_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("That coworker no longer exists.", reply_markup=back)
         return
 
-    _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price = coworker
+    _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price, imd_2y_price = coworker
     orders_count, revenue, pending_count = db_coworker_stats(coworker_id)
     imd_6m_label = f"{CURRENCY}{imd_6m_price:.2f}" if imd_6m_price is not None else f"{discount_pct:.0f}% off (no override)"
     imd_1y_label = f"{CURRENCY}{imd_1y_price:.2f}" if imd_1y_price is not None else f"{discount_pct:.0f}% off (no override)"
+    imd_2y_label = f"{CURRENCY}{imd_2y_price:.2f}" if imd_2y_price is not None else f"{discount_pct:.0f}% off (no override)"
     text = (
         f"👥 {name}\n"
         f"Username: {username}\n"
         f"Discount: {discount_pct:.0f}% off\n"
         f"iMD 6-Month: {imd_6m_label}\n"
         f"iMD 1-Year: {imd_1y_label}\n"
+        f"iMD 2-Year: {imd_2y_label}\n"
         f"Added: {created_at[:10]}\n\n"
         f"Orders: {orders_count}\n"
         f"Revenue: {CURRENCY}{revenue:.2f}\n"
@@ -11022,8 +11138,8 @@ async def coworker_pending_list(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def coworker_imdprice_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin tapped '✏️ Edit iMD Prices' — walks 6-Month then 1-Year,
-    each either a new fixed price, /clear to remove the override
+    """Admin tapped '✏️ Edit iMD Prices' — walks 6-Month then 1-Year then
+    2-Year, each either a new fixed price, /clear to remove the override
     (reverting that duration back to the percentage discount), or /skip
     to leave it unchanged."""
     query = update.callback_query
@@ -11042,7 +11158,7 @@ async def coworker_imdprice_start(update: Update, context: ContextTypes.DEFAULT_
     context.user_data["awaiting_coworker_imdprice_field"] = "imd_6m_price"
     context.user_data["coworker_imdprice_coworker_id"] = coworker_id
 
-    _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price = coworker
+    _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price, imd_2y_price = coworker
     current = f"{CURRENCY}{imd_6m_price:.2f}" if imd_6m_price is not None else f"not set (using {discount_pct:.0f}% off)"
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
@@ -11054,8 +11170,8 @@ async def coworker_imdprice_start(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def coworker_imdprice_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Walks imd_6m_price -> imd_1y_price, one message at a time, then
-    saves whichever fields weren't left as /skip."""
+    """Walks imd_6m_price -> imd_1y_price -> imd_2y_price, one message at a
+    time, then saves whichever fields weren't left as /skip."""
     field = context.user_data.get("awaiting_coworker_imdprice_field")
     coworker_id = context.user_data.get("coworker_imdprice_coworker_id")
     if not field or not coworker_id:
@@ -11079,7 +11195,7 @@ async def coworker_imdprice_field_reply(update: Update, context: ContextTypes.DE
         context.user_data["coworker_imdprice_6m"] = value
         context.user_data["awaiting_coworker_imdprice_field"] = "imd_1y_price"
         coworker = db_get_coworker(coworker_id)
-        _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price = coworker
+        _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price, imd_2y_price = coworker
         current = f"{CURRENCY}{imd_1y_price:.2f}" if imd_1y_price is not None else f"not set (using {discount_pct:.0f}% off)"
         await update.message.reply_text(
             f"iMD 1-Year price for {name} — currently {current}.\n"
@@ -11087,19 +11203,34 @@ async def coworker_imdprice_field_reply(update: Update, context: ContextTypes.DE
         )
         return
 
-    # field == "imd_1y_price"
+    if field == "imd_1y_price":
+        context.user_data["coworker_imdprice_1y"] = value
+        context.user_data["awaiting_coworker_imdprice_field"] = "imd_2y_price"
+        coworker = db_get_coworker(coworker_id)
+        _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price, imd_2y_price = coworker
+        current = f"{CURRENCY}{imd_2y_price:.2f}" if imd_2y_price is not None else f"not set (using {discount_pct:.0f}% off)"
+        await update.message.reply_text(
+            f"iMD 2-Year price for {name} — currently {current}.\n"
+            "Send a new price, /clear to remove the override, or /skip to leave unchanged:"
+        )
+        return
+
+    # field == "imd_2y_price"
     imd_6m_value = context.user_data.pop("coworker_imdprice_6m", _KEEP)
+    imd_1y_value = context.user_data.pop("coworker_imdprice_1y", _KEEP)
     context.user_data.pop("awaiting_coworker_imdprice_field", None)
     context.user_data.pop("coworker_imdprice_coworker_id", None)
 
-    db_set_coworker_imd_prices(coworker_id, imd_6m_value, value)
+    db_set_coworker_imd_prices(coworker_id, imd_6m_value, imd_1y_value, value)
 
     coworker = db_get_coworker(coworker_id)
-    _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price = coworker
+    _, name, username, discount_pct, created_at, imd_6m_price, imd_1y_price, imd_2y_price = coworker
     imd_6m_label = f"{CURRENCY}{imd_6m_price:.2f}" if imd_6m_price is not None else f"{discount_pct:.0f}% off (no override)"
     imd_1y_label = f"{CURRENCY}{imd_1y_price:.2f}" if imd_1y_price is not None else f"{discount_pct:.0f}% off (no override)"
+    imd_2y_label = f"{CURRENCY}{imd_2y_price:.2f}" if imd_2y_price is not None else f"{discount_pct:.0f}% off (no override)"
     await update.message.reply_text(
-        f"✅ Updated {name}'s iMD pricing.\niMD 6-Month: {imd_6m_label}\niMD 1-Year: {imd_1y_label}"
+        f"✅ Updated {name}'s iMD pricing.\n"
+        f"iMD 6-Month: {imd_6m_label}\niMD 1-Year: {imd_1y_label}\niMD 2-Year: {imd_2y_label}"
     )
 
 
@@ -14754,8 +14885,8 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
     coworker_login = db_get_user_coworker(user_id)
     coworker_id = None
     if coworker_login:
-        coworker_id, _coworker_name, coworker_pct, imd_6m_price, imd_1y_price = coworker_login
-        imd_fixed_prices = {"imd_6m": imd_6m_price, "imd_1y": imd_1y_price}
+        coworker_id, _coworker_name, coworker_pct, imd_6m_price, imd_1y_price, imd_2y_price = coworker_login
+        imd_fixed_prices = {"imd_6m": imd_6m_price, "imd_1y": imd_1y_price, "imd_2y": imd_2y_price}
         total = 0.0
         for item_id, qty in order_items.items():
             fixed = imd_fixed_prices.get(item_id)
