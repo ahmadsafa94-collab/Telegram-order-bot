@@ -14243,6 +14243,19 @@ def _build_order_lookup_view(order_id: int):
     dm_btn = _dm_button(username)
     if dm_btn:
         buttons.append([dm_btn])
+    if len(pending_imd_rows) > 1:
+        # More than one subscription in this order — the combined
+        # "Credentials:" text above is a single blob that only ever holds
+        # one item's details (whichever was delivered/edited most
+        # recently), so for a multi-item order it can't be trusted to
+        # show everything. Let the admin pick exactly which one to see.
+        for fulfilment_id, item_id, unit_no, fstate in pending_imd_rows:
+            name = MENU.get(item_id, (item_id,))[0]
+            suffix = f" #{unit_no}" if unit_no > 1 else ""
+            icon = "✅" if fstate == "delivered" else "⏳"
+            buttons.append(
+                [InlineKeyboardButton(f"👁 {icon} {name}{suffix}", callback_data=f"orditem:{fulfilment_id}")]
+            )
     if status not in ("paid", "delivered"):
         # Lets the admin force an order through even though nothing here
         # confirmed the payment — e.g. the customer paid through a channel
@@ -14275,6 +14288,49 @@ def _build_order_lookup_view(order_id: int):
     buttons.append([InlineKeyboardButton("🗑 Delete Order", callback_data=f"ordlkdel:{oid}")])
 
     return text, InlineKeyboardMarkup(buttons)
+
+
+async def order_item_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin picked one subscription out of a multi-item order's 👁 list —
+    shows just that unit's own details (delivered credentials, or the
+    registration info submitted so far), instead of the whole order's
+    single combined credentials blob which only ever reflects one item."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    fulfilment_id = int(query.data.split(":", 1)[1])
+    row = db_get_fulfilment(fulfilment_id)
+    if not row:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That item no longer exists.")
+        return
+
+    _, order_id, user_id, item_id, unit_no, state, info_json = row
+    name = MENU.get(item_id, (item_id,))[0]
+    suffix = f" #{unit_no}" if unit_no > 1 else ""
+
+    if state == "delivered":
+        conn = sqlite3.connect(DB_PATH)
+        deliv = conn.execute(
+            "SELECT message FROM deliveries WHERE order_id = ? AND item_id = ? ORDER BY id LIMIT 1",
+            (order_id, item_id),
+        ).fetchone()
+        conn.close()
+        body = deliv[0] if deliv else "Delivered, but no credentials text found on file."
+        text = f"{name}{suffix} (Order #{order_id})\nStatus: delivered\n\n{body}"
+    else:
+        body = format_fulfilment_info(item_id, info_json) if info_json else "No details submitted yet."
+        text = f"{name}{suffix} (Order #{order_id})\nStatus: {state}\n\n{body}"
+
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=text,
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Back to Order", callback_data=f"ordlkview:{order_id}")]]
+        ),
+    )
 
 
 async def order_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15480,6 +15536,7 @@ def main():
     app.add_handler(CallbackQueryHandler(rejected_order_delete_confirm, pattern=r"^orderdel:"))
     app.add_handler(CallbackQueryHandler(rejected_order_delete_execute, pattern=r"^orderdel_yes:"))
     app.add_handler(CallbackQueryHandler(order_lookup_view, pattern=r"^ordlkview:"))
+    app.add_handler(CallbackQueryHandler(order_item_view, pattern=r"^orditem:"))
     app.add_handler(CallbackQueryHandler(order_lookup_delete_confirm, pattern=r"^ordlkdel:"))
     app.add_handler(CallbackQueryHandler(order_lookup_delete_cancel, pattern=r"^ordlkdel_cancel:"))
     app.add_handler(CallbackQueryHandler(order_lookup_delete_execute, pattern=r"^ordlkdel_yes:"))
