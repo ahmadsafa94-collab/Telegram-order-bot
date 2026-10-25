@@ -11077,12 +11077,7 @@ async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
         flag = "📝" if state == "awaiting_delivery" else "⌛"
         who = f"@{username}" if username else str(user_id)
         label = f"{flag} {name}{suffix} — {who} (#{order_id}) — {_short_submitted(created_at)}"
-        # 💬 jumps straight to messaging this customer, without first
-        # opening the item's own detail view just to reach that button.
-        buttons.append([
-            InlineKeyboardButton(label[:60], callback_data=f"apend:{fid}"),
-            InlineKeyboardButton("💬", callback_data=f"admin_msg:{order_id}"),
-        ])
+        buttons.append([InlineKeyboardButton(label[:64], callback_data=f"apend:{fid}")])
 
     text = "Pending orders:\n📝 = details ready to deliver   ⌛ = waiting on customer"
 
@@ -11091,10 +11086,7 @@ async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
         for order_id, user_id, username, total, created_at in rejected:
             who = f"@{username}" if username else str(user_id)
             label = f"💳 {CURRENCY}{total:.2f} — {who} (#{order_id}) — {_short_submitted(created_at)}"
-            buttons.append([
-                InlineKeyboardButton(label[:60], callback_data=f"apend_rejected:{order_id}"),
-                InlineKeyboardButton("💬", callback_data=f"admin_msg:{order_id}"),
-            ])
+            buttons.append([InlineKeyboardButton(label[:64], callback_data=f"apend_rejected:{order_id}")])
 
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
