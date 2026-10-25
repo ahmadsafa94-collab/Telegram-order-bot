@@ -3081,6 +3081,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_credentials_fulfilment",
     "awaiting_admin_message_for_order",
     "awaiting_edit_delivery",
+    "awaiting_edit_delivery_notify", "edit_delivery_new_text",
     "awaiting_new_sub_field", "new_sub_data",
     "awaiting_book_price_for", "awaiting_book_message_for",
     "awaiting_stock_edit_field", "stock_edit_item_id", "stock_edit_name", "stock_edit_duration",
@@ -13873,9 +13874,10 @@ async def edit_delivery_cancel(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def edit_delivery_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Catches the admin's next text message after tapping 'Edit
-    credentials' and applies it: edits the original message in the
-    customer's chat when possible, and updates the stored records so
-    'My Subscriptions' and /order reflect the correction too."""
+    credentials' — holds onto it and asks whether the customer should be
+    notified of the change before applying anything, since not every
+    correction (e.g. a typo fix the customer never needed to know about)
+    should trigger a message to them."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
@@ -13891,27 +13893,72 @@ async def edit_delivery_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
     _, order_id, user_id, item_id, _old_message, message_id, delivered_at = row
     new_text = update.message.text
     name = MENU.get(item_id, (item_id,))[0]
-    new_body = f"🔑 Here are your account details for {name} (Order #{order_id}):\n\n{new_text}"
 
-    edited_in_place = False
-    if message_id:
-        try:
-            await context.bot.edit_message_text(chat_id=user_id, message_id=message_id, text=new_body)
-            edited_in_place = True
-        except Exception:
-            logger.exception("Failed to edit delivery message %s for user %s", delivery_id, user_id)
+    context.user_data["awaiting_edit_delivery_notify"] = delivery_id
+    context.user_data["edit_delivery_new_text"] = new_text
+    await update.message.reply_text(
+        f"Notify the customer about this change to {name} (Order #{order_id})?",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✅ Yes, notify them", callback_data=f"editdelivnotify:{delivery_id}:yes")],
+                [InlineKeyboardButton("🔕 No, update silently", callback_data=f"editdelivnotify:{delivery_id}:no")],
+            ]
+        ),
+    )
 
-    if not edited_in_place:
-        # Can't edit in place (message too old, deleted, or its id was
-        # never captured) — send the correction as a new message instead.
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"✏️ Updated account details for {name} (Order #{order_id}):\n\n{new_text}",
-        )
+
+async def edit_delivery_notify_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin answered whether to notify the customer — applies the
+    correction either way, only the customer-facing message is optional."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    _, delivery_id_str, choice = query.data.split(":", 2)
+    delivery_id = int(delivery_id_str)
+    if context.user_data.get("awaiting_edit_delivery_notify") != delivery_id:
+        await query.edit_message_text("This edit is no longer pending (maybe it already went through).")
+        return
+    new_text = context.user_data.pop("edit_delivery_new_text", None)
+    context.user_data.pop("awaiting_edit_delivery_notify", None)
+    if new_text is None:
+        await query.edit_message_text("Something went wrong — no pending text found for this edit.")
+        return
+
+    row = db_get_delivery_admin(delivery_id)
+    if not row:
+        await query.edit_message_text("That delivery no longer exists.")
+        return
+
+    _, order_id, user_id, item_id, _old_message, message_id, delivered_at = row
+    name = MENU.get(item_id, (item_id,))[0]
+
+    notify = choice == "yes"
+    if notify:
+        new_body = f"🔑 Here are your account details for {name} (Order #{order_id}):\n\n{new_text}"
+        edited_in_place = False
+        if message_id:
+            try:
+                await context.bot.edit_message_text(chat_id=user_id, message_id=message_id, text=new_body)
+                edited_in_place = True
+            except Exception:
+                logger.exception("Failed to edit delivery message %s for user %s", delivery_id, user_id)
+        if not edited_in_place:
+            # Can't edit in place (message too old, deleted, or its id was
+            # never captured) — send the correction as a new message instead.
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"✏️ Updated account details for {name} (Order #{order_id}):\n\n{new_text}",
+            )
+        status_note = "and the customer was notified"
+    else:
+        status_note = "— customer was NOT notified"
 
     db_update_delivery_message(delivery_id, new_text)
     db_update_order_credentials(order_id, new_text)
-    await update.message.reply_text(f"✅ Updated {name} credentials (Order #{order_id}).")
+    await query.edit_message_text(f"✅ Updated {name} credentials (Order #{order_id}) {status_note}.")
 
 
 async def add_serials_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15349,6 +15396,7 @@ def main():
     app.add_handler(CallbackQueryHandler(deliver_start, pattern=r"^deliver:"))
     app.add_handler(CallbackQueryHandler(edit_delivery_start, pattern=r"^editdeliv:"))
     app.add_handler(CallbackQueryHandler(edit_delivery_cancel, pattern=r"^editdeliv_cancel:"))
+    app.add_handler(CallbackQueryHandler(edit_delivery_notify_choice, pattern=r"^editdelivnotify:"))
     app.add_handler(CallbackQueryHandler(reg_go, pattern=r"^reg_go:"))
     app.add_handler(CallbackQueryHandler(imd_registration_type_choice, pattern=r"^imdregtype:"))
     app.add_handler(CallbackQueryHandler(add_serials_pick_duration, pattern=r"^addser:"))
