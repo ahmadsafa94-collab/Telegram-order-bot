@@ -1246,9 +1246,10 @@ function renderOrdersList(orders){
 async function openOrderDetail(fulfilmentId){
   document.getElementById('orderDetailOverlay').classList.add('on');
   const content=document.getElementById('orderDetailContent');
+  const backBtn='<button class="btn sec" style="margin-top:12px" onclick="closeOrderDetail()">← Back</button>';
   const reason=ordersUnavailableReason();
   if(reason){
-    content.innerHTML='<div class="search-empty">'+escHtml(reason)+'</div>';
+    content.innerHTML='<div class="search-empty">'+escHtml(reason)+'</div>'+backBtn;
     return;
   }
   content.innerHTML='<div class="search-empty">Loading…</div>';
@@ -1256,7 +1257,7 @@ async function openOrderDetail(fulfilmentId){
     const resp=await fetch(withAuth('/api/my_order_detail?fulfilment_id='+fulfilmentId));
     const data=await resp.json();
     if(!resp.ok){
-      content.innerHTML='<div class="search-empty">'+escHtml(data.error||'Could not load this order.')+'</div>';
+      content.innerHTML='<div class="search-empty">'+escHtml(data.error||'Could not load this order.')+'</div>'+backBtn;
       return;
     }
     const statusLabel = data.status==='delivered' ? '🟢 Delivered' : '🟡 Pending';
@@ -1270,9 +1271,10 @@ async function openOrderDetail(fulfilmentId){
       '<div class="card" style="padding:11px 13px;white-space:pre-wrap;font-size:13px;line-height:1.6">'+
         escHtml(data.credentials||'')+
       '</div>'+
-      '<button class="btn" style="margin-top:12px" onclick="orderTicket('+data.fulfilment_id+')">🎫 Open a Ticket About This Order</button>';
+      '<button class="btn" style="margin-top:12px" onclick="orderTicket('+data.fulfilment_id+')">🎫 Open a Ticket About This Order</button>'+
+      '<button class="btn sec" style="margin-top:8px" onclick="closeOrderDetail()">← Back</button>';
   }catch(e){
-    content.innerHTML='<div class="search-empty">Could not load this order: '+escHtml(e.message||String(e))+'</div>';
+    content.innerHTML='<div class="search-empty">Could not load this order: '+escHtml(e.message||String(e))+'</div>'+backBtn;
   }
 }
 function closeOrderDetail(){document.getElementById('orderDetailOverlay').classList.remove('on')}
