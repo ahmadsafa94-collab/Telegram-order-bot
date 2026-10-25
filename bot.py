@@ -3133,10 +3133,14 @@ def _mini_app_admin_edits() -> tuple:
     return prices, removed
 
 
-def _shop_url(user_id: int = 0) -> str:
+def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
     """Builds the Mini App URL. When user_id is known, subscription data and
     custom admin-added items are encoded as a base64 query param (?subs=...)
-    so the Mini App can display them without any HTTP API call."""
+    so the Mini App can display them without any HTTP API call.
+
+    preview_coworker_id lets the admin see the Shop as a SPECIFIC coworker
+    would see it (catalog pricing only) without that coworker actually being
+    logged in — used by the 👁 Preview button in the coworker detail view."""
     if not MINI_APP_URL:
         return ""
 
@@ -3253,7 +3257,15 @@ def _shop_url(user_id: int = 0) -> str:
         # checkout. Same point-in-time-snapshot tradeoff as credits/discount
         # codes above: the server re-applies the real rate authoritatively
         # at checkout regardless of what the client displayed.
-        coworker_login = db_get_user_coworker(user_id)
+        if preview_coworker_id:
+            cw_row = db_get_coworker(preview_coworker_id)
+            # db_get_coworker's tuple shape differs from db_get_user_coworker's
+            # (id, name, username, discount_pct, created_at, imd_6m_price,
+            # imd_1y_price) vs (coworker_id, name, discount_pct, imd_6m_price,
+            # imd_1y_price) — remap to the shape the rest of this function expects.
+            coworker_login = (cw_row[0], cw_row[1], cw_row[3], cw_row[5], cw_row[6]) if cw_row else None
+        else:
+            coworker_login = db_get_user_coworker(user_id)
         coworker_pct = coworker_login[2] if coworker_login else 0
         # Per-item iMD price overrides (fixed $, not a %) — iMD's resale
         # margin doesn't work the same way as the other subscriptions', so
@@ -10721,6 +10733,9 @@ async def coworker_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(f"📜 Order History ({total_order_count})", callback_data=f"coworker_history:{coworker_id}")]
         )
     buttons.append(
+        [InlineKeyboardButton("👁 Preview Shop as This Coworker", callback_data=f"coworker_preview:{coworker_id}")]
+    )
+    buttons.append(
         [InlineKeyboardButton("✏️ Edit iMD Prices", callback_data=f"coworker_imdprice:{coworker_id}")]
     )
     buttons.append(
@@ -10731,6 +10746,36 @@ async def coworker_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="coworker_back")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def coworker_preview_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '👁 Preview Shop as This Coworker' — opens the Mini App
+    with that coworker's discount/iMD pricing applied, so the admin can see
+    exactly what that coworker sees without actually logging in as them."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+
+    coworker_id = int(query.data.split(":", 1)[1])
+    coworker = db_get_coworker(coworker_id)
+    if not coworker:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That coworker no longer exists.")
+        return
+
+    name = coworker[1]
+    shop_url = _shop_url(ADMIN_CHAT_ID, preview_coworker_id=coworker_id)
+    if not shop_url:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="Shop isn't configured (no MINI_APP_URL).")
+        return
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=f"👁 Preview of the Shop as {name} would see it (their pricing applied):",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🛒 Open Shop (Preview)", web_app=WebAppInfo(url=shop_url))]]
+        ),
+    )
 
 
 async def coworker_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15434,6 +15479,7 @@ def main():
     app.add_handler(CallbackQueryHandler(coworker_delete_execute, pattern=r"^coworker_del_yes:"))
     app.add_handler(CallbackQueryHandler(coworker_history, pattern=r"^coworker_history:"))
     app.add_handler(CallbackQueryHandler(coworker_detail, pattern=r"^coworker:"))
+    app.add_handler(CallbackQueryHandler(coworker_preview_shop, pattern=r"^coworker_preview:"))
     app.add_handler(CallbackQueryHandler(imd_manual_deliver, pattern=r"^imddeliver:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_start, pattern=r"^imdmancred:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_type_choice, pattern=r"^imdmantype:"))
