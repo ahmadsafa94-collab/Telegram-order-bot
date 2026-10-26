@@ -1768,6 +1768,13 @@ let _submittingOrder=false;
 function submitOrder(){
   if(_submittingOrder) return;
   if(!selPay){showToast('Choose a payment method');return;}
+  // A link with no login token / API address (e.g. a preview opened without
+  // one) would post to this static page's own host and come back as an HTML
+  // error page — say so plainly instead of "Unexpected response from server".
+  if(!apiBase()||!(AUTH_UID&&AUTH_TOK)){
+    showToast("This link can't place orders — please close it and reopen the Shop from the bot chat.");
+    return;
+  }
   let pay=selPay;
   if(selPay.startsWith('country:')) pay=selPay.slice(8);
   else if(selPay.startsWith('app:')) pay=selPay.slice(4);

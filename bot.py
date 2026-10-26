@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "29"
+MINI_APP_VERSION = "30"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -6786,7 +6786,10 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == A_CUSTOMER_VIEW:
         await update.message.reply_text(
             "Switched to the customer menu. Send /start to return to the admin panel.",
-            reply_markup=main_menu_keyboard(0),  # no user context, so no badge
+            # The admin's own id, not 0: a Shop link built for user 0 has no
+            # login token or API address, so "I've Paid" had nowhere to post
+            # and failed with "Unexpected response from server".
+            reply_markup=main_menu_keyboard(ADMIN_CHAT_ID),
         )
 
     elif text == A_BACKUP:
