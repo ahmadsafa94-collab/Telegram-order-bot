@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "30"
+MINI_APP_VERSION = "31"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -2825,15 +2825,11 @@ UNPAID_EXCLUDED_STATUSES = (
 def db_user_paid_fulfilment_items(user_id: int):
     """Every fulfilment unit belonging to a paid order for this customer —
     the data behind the Mini App's Orders tab. Returns (fulfilment_id,
-    order_id, item_id, unit_no, state, order_created_at, cred_message) —
-    cred_message is the delivered credentials text (or None), included so
-    the Orders tab's search box can match on it without a request per row."""
+    order_id, item_id, unit_no, state, order_created_at)."""
     conn = sqlite3.connect(DB_PATH)
     placeholders = ",".join("?" * len(UNPAID_EXCLUDED_STATUSES))
     rows = conn.execute(
-        f"SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state, o.created_at, "
-        f"(SELECT message FROM deliveries d WHERE d.order_id = f.order_id "
-        f" AND d.item_id = f.item_id ORDER BY d.id LIMIT 1) "
+        f"SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state, o.created_at "
         f"FROM fulfilment f JOIN orders o ON o.id = f.order_id "
         f"WHERE f.user_id = ? AND o.status NOT IN ({placeholders}) "
         f"ORDER BY f.order_id DESC, f.id",
@@ -2871,9 +2867,7 @@ def db_coworker_paid_fulfilment_items(coworker_id: int):
     conn = sqlite3.connect(DB_PATH)
     placeholders = ",".join("?" * len(UNPAID_EXCLUDED_STATUSES))
     rows = conn.execute(
-        f"SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state, o.created_at, "
-        f"(SELECT message FROM deliveries d WHERE d.order_id = f.order_id "
-        f" AND d.item_id = f.item_id ORDER BY d.id LIMIT 1) "
+        f"SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state, o.created_at "
         f"FROM fulfilment f JOIN orders o ON o.id = f.order_id "
         f"WHERE o.coworker_id = ? AND o.status NOT IN ({placeholders}) "
         f"ORDER BY f.order_id DESC, f.id",
@@ -3321,6 +3315,10 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
             "WHERE user_id = ? ORDER BY id DESC",
             (user_id,),
         ).fetchall()
+        ful_rows = conn.execute(
+            "SELECT id, order_id, item_id FROM fulfilment WHERE user_id = ? AND state = 'delivered' ORDER BY id",
+            (user_id,),
+        ).fetchall()
         # Pending: include fulfilment_id and order_id so the Mini App can
         # send the right resume action back to the bot
         pend_rows = conn.execute(
@@ -3341,8 +3339,23 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
         # Login details are not put in the URL (it can be seen in link
         # previews, history and logs): the Mini App fetches them from
         # /api/delivery with the customer's token when tapped. 1 = has details.
+        # Each delivered row also carries its fulfilment id so the Mini App can
+        # open that subscription's full detail page. Deliveries and delivered
+        # units of the same order+item are matched in order, so two units of
+        # one subscription in the same order each open their own details.
+        fids_by_key = {}
+        for fid, f_oid, f_iid in ful_rows:
+            fids_by_key.setdefault((f_oid, f_iid), []).append(fid)
+        fid_by_delivery, seen = {}, {}
+        for did, iid, dat, msg, oid in sorted(del_rows, key=lambda r: r[0]):
+            n = seen.get((oid, iid), 0)
+            seen[(oid, iid)] = n + 1
+            units = fids_by_key.get((oid, iid), [])
+            if n < len(units):
+                fid_by_delivery[did] = units[n]
         delivered = [
-            [MENU.get(iid, (iid,))[0], dat[:10] if dat else "", 1 if (msg or "").strip() else 0, oid, did]
+            [MENU.get(iid, (iid,))[0], dat[:10] if dat else "", 1 if (msg or "").strip() else 0, oid, did,
+             fid_by_delivery.get(did, 0)]
             for did, iid, dat, msg, oid in del_rows
         ]
         pending = [
@@ -10117,11 +10130,35 @@ async def http_my_orders(request):
         else db_user_paid_fulfilment_items(user_id)
     )
     query = (request.query.get("q") or "").strip().lower()
+    deliveries_by_unit = {}
+    if query and rows:
+        # Match each delivered unit to its own delivery (the Nth delivered
+        # unit of an order+item gets that order+item's Nth delivery), so two
+        # units of one subscription are searchable by their own credentials.
+        order_ids = sorted({r[1] for r in rows})
+        conn = sqlite3.connect(DB_PATH)
+        marks = ",".join("?" * len(order_ids))
+        messages = {}
+        for d_order, d_item, d_msg in conn.execute(
+            f"SELECT order_id, item_id, message FROM deliveries WHERE order_id IN ({marks}) ORDER BY id",
+            order_ids,
+        ):
+            messages.setdefault((d_order, d_item), []).append(d_msg)
+        conn.close()
+        seen = {}
+        for fid, order_id, item_id, unit_no, state, created_at in sorted(rows, key=lambda r: r[0]):
+            if state != "delivered":
+                continue
+            n = seen.get((order_id, item_id), 0)
+            seen[(order_id, item_id)] = n + 1
+            msgs = messages.get((order_id, item_id), [])
+            if n < len(msgs):
+                deliveries_by_unit[fid] = msgs[n]
     orders = []
-    for fid, order_id, item_id, unit_no, state, created_at, cred_message in rows:
+    for fid, order_id, item_id, unit_no, state, created_at in rows:
         name = MENU.get(item_id, (item_id, 0))[0]
         if query:
-            haystack = f"{order_id} {name} {cred_message or ''}".lower()
+            haystack = f"{order_id} {name} {deliveries_by_unit.get(fid) or ''}".lower()
             if query not in haystack:
                 continue
         price = _coworker_unit_price_by_id(item_id, coworker_id) if item_id in MENU else 0
@@ -10171,7 +10208,18 @@ async def http_my_order_detail(request):
         # coworker can be viewing an order a teammate actually placed under
         # their shared coworker account.
         conn = sqlite3.connect(DB_PATH)
+        # Two units of the same subscription in one order each have their own
+        # delivery: this unit's is the one at its position among the order's
+        # delivered units of that item.
+        rank = conn.execute(
+            "SELECT COUNT(*) FROM fulfilment WHERE order_id = ? AND item_id = ? "
+            "AND state = 'delivered' AND id < ?",
+            (order_id, item_id, fid),
+        ).fetchone()[0]
         deliv = conn.execute(
+            "SELECT message FROM deliveries WHERE order_id = ? AND item_id = ? ORDER BY id LIMIT 1 OFFSET ?",
+            (order_id, item_id, rank),
+        ).fetchone() or conn.execute(
             "SELECT message FROM deliveries WHERE order_id = ? AND item_id = ? ORDER BY id LIMIT 1",
             (order_id, item_id),
         ).fetchone()
