@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "31"
+MINI_APP_VERSION = "32"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -10173,6 +10173,59 @@ async def http_my_orders(request):
     return web.json_response({"orders": orders}, headers=_imd_search_cors_headers())
 
 
+def _fulfilment_for_delivery(delivery_id: int):
+    """The delivered fulfilment unit a delivery belongs to, or None. Two
+    units of one subscription in an order are matched in order: the Nth
+    delivery of that order+item belongs to the Nth delivered unit."""
+    conn = sqlite3.connect(DB_PATH)
+    d = conn.execute("SELECT order_id, item_id FROM deliveries WHERE id = ?", (delivery_id,)).fetchone()
+    if not d:
+        conn.close()
+        return None
+    rank = conn.execute(
+        "SELECT COUNT(*) FROM deliveries WHERE order_id = ? AND item_id = ? AND id < ?",
+        (d[0], d[1], delivery_id),
+    ).fetchone()[0]
+    row = conn.execute(
+        "SELECT id FROM fulfilment WHERE order_id = ? AND item_id = ? AND state = 'delivered' "
+        "ORDER BY id LIMIT 1 OFFSET ?",
+        (d[0], d[1], rank),
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def _delivery_only_detail(delivery_id: int, user_id: int, coworker_id):
+    """Detail for a delivery that has no fulfilment unit any more (e.g. it
+    was deleted after delivery), ownership-checked the same way: the
+    customer's own delivery, or an order under their coworker account."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT d.order_id, d.item_id, d.message, d.delivered_at, d.user_id, o.coworker_id "
+        "FROM deliveries d JOIN orders o ON o.id = d.order_id WHERE d.id = ?",
+        (delivery_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    order_id, item_id, message, delivered_at, owner_id, order_coworker = row
+    if coworker_id:
+        if order_coworker != coworker_id:
+            return None
+    elif owner_id != user_id:
+        return None
+    name = MENU.get(item_id, (item_id, 0))[0]
+    return {
+        "fulfilment_id": 0,
+        "order_id": order_id,
+        "name": name,
+        "date": delivered_at,
+        "price": _coworker_unit_price_by_id(item_id, coworker_id) if item_id in MENU else 0,
+        "status": "delivered",
+        "credentials": message or "",
+    }
+
+
 async def http_my_order_detail(request):
     """One order unit's full detail (credentials included) for the
     authenticated customer — ownership-checked, so a fulfilment_id that
@@ -10187,11 +10240,24 @@ async def http_my_order_detail(request):
     except ValueError:
         fulfilment_id = 0
 
+    try:
+        delivery_id = int(request.query.get("delivery_id", "0"))
+    except ValueError:
+        delivery_id = 0
+
     coworker_id = _effective_preview_coworker_id(request, user_id)
+    # The My Subscriptions list may come from an older Shop link that only
+    # knows each row's delivery id — resolve it to its unit here.
+    if delivery_id and not fulfilment_id:
+        fulfilment_id = _fulfilment_for_delivery(delivery_id) or 0
     row = (
         db_fulfilment_detail_for_coworker(fulfilment_id, coworker_id) if coworker_id
         else db_fulfilment_detail_for_user(fulfilment_id, user_id)
-    )
+    ) if fulfilment_id else None
+    if not row and delivery_id:
+        fallback = _delivery_only_detail(delivery_id, user_id, coworker_id)
+        if fallback:
+            return web.json_response(fallback, headers=_imd_search_cors_headers())
     if not row:
         return web.json_response({"error": "Not found"}, status=404, headers=_imd_search_cors_headers())
 
