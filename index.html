@@ -946,9 +946,9 @@ function renderOrders(){
       // A row that knows its fulfilment id opens that subscription's full
       // detail page (credentials, copy button, ticket button) on its own —
       // same page the coworker's order list opens.
-      if(fid){
+      if(fid||(creds===1&&did)){
         html+=`
-        <div class="sub-row" onclick="openOrderDetail(${fid})" style="flex-direction:column;gap:0;padding:0">
+        <div class="sub-row" onclick="openOrderDetail(${fid||0}, ${fid?0:did})" style="flex-direction:column;gap:0;padding:0">
           <div style="display:flex;align-items:flex-start;gap:10px;padding:11px 15px;width:100%">
             <div class="sub-icon">✅</div>
             <div class="sub-info">
@@ -1336,7 +1336,7 @@ function renderOrdersList(orders, isSearching, targetId){
   }).join('');
 }
 
-async function openOrderDetail(fulfilmentId){
+async function openOrderDetail(fulfilmentId, deliveryId){
   document.getElementById('orderDetailOverlay').classList.add('on');
   const content=document.getElementById('orderDetailContent');
   const backBtn='<button class="btn sec" style="margin-top:12px" onclick="closeOrderDetail()">← Back</button>';
@@ -1347,7 +1347,7 @@ async function openOrderDetail(fulfilmentId){
   }
   content.innerHTML='<div class="search-empty">Loading…</div>';
   try{
-    const resp=await fetch(withAuth('/api/my_order_detail?fulfilment_id='+fulfilmentId));
+    const resp=await fetch(withAuth('/api/my_order_detail?'+(fulfilmentId?'fulfilment_id='+fulfilmentId:'delivery_id='+deliveryId)));
     const data=await resp.json();
     if(!resp.ok){
       content.innerHTML='<div class="search-empty">'+escHtml(data.error||'Could not load this order.')+'</div>'+backBtn;
@@ -1370,7 +1370,7 @@ async function openOrderDetail(fulfilmentId){
       '<div class="card" id="orderDetailCredText" style="padding:11px 13px;white-space:pre-wrap;font-size:13px;line-height:1.6">'+
         escHtml(data.credentials||'')+
       '</div>'+
-      '<button class="btn" style="margin-top:12px" onclick="orderTicket('+data.fulfilment_id+')">🎫 Open a Ticket About This Order</button>'+
+      (data.fulfilment_id?'<button class="btn" style="margin-top:12px" onclick="orderTicket('+data.fulfilment_id+')">🎫 Open a Ticket About This Order</button>':'')+
       '<button class="btn sec" style="margin-top:8px" onclick="closeOrderDetail()">← Back</button>';
   }catch(e){
     content.innerHTML='<div class="search-empty">Could not load this order: '+escHtml(e.message||String(e))+'</div>'+backBtn;
