@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "26"
+MINI_APP_VERSION = "28"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -2822,11 +2822,15 @@ UNPAID_EXCLUDED_STATUSES = (
 def db_user_paid_fulfilment_items(user_id: int):
     """Every fulfilment unit belonging to a paid order for this customer —
     the data behind the Mini App's Orders tab. Returns (fulfilment_id,
-    order_id, item_id, unit_no, state, order_created_at)."""
+    order_id, item_id, unit_no, state, order_created_at, cred_message) —
+    cred_message is the delivered credentials text (or None), included so
+    the Orders tab's search box can match on it without a request per row."""
     conn = sqlite3.connect(DB_PATH)
     placeholders = ",".join("?" * len(UNPAID_EXCLUDED_STATUSES))
     rows = conn.execute(
-        f"SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state, o.created_at "
+        f"SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state, o.created_at, "
+        f"(SELECT message FROM deliveries d WHERE d.order_id = f.order_id "
+        f" AND d.item_id = f.item_id ORDER BY d.id LIMIT 1) "
         f"FROM fulfilment f JOIN orders o ON o.id = f.order_id "
         f"WHERE f.user_id = ? AND o.status NOT IN ({placeholders}) "
         f"ORDER BY f.order_id DESC, f.id",
@@ -2864,7 +2868,9 @@ def db_coworker_paid_fulfilment_items(coworker_id: int):
     conn = sqlite3.connect(DB_PATH)
     placeholders = ",".join("?" * len(UNPAID_EXCLUDED_STATUSES))
     rows = conn.execute(
-        f"SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state, o.created_at "
+        f"SELECT f.id, f.order_id, f.item_id, f.unit_no, f.state, o.created_at, "
+        f"(SELECT message FROM deliveries d WHERE d.order_id = f.order_id "
+        f" AND d.item_id = f.item_id ORDER BY d.id LIMIT 1) "
         f"FROM fulfilment f JOIN orders o ON o.id = f.order_id "
         f"WHERE o.coworker_id = ? AND o.status NOT IN ({placeholders}) "
         f"ORDER BY f.order_id DESC, f.id",
@@ -2982,19 +2988,30 @@ def md_escape(text: str) -> str:
     return text
 
 
+def _coworker_unit_price_by_id(item_id: str, coworker_id: int) -> float:
+    """Same rule as _coworker_unit_price, but keyed directly by coworker_id
+    instead of a Telegram user_id — for contexts (order history, the
+    admin's coworker Shop preview) where the coworker is already known and
+    isn't necessarily who the request is authenticated as."""
+    base_price = MENU[item_id][1]
+    if not coworker_id:
+        return base_price
+    cw = db_get_coworker(coworker_id)
+    if not cw:
+        return base_price
+    _, _, _, coworker_pct, _, imd_6m_price, imd_1y_price, imd_2y_price = cw
+    fixed_prices = {"imd_6m": imd_6m_price, "imd_1y": imd_1y_price, "imd_2y": imd_2y_price}
+    fixed = fixed_prices.get(item_id)
+    return fixed if fixed is not None else round(base_price * (1 - coworker_pct / 100), 2)
+
+
 def _coworker_unit_price(item_id: str, user_id: int) -> float:
     """MENU price for this item, with the customer's coworker fixed-$ (iMD)
     or percentage pricing applied if they're currently logged in as a
     coworker via /coworker — the same rule applied at actual checkout, so
     the in-chat basket preview and the final order total always agree."""
-    base_price = MENU[item_id][1]
     coworker_login = db_get_user_coworker(user_id) if user_id else None
-    if not coworker_login:
-        return base_price
-    _, _, coworker_pct, imd_6m_price, imd_1y_price, imd_2y_price = coworker_login
-    fixed_prices = {"imd_6m": imd_6m_price, "imd_1y": imd_1y_price, "imd_2y": imd_2y_price}
-    fixed = fixed_prices.get(item_id)
-    return fixed if fixed is not None else round(base_price * (1 - coworker_pct / 100), 2)
+    return _coworker_unit_price_by_id(item_id, coworker_login[0] if coworker_login else None)
 
 
 def format_cart(cart: dict, user_id: int = 0) -> str:
@@ -10082,7 +10099,10 @@ def _effective_preview_coworker_id(request, user_id: int):
 
 async def http_my_orders(request):
     """Every paid order unit for the authenticated customer — the data
-    behind the Mini App's Orders tab list."""
+    behind the Mini App's Orders tab list. An optional ?q= searches the
+    order number, subscription name, and delivered credentials (username/
+    password) for a match — matched server-side so the credentials text
+    itself never has to be sent to the client just to search it."""
     from aiohttp import web
     user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
     if not user_id:
@@ -10093,9 +10113,15 @@ async def http_my_orders(request):
         db_coworker_paid_fulfilment_items(coworker_id) if coworker_id
         else db_user_paid_fulfilment_items(user_id)
     )
+    query = (request.query.get("q") or "").strip().lower()
     orders = []
-    for fid, order_id, item_id, unit_no, state, created_at in rows:
-        name, price = MENU.get(item_id, (item_id, 0))
+    for fid, order_id, item_id, unit_no, state, created_at, cred_message in rows:
+        name = MENU.get(item_id, (item_id, 0))[0]
+        if query:
+            haystack = f"{order_id} {name} {cred_message or ''}".lower()
+            if query not in haystack:
+                continue
+        price = _coworker_unit_price_by_id(item_id, coworker_id) if item_id in MENU else 0
         orders.append({
             "fulfilment_id": fid,
             "order_id": order_id,
@@ -10130,7 +10156,8 @@ async def http_my_order_detail(request):
         return web.json_response({"error": "Not found"}, status=404, headers=_imd_search_cors_headers())
 
     fid, order_id, item_id, unit_no, state, info_json, created_at, order_status = row
-    name, price = MENU.get(item_id, (item_id, 0))
+    name = MENU.get(item_id, (item_id, 0))[0]
+    price = _coworker_unit_price_by_id(item_id, coworker_id) if item_id in MENU else 0
 
     credentials = None
     if state == "delivered":

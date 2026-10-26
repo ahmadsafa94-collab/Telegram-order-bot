@@ -408,6 +408,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
       <span>📦 My Orders</span>
       <button class="ico-btn" title="Purchase history" onclick="openPurchaseHistory()" style="width:34px;height:34px;font-size:15px">📊</button>
     </div>
+    <div class="search-wrap" style="margin:0 15px 10px">
+      <span class="search-ico">🔍</span>
+      <input id="ordersSearchInput" type="text" placeholder="Search by order #, subscription, username or password..." oninput="ordersSearchInput(this.value)">
+      <button class="search-clear" id="ordersSearchClearBtn" onclick="ordersSearchClear()">✕</button>
+    </div>
     <div id="ordersListContent" style="padding:0 15px 15px"></div>
   </div>
 </div>
@@ -1048,6 +1053,10 @@ function copyToClipboard(el, text){
   }
 }
 
+function copyOrderCredentials(el){
+  const text=document.getElementById('orderDetailCredText')?.textContent||'';
+  copyToClipboard(el, text);
+}
 function pendAction(action, fid, oid){
   tg.sendData(JSON.stringify({action, fulfilment_id: fid, order_id: oid}));
 }
@@ -1193,12 +1202,28 @@ function ordersUnavailableReason(){
 
 function openMyOrders(){
   document.getElementById('myOrdersOverlay').classList.add('on');
+  const input=document.getElementById('ordersSearchInput');
+  input.value='';
+  document.getElementById('ordersSearchClearBtn').style.display='none';
   loadOrdersTab(true); // always refresh on open -- this is live account state, not a catalog tab
 }
 function closeMyOrders(){document.getElementById('myOrdersOverlay').classList.remove('on')}
 
+let ordersSearchDebounce=null;
+function ordersSearchInput(v){
+  document.getElementById('ordersSearchClearBtn').style.display=v?'flex':'none';
+  clearTimeout(ordersSearchDebounce);
+  ordersSearchDebounce=setTimeout(()=>loadOrdersTab(true, v.trim()), 300);
+}
+function ordersSearchClear(){
+  const input=document.getElementById('ordersSearchInput');
+  input.value=''; input.focus();
+  document.getElementById('ordersSearchClearBtn').style.display='none';
+  loadOrdersTab(true, '');
+}
+
 let ordersLoaded=false;
-async function loadOrdersTab(force){
+async function loadOrdersTab(force, query){
   if(ordersLoaded && !force) return;
   const el=document.getElementById('ordersListContent');
   const reason=ordersUnavailableReason();
@@ -1208,23 +1233,26 @@ async function loadOrdersTab(force){
   }
   el.innerHTML='<div class="search-empty">Loading your orders…</div>';
   try{
-    const resp=await fetch(withAuth('/api/my_orders'));
+    const q=query!==undefined?query:(document.getElementById('ordersSearchInput').value||'').trim();
+    const resp=await fetch(withAuth('/api/my_orders'+(q?'?q='+encodeURIComponent(q):'')));
     const data=await resp.json();
     if(!resp.ok){
       el.innerHTML='<div class="search-empty">'+escHtml(data.error||'Could not load your orders.')+'</div>';
       return;
     }
     ordersLoaded=true;
-    renderOrdersList(data.orders||[]);
+    renderOrdersList(data.orders||[], !!q);
   }catch(e){
     el.innerHTML='<div class="search-empty">Could not load your orders: '+escHtml(e.message||String(e))+'</div>';
   }
 }
 
-function renderOrdersList(orders){
+function renderOrdersList(orders, isSearching){
   const el=document.getElementById('ordersListContent');
   if(!orders.length){
-    el.innerHTML='<div class="empty-sheet"><div class="eico">📦</div>You don\'t have any orders yet.</div>';
+    el.innerHTML = isSearching
+      ? '<div class="search-empty">No orders match your search.</div>'
+      : '<div class="empty-sheet"><div class="eico">📦</div>You don\'t have any orders yet.</div>';
     return;
   }
   el.innerHTML=orders.map(o=>{
@@ -1246,9 +1274,10 @@ function renderOrdersList(orders){
 async function openOrderDetail(fulfilmentId){
   document.getElementById('orderDetailOverlay').classList.add('on');
   const content=document.getElementById('orderDetailContent');
+  const backBtn='<button class="btn sec" style="margin-top:12px" onclick="closeOrderDetail()">← Back</button>';
   const reason=ordersUnavailableReason();
   if(reason){
-    content.innerHTML='<div class="search-empty">'+escHtml(reason)+'</div>';
+    content.innerHTML='<div class="search-empty">'+escHtml(reason)+'</div>'+backBtn;
     return;
   }
   content.innerHTML='<div class="search-empty">Loading…</div>';
@@ -1256,7 +1285,7 @@ async function openOrderDetail(fulfilmentId){
     const resp=await fetch(withAuth('/api/my_order_detail?fulfilment_id='+fulfilmentId));
     const data=await resp.json();
     if(!resp.ok){
-      content.innerHTML='<div class="search-empty">'+escHtml(data.error||'Could not load this order.')+'</div>';
+      content.innerHTML='<div class="search-empty">'+escHtml(data.error||'Could not load this order.')+'</div>'+backBtn;
       return;
     }
     const statusLabel = data.status==='delivered' ? '🟢 Delivered' : '🟡 Pending';
@@ -1266,13 +1295,17 @@ async function openOrderDetail(fulfilmentId){
       '<div class="sumrow"><div>Date Requested</div><div class="r">'+(data.date||'').slice(0,10)+'</div></div>'+
       '<div class="sumrow"><div>Price Paid</div><div class="r">$'+data.price+'</div></div>'+
       '<div class="sumrow"><div>Status</div><div class="r">'+statusLabel+'</div></div>'+
-      '<div class="sl" style="margin-top:14px">Credentials</div>'+
-      '<div class="card" style="padding:11px 13px;white-space:pre-wrap;font-size:13px;line-height:1.6">'+
+      '<div class="sl" style="margin-top:14px;display:flex;align-items:center;justify-content:space-between">'+
+        '<span>Credentials</span>'+
+        '<button class="ico-btn" title="Copy" style="width:28px;height:28px;font-size:13px" onclick="copyOrderCredentials(this)">📋</button>'+
+      '</div>'+
+      '<div class="card" id="orderDetailCredText" style="padding:11px 13px;white-space:pre-wrap;font-size:13px;line-height:1.6">'+
         escHtml(data.credentials||'')+
       '</div>'+
-      '<button class="btn" style="margin-top:12px" onclick="orderTicket('+data.fulfilment_id+')">🎫 Open a Ticket About This Order</button>';
+      '<button class="btn" style="margin-top:12px" onclick="orderTicket('+data.fulfilment_id+')">🎫 Open a Ticket About This Order</button>'+
+      '<button class="btn sec" style="margin-top:8px" onclick="closeOrderDetail()">← Back</button>';
   }catch(e){
-    content.innerHTML='<div class="search-empty">Could not load this order: '+escHtml(e.message||String(e))+'</div>';
+    content.innerHTML='<div class="search-empty">Could not load this order: '+escHtml(e.message||String(e))+'</div>'+backBtn;
   }
 }
 function closeOrderDetail(){document.getElementById('orderDetailOverlay').classList.remove('on')}
