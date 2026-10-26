@@ -9886,6 +9886,28 @@ async def http_register_account(request):
         )
 
     conn = sqlite3.connect(DB_PATH)
+    has_units = conn.execute("SELECT 1 FROM fulfilment WHERE order_id = ? LIMIT 1", (order_id,)).fetchone()
+    conn.close()
+    if not has_units:
+        # A paid order with no items left: its units were deleted (e.g. 🗑 Delete in Pending Orders
+        # after a failed iMD run, order #468). The owner is asking to deliver it now, so put the
+        # units back as waiting for details and carry on.
+        try:
+            db_add_fulfilment_items(order_id, user_id, json.loads(order[3]))
+        except (TypeError, ValueError):
+            pass
+        logger.info("register_account: order #%s had no items left; recreated them from the order", order_id)
+        if ADMIN_CHAT_ID:
+            try:
+                await request.app["application"].bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=f"ℹ️ Order #{order_id} had no items left (deleted earlier). Recreated them so the "
+                         "account details from the support chat can be delivered.",
+                )
+            except Exception:
+                logger.exception("register_account: couldn't tell the admin about order #%s", order_id)
+
+    conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
         "SELECT id, item_id FROM fulfilment WHERE order_id = ? AND user_id = ? AND state = 'needs_info' ORDER BY id",
         (order_id, user_id),
