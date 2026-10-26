@@ -9741,6 +9741,71 @@ async def http_create_order(request):
     return web.json_response({"ok": True, "order_id": order_id, "total": total, "payment_method": payment_method})
 
 
+async def _retry_stuck_imd_unit(application, order_id: int, user_id: int, wanted_item: str, info: dict):
+    """An iMD unit that isn't delivered but is past the details step usually means the iMD
+    run failed (e.g. iMD didn't accept the username and the customer was asked here for
+    another). Different details from the reply bot restart the run with them, so the order
+    doesn't wait for the customer to answer here; the same details as before never start a
+    second run. Returns a response, or None to fall back to "already given"."""
+    from aiohttp import web
+    from telegram.ext import CallbackContext
+
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, item_id FROM fulfilment WHERE order_id = ? AND user_id = ? AND state = 'awaiting_delivery' ORDER BY id",
+        (order_id, user_id),
+    ).fetchall()
+    conn.close()
+    rows = [r for r in rows if r[1] in IMD_TRIGGER_ITEMS and (not wanted_item or r[1] == wanted_item)]
+    if not rows:
+        return None
+    if order_id in _IMD_RUNS_IN_PROGRESS:
+        return web.json_response(
+            {"error": f"the iMD registration for order #{order_id} is running right now; wait for its result"},
+            status=409,
+        )
+    fulfilment_id, item_id = rows[0]
+    stored = db_get_fulfilment(fulfilment_id)
+    try:
+        stored_info = json.loads(stored[6]) if stored and stored[6] else None
+    except ValueError:
+        stored_info = None
+    if not stored_info:
+        return None  # never ran with any details: nothing to correct
+    clean, problem = _clean_register_info("imd", info)
+    if problem:
+        return web.json_response(problem, status=400)
+    fields = ("account_type", "prev_username", "username", "password", "email")
+    if all(clean.get(f) == stored_info.get(f) for f in fields):
+        return None  # same details as the run already made: don't renew or register twice
+
+    # Drop the "reply with your correct username" prompt the failed run left open here.
+    customer_data = application.user_data[user_id]
+    if customer_data.get("registration_order") == order_id:
+        for key in ("registration_order", "registration_data", "registration_duration", "registration_item_id",
+                    "registration_fulfilment_id", "awaiting_registration_field", "registration_is_renew",
+                    "registration_retry_field"):
+            customer_data.pop(key, None)
+    item_name = MENU.get(item_id, (item_id, 0))[0]
+    try:
+        await application.bot.send_message(
+            chat_id=user_id,
+            text=(
+                f"📝 Your corrected account details for {item_name} (Order #{order_id}) were received through "
+                "our support chat. We're setting it up now."
+            ),
+        )
+    except Exception:
+        logger.exception("register_account: couldn't message customer %s", user_id)
+    context = CallbackContext(application, chat_id=user_id, user_id=user_id)
+    await _start_imd_manual_automation(context, order_id, user_id, item_id, fulfilment_id, clean)
+    logger.info("register_account: restarted the iMD run for order #%s with corrected details", order_id)
+    return web.json_response(
+        {"ok": True, "order_id": order_id, "fulfilment_id": fulfilment_id, "item_id": item_id,
+         "item_name": item_name, "retried": True}
+    )
+
+
 # Account fields the reply bot may submit for each kind of subscription,
 # matching what the in-bot forms and the Mini App collect.
 REGISTER_FIELDS = {
@@ -9830,6 +9895,9 @@ async def http_register_account(request):
         rows = [r for r in rows if r[1] == wanted_item]
     rows = [r for r in rows if _register_kind(r[1]) is not None]
     if not rows:
+        retry = await _retry_stuck_imd_unit(request.app["application"], order_id, user_id, wanted_item, info)
+        if retry is not None:
+            return retry
         # Usually the customer already gave the details here (or the account was delivered):
         # say where each item stands so the reply bot can tell them.
         conn = sqlite3.connect(DB_PATH)
@@ -13493,7 +13561,23 @@ def _persist_imd2y_step2(fulfilment_id: int, username: str):
     db_set_fulfilment_info(fulfilment_id, info)
 
 
+_IMD_RUNS_IN_PROGRESS = set()
+
+
 async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int):
+    """Runs one iMD registration/renewal step for the order; a second call for the same order
+    while one is running is ignored, so a retry can never use two serials at once."""
+    if order_id in _IMD_RUNS_IN_PROGRESS:
+        logger.warning("iMD run for order #%s is already in progress; not starting another", order_id)
+        return
+    _IMD_RUNS_IN_PROGRESS.add(order_id)
+    try:
+        await _run_imd_registration(context, order_id)
+    finally:
+        _IMD_RUNS_IN_PROGRESS.discard(order_id)
+
+
+async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int):
     """Pulls a serial from the pool matching this order's duration and
     performs the registration or renewal, then handles the outcome.
 
