@@ -380,6 +380,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   <div class="sheet">
     <div class="sheet-handle"></div>
     <div class="sheet-title">📋 My Subscriptions</div>
+    <div class="search-wrap" style="margin:0 15px 10px">
+      <span class="search-ico">🔍</span>
+      <input id="subsSearchInput" style="border:1.5px solid var(--field-border)" type="text" placeholder="Search order #, name, username, password" oninput="subsSearchInput(this.value)">
+      <button class="search-clear" id="subsSearchClearBtn" onclick="subsSearchClear()">✕</button>
+    </div>
     <div id="ordersContent"></div>
   </div>
 </div>
@@ -410,7 +415,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     </div>
     <div class="search-wrap" style="margin:0 15px 10px">
       <span class="search-ico">🔍</span>
-      <input id="ordersSearchInput" type="text" placeholder="Search by order #, subscription, username or password..." oninput="ordersSearchInput(this.value)">
+      <input id="ordersSearchInput" style="border:1.5px solid var(--field-border)" type="text" placeholder="Search order #, name, username, password" oninput="ordersSearchInput(this.value)">
       <button class="search-clear" id="ordersSearchClearBtn" onclick="ordersSearchClear()">✕</button>
     </div>
     <div id="ordersListContent" style="padding:0 15px 15px"></div>
@@ -871,8 +876,48 @@ function syncBasket(){
 
 // ── My Subscriptions sheet ────────────────────────────────────────────
 function openOrders(){
+  document.getElementById('subsSearchInput').value='';
+  document.getElementById('subsSearchClearBtn').style.display='none';
+  subsSearchSeq++;
   renderOrders();
   document.getElementById('ordersOverlay').classList.add('on');
+}
+
+// Search inside My Subscriptions: matched on the server (order #, name, and
+// the delivered username/password) since credentials are never put in the
+// page link. Results reuse the same cards that open the full detail page.
+let subsSearchDebounce=null, subsSearchSeq=0;
+function subsSearchInput(v){
+  document.getElementById('subsSearchClearBtn').style.display=v?'flex':'none';
+  clearTimeout(subsSearchDebounce);
+  const q=v.trim();
+  if(!q){ subsSearchSeq++; renderOrders(); return; }
+  subsSearchDebounce=setTimeout(()=>runSubsSearch(q),300);
+}
+function subsSearchClear(){
+  const input=document.getElementById('subsSearchInput');
+  input.value=''; input.focus();
+  subsSearchInput('');
+}
+async function runSubsSearch(q){
+  const el=document.getElementById('ordersContent');
+  const seq=++subsSearchSeq;
+  const reason=ordersUnavailableReason();
+  if(reason){ el.innerHTML='<div class="search-empty">'+escHtml(reason)+'</div>'; return; }
+  el.innerHTML='<div class="search-empty">Searching…</div>';
+  try{
+    const resp=await fetch(withAuth('/api/my_orders?q='+encodeURIComponent(q)));
+    const data=await resp.json();
+    if(seq!==subsSearchSeq) return; // a newer search (or a cleared box) took over
+    if(!resp.ok){
+      el.innerHTML='<div class="search-empty">'+escHtml(data.error||'Could not search your orders.')+'</div>';
+      return;
+    }
+    renderOrdersList(data.orders||[], true, 'ordersContent');
+  }catch(e){
+    if(seq!==subsSearchSeq) return;
+    el.innerHTML='<div class="search-empty">Could not search your orders: '+escHtml(e.message||String(e))+'</div>';
+  }
 }
 function closeOrders(){document.getElementById('ordersOverlay').classList.remove('on')}
 
@@ -897,7 +942,25 @@ function renderOrders(){
   // ── Delivered subscriptions ──────────────────────────────
   if(d.length){
     html+=`<div class="sub-section-lbl">✅ Delivered (${d.length})</div>`;
-    d.forEach(([name,date,creds,oid,did],i)=>{
+    d.forEach(([name,date,creds,oid,did,fid],i)=>{
+      // A row that knows its fulfilment id opens that subscription's full
+      // detail page (credentials, copy button, ticket button) on its own —
+      // same page the coworker's order list opens.
+      if(fid){
+        html+=`
+        <div class="sub-row" onclick="openOrderDetail(${fid})" style="flex-direction:column;gap:0;padding:0">
+          <div style="display:flex;align-items:flex-start;gap:10px;padding:11px 15px;width:100%">
+            <div class="sub-icon">✅</div>
+            <div class="sub-info">
+              <div class="sub-name">${name}${oid?` <span style="color:var(--hint);font-weight:400">#${oid}</span>`:''}</div>
+              ${date?`<div class="sub-meta">${date}</div>`:''}
+              <div class="sub-meta" style="color:var(--teal2);margin-top:3px">Tap to view details ›</div>
+            </div>
+            <div class="sub-chevron">›</div>
+          </div>
+        </div>`;
+        return;
+      }
       // creds is 1 when details exist (fetched on tap via deliveryId); older
       // launch links carried the text itself.
       const inline = typeof creds === 'string' ? creds : '';
@@ -1055,9 +1118,9 @@ function copyToClipboard(el, text){
   }
 }
 
-function copyOrderCredentials(el){
+function copyOrderCredentials(){
   const text=document.getElementById('orderDetailCredText')?.textContent||'';
-  copyToClipboard(el, text);
+  copyToClipboard(document.getElementById('orderDetailCopyHint'), text);
 }
 function pendAction(action, fid, oid){
   tg.sendData(JSON.stringify({action, fulfilment_id: fid, order_id: oid}));
@@ -1249,8 +1312,8 @@ async function loadOrdersTab(force, query){
   }
 }
 
-function renderOrdersList(orders, isSearching){
-  const el=document.getElementById('ordersListContent');
+function renderOrdersList(orders, isSearching, targetId){
+  const el=document.getElementById(targetId||'ordersListContent');
   if(!orders.length){
     el.innerHTML = isSearching
       ? '<div class="search-empty">No orders match your search.</div>'
@@ -1299,7 +1362,10 @@ async function openOrderDetail(fulfilmentId){
       '<div class="sumrow"><div>Status</div><div class="r">'+statusLabel+'</div></div>'+
       '<div class="sl" style="margin-top:14px;display:flex;align-items:center;justify-content:space-between">'+
         '<span>Credentials</span>'+
-        '<button class="ico-btn" title="Copy" style="width:28px;height:28px;font-size:13px" onclick="copyOrderCredentials(this)">📋</button>'+
+        '<span style="display:flex;align-items:center;gap:8px">'+
+          '<span id="orderDetailCopyHint" style="font-size:12px;font-weight:400;text-transform:none;letter-spacing:0;cursor:pointer" onclick="copyOrderCredentials()">Click to copy the credentials</span>'+
+          '<button class="ico-btn" title="Copy" style="width:28px;height:28px;font-size:13px" onclick="copyOrderCredentials()">📋</button>'+
+        '</span>'+
       '</div>'+
       '<div class="card" id="orderDetailCredText" style="padding:11px 13px;white-space:pre-wrap;font-size:13px;line-height:1.6">'+
         escHtml(data.credentials||'')+
