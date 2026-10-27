@@ -1223,6 +1223,21 @@ def db_init():
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS chat_log_user ON chat_log (user_id, id)")
+    # Customer messages this bot couldn't handle (a question, text it wasn't waiting for, an
+    # answer that doesn't fit the question it asked), for the support chatbot to pick up and
+    # answer: see _hand_to_assistant and /api/assist_events.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assist_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            body TEXT NOT NULL,
+            waiting_for TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
 
     # Owner's cost per account of each product (daily sales Excel).
     conn.execute(
@@ -5804,7 +5819,8 @@ async def _accumulate_receipt_item(update: Update, context: ContextTypes.DEFAULT
         order_id = collecting_id
 
     if not order_id:
-        # Not expecting a receipt right now — ignore stray uploads.
+        # Not expecting a receipt right now: the support chatbot explains what to do.
+        await _hand_to_assistant(update, "unexpected_file")
         return
 
     order = db_get_order(order_id)
@@ -5887,6 +5903,11 @@ async def payer_name_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Catches the payer's name after the receipt(s), then either
     auto-confirms via the AI + hard-gate checks, or falls back to the
     normal manual admin review — always with full visibility either way."""
+    if _off_topic_answer("payer_name", update.message.text.strip()):
+        prompt = "The full name of the person who sent the payment, as written on the receipt."
+        await _hand_to_assistant(update, "off_topic_answer", prompt)
+        await _off_topic_reply(update, prompt)
+        return
     order_id = context.user_data.pop("awaiting_payer_name_for_order", None)
     if not order_id:
         return
@@ -9157,6 +9178,84 @@ def db_customer_chat(user_id: int, limit: int = 40):
     return list(reversed(rows))
 
 
+ASSIST_EVENT_RETENTION_DAYS = 7
+
+
+def db_add_assist_event(user_id: int, kind: str, body: str, waiting_for: str = None):
+    body = _mask_secrets((body or "").strip())[:CHAT_LOG_MAX_BODY]
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO assist_events (user_id, kind, body, waiting_for, created_at) VALUES (?, ?, ?, ?, ?)",
+        (user_id, kind, body, waiting_for, datetime.utcnow().isoformat()),
+    )
+    cutoff = (datetime.utcnow() - timedelta(days=ASSIST_EVENT_RETENTION_DAYS)).isoformat()
+    conn.execute("DELETE FROM assist_events WHERE created_at < ?", (cutoff,))
+    conn.commit()
+    conn.close()
+
+
+def db_assist_events(after_id: int, limit: int = 50):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, user_id, kind, body, waiting_for, created_at FROM assist_events WHERE id > ? ORDER BY id LIMIT ?",
+        (after_id, limit),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def db_latest_assist_event_id() -> int:
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT MAX(id) FROM assist_events").fetchone()
+    conn.close()
+    return row[0] or 0
+
+
+_QUESTION_MARK_RE = re.compile(r"[?؟]")
+
+
+def _off_topic_answer(field: str, value: str) -> bool:
+    """True when a reply to one of our form questions (name, email, username, payer name) looks
+    like something else, usually a question: it has a question mark, or far too many words for
+    the field. Passwords are never judged (they may contain anything)."""
+    if not field or "password" in field:
+        return False
+    if _QUESTION_MARK_RE.search(value):
+        return True
+    words = len(value.split())
+    if field == "email" and "@" not in value:
+        return words >= 3
+    return words > (7 if field == "payer_name" else 5)
+
+
+async def _hand_to_assistant(update: Update, kind: str, waiting_for: str = None):
+    """Passes a customer message this bot couldn't handle to the support chatbot, which answers
+    the customer (in its own chat, or here through /api/assist_reply)."""
+    user = update.effective_user
+    if not user or not _is_customer_chat(user.id) or not CATALOG_API_KEY:
+        return
+    m = update.message
+    body = (m.text or "") if m else ""
+    if m and m.photo:
+        body = f"[photo] {m.caption or ''}"
+    elif m and m.document:
+        body = f"[file: {m.document.file_name or 'document'}] {m.caption or ''}"
+    try:
+        db_add_assist_event(user.id, kind, body, waiting_for)
+        logger.info("assist: passed a %s message from user %s to the support chatbot", kind, user.id)
+    except Exception:
+        logger.exception("assist: couldn't record a %s message from user %s", kind, user.id)
+
+
+async def _off_topic_reply(update: Update, prompt: str):
+    """Keeps the form where it is and tells the customer why their message wasn't saved."""
+    await update.message.reply_text(
+        "⚠️ That doesn't look like the answer to my question, so I haven't saved it. Our support "
+        "assistant will reply to your message shortly.\n\nWhen you're ready, please send:\n" + prompt,
+        reply_markup=_cancel_button(),
+    )
+
+
 def _is_customer_chat(chat_id) -> bool:
     try:
         chat_id = int(chat_id)
@@ -9422,6 +9521,49 @@ async def http_customer_chat(request):
         for direction, body, created_at in db_customer_chat(user_id, limit)
     ]
     return web.json_response({"user_id": user_id, "messages": messages})
+
+
+async def http_assist_events(request):
+    """Customer messages this bot couldn't handle, for the support chatbot to answer.
+    ?after=<id> returns the ones after it (oldest first, max ?limit=, default 50); without it,
+    none, only latest_id to start from. X-Api-Key protected."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        after = request.query.get("after")
+        limit = min(max(int(request.query.get("limit", "50")), 1), 200)
+        rows = db_assist_events(int(after), limit) if after not in (None, "") else []
+    except ValueError:
+        return web.json_response({"error": "after and limit must be numbers"}, status=400)
+    events = [
+        {"id": i, "user_id": u, "kind": k, "text": b, "waiting_for": w, "at": at}
+        for i, u, k, b, w, at in rows
+    ]
+    latest = events[-1]["id"] if events else (int(after) if after not in (None, "") else db_latest_assist_event_id())
+    return web.json_response({"events": events, "latest_id": latest})
+
+
+async def http_assist_reply(request):
+    """Sends the support chatbot's answer to a customer here, in this bot's chat, when it
+    can't reach them in its own. JSON body: {user_id, text}. X-Api-Key protected."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        body = await request.json()
+        user_id = int(body["user_id"])
+        text = str(body["text"]).strip()[:4000]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return web.json_response({"error": "invalid request body"}, status=400)
+    if not text or not _is_customer_chat(user_id):
+        return web.json_response({"error": "nothing to send"}, status=400)
+    try:
+        sent = await request.app["application"].bot.send_message(chat_id=user_id, text=text)
+    except Exception as exc:
+        logger.warning("assist_reply: couldn't send to user %s: %s", user_id, exc)
+        return web.json_response({"error": f"couldn't send: {exc}"}, status=502)
+    return web.json_response({"ok": True, "message_id": sent.message_id})
 
 
 async def http_all_orders(request):
@@ -10402,6 +10544,8 @@ async def start_api_server(application):
     api_app.router.add_get("/api/public_catalog", http_public_catalog)
     api_app.router.add_get("/api/customer_orders", http_customer_orders)
     api_app.router.add_get("/api/customer_chat", http_customer_chat)
+    api_app.router.add_get("/api/assist_events", http_assist_events)
+    api_app.router.add_post("/api/assist_reply", http_assist_reply)
     api_app.router.add_get("/api/orders", http_all_orders)
     api_app.router.add_post("/api/submit_receipt", http_submit_receipt)
     api_app.router.add_post("/api/create_order", http_create_order)
@@ -13040,6 +13184,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await coworker_field_reply(update, context)
         return
 
+    # ── 4. Generic text: nothing here was waiting for it ─────────────
+    await _hand_to_assistant(update, "unhandled_text")
+
 
 async def start_order_fulfilment(context: ContextTypes.DEFAULT_TYPE, order_id: int, user_id: int, items: dict):
     """Records every purchased unit of the paid order, then starts
@@ -13321,6 +13468,11 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
     item_id = context.user_data.get("generic_item_id")
 
     value = update.message.text.strip()
+    if _off_topic_answer(field, value):
+        prompt = dict(fields).get(field, field)
+        await _hand_to_assistant(update, "off_topic_answer", prompt)
+        await _off_topic_reply(update, prompt)
+        return
 
     if account_type == "new":
         if field == "username":
@@ -13557,6 +13709,11 @@ async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT
 
     is_renew = context.user_data.get("registration_is_renew", False)
     value = update.message.text.strip()
+    if _off_topic_answer(field, value):
+        prompt = IMD_FIELD_PROMPTS.get(field, field)
+        await _hand_to_assistant(update, "off_topic_answer", prompt)
+        await _off_topic_reply(update, prompt)
+        return
 
     # New-account username only (never renewal's prev_username, which is
     # an existing account lookup, not something being created) — iMD
