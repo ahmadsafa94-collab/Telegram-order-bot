@@ -136,6 +136,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .rn{font-size:13px;font-weight:500;line-height:1.3}
 .rs{font-size:11px;color:var(--hint);margin-top:1px}
 .rp{font-size:14px;font-weight:700;color:var(--teal2);flex-shrink:0}
+.dur-btn{flex-shrink:0;margin-left:8px;background:transparent;border:1.5px solid var(--teal2);color:var(--teal2);
+  border-radius:20px;padding:7px 11px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
 .cw-edit{background:none;border:none;font-size:13px;padding:0 0 0 5px;cursor:pointer;color:inherit}
 .add-btn{width:28px;height:28px;border-radius:50%;border:none;background:var(--acc);
   color:var(--atxt);font-size:17px;display:flex;align-items:center;justify-content:center;
@@ -432,7 +434,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   </div>
 </div>
 
-<!-- Admin-only: edit one subscription's price for the coworker being previewed -->
+<!-- Durations of one subscription (the button beside it) -->
+<div class="overlay" id="durOverlay" onclick="if(event.target===this)closeDurations()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="durTitle">Durations</div>
+    <div id="durList" style="padding:0 15px 15px"></div>
+  </div>
+</div>
+
+<!-- Admin-only: edit one subscription's price (for the coworker being previewed, or for everyone) -->
 <div class="overlay" id="cwPriceOverlay" onclick="if(event.target===this)closeCwPriceEdit()">
   <div class="sheet">
     <div class="sheet-handle"></div>
@@ -443,7 +454,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
         style="width:100%;background:transparent;border:1.5px solid var(--field-border);border-radius:10px;padding:11px 12px;color:var(--text);font-size:15px">
       <div id="cwPriceMsg" style="font-size:12px;margin-top:6px;min-height:16px"></div>
       <button class="btn" id="cwPriceSave" onclick="saveCwPrice(false)">Save price</button>
-      <button class="btn sec" style="margin-top:8px" onclick="saveCwPrice(true)">↩️ Use their default price</button>
+      <button class="btn sec" id="cwPriceReset" style="margin-top:8px" onclick="saveCwPrice(true)">↩️ Use their default price</button>
       <button class="btn sec" style="margin-top:8px" onclick="closeCwPriceEdit()">Cancel</button>
     </div>
   </div>
@@ -521,6 +532,9 @@ const API_BASE = _qs.get('api') || (SUBS_DATA && SUBS_DATA.api) || '';
 // just the catalog's preview pricing — see withAuth() below.
 const PREVIEW_CW = _qs.get('previewcw') || '';
 const CW_NAME = (SUBS_DATA && SUBS_DATA.cwn) || 'this coworker';
+// Set only on the admin's own Shop link (bot.py's _shop_url): shows a ✏️ to
+// change an item's regular price for everyone. The server re-checks who asks.
+const ADMIN_EDIT = !!(SUBS_DATA && SUBS_DATA.adm) && !PREVIEW_CW;
 
 // Credit balance and active discount codes — point-in-time snapshot from
 // page load, used only for display/estimation. The server re-verifies
@@ -566,6 +580,9 @@ const NO_DETAILS_NEEDED = new Set(['uptodate_ai_2m', 'medical_toolkit']);
 // "automatically" for these.
 const MANUAL_ACCESS_ITEMS = new Set(['medical_toolkit']);
 
+/* PANEL-CATALOG:START */
+const PANEL_CATALOG = [["5MinuteConsult",[["pn275","1 Year",28.0]]],["AAP Pediatric Care",[["pn340","1 Year",35.0]]],["AAP- 5 journals All",[["pn608","1 Year",30.0]]],["AAP-Pediatrics + Pediatrics In Review",[["pn813","1 Year",27.5]]],["Academic Search Ultimate ( Ebscohost )",[["pn157","3 Months",24.0],["pn156","6 Months",25.0],["pn155","1 Year",30.0]]],["Access All Products",[["pn384","1 Year",120.0]]],["Access Anesthesiology",[["pn59","1 Year",30.0]]],["Access APN (Advanced Practice Nursing)",[["pn62","1 Year",30.0]]],["Access Cardiology",[["pn65","1 Year",30.0]]],["Access DermatologyDxRx",[["pn68","1 Year",30.0]]],["Access Emergency Medicine",[["pn71","1 Year",30.0]]],["Access Hematology Oncology",[["pn74","1 Year",30.0]]],["Access Medicina",[["pn77","1 Year",27.5]]],["Access Neurology",[["pn83","1 Year",30.0]]],["Access ObGyn",[["pn86","1 Year",30.0]]],["Access Pediatrics",[["pn89","1 Year",30.0]]],["Access Pharmacy",[["pn92","1 Year",30.0]]],["Access Physiotherapy",[["pn95","1 Year",30.0]]],["Access Surgery",[["pn98","1 Year",30.0]]],["AccessWorldmed",[["pn864","1 Year",30.0]]],["Acland’s Video Atlas of Human Anatomy",[["pn287","1 Year",27.5]]],["ALtmetrics",[["pn626","3 Months",30.0]]],["American Association for Cancer Research - AACR Journals",[["pn848","1 Year",30.0]]],["American Diabetes Association FULL JOURNALS Journals",[["pn884","1 Year",35.0]]],["APA PsycArticles ( Ebscohost )",[["pn160","3 Months",24.0],["pn159","6 Months",25.0],["pn158","1 Year",30.0]]],["APA PsycBooks ( Ebscohost )",[["pn163","3 Months",24.0],["pn162","6 Months",25.0],["pn161","1 Year",30.0]]],["APA PsycExtra ( Ebscohost )",[["pn370","3 Months",25.0],["pn834","1 Year",35.0]]],["APA PsycInfo ( Ebscohost )",[["pn166","3 Months",24.0],["pn165","6 Months",25.0],["pn164","1 Year",30.0]]],["APA PsycTests ( Ebscohost )",[["pn169","3 Months",24.0],["pn168","6 Months",25.0],["pn167","1 Year",30.0]]],["APA PsycTherapy ( Ebscohost )",[["pn172","3 Months",25.0],["pn854","6 Months",30.0],["pn833","1 Year",35.0]]],["ASME Digital Collection",[["pn829","1 Year",40.0]]],["ASTM Standards",[["pn827","1 Year",55.0]]],["Bates's Visual Guide (webproxy)",[["pn296","1 Year",30.0]]],["BMJ Journals (WebProxy)",[["pn180","3 Months",30.0],["pn183","1 Year",45.0]]],["Business Source Ultimate ( VIA Ebscohost )",[["pn175","3 Months",24.0],["pn174","6 Months",25.0],["pn173","1 Year",30.0]]],["Case Files Collection-Access",[["pn101","1 Year",30.0]]],["CINAHL (Ebscohost)",[["pn178","3 Months",24.0],["pn176","1 Year",30.0]]],["CINAHL Ultimate (Ebscohost)",[["pn184","3 Months",26.0],["pn182","1 Year",35.0]]],["Clinical pharmacology (WebProxy)",[["pn677","6 Months",25.0],["pn678","1 Year",27.5]]],["ClinicalKey Nursing (WebProxy)",[["pn680","6 Months",25.0],["pn679","1 Year",27.5]]],["ClinicalKey Student (Direct)",[["pn900","6 Months",30.0],["pn821","1 Year",30.0]]],["ClinicalKey,Clinicalkey student",[["pn901","6 Months",35.0],["pn42","1 Year",35.0]]],["Cochrane Library",[["pn321","1 Year",30.0]]],["combo products of therapeuticresearch.com",[["pn366","1 Year",35.0]]],["Complete Anatomy",[["pn832","6 Months",30.0]]],["Dental Update",[["pn203","1 Year",27.5]]],["Dentistry & Oral Sciences (ebscohost)",[["pn193","3 Months",25.0],["pn192","6 Months",30.0],["pn191","1 Year",35.0]]],["DerWent (Patent)-Web Of Science",[["pn57","1 Year",30.0]]],["Dynamed+ Dynamed Decision",[["pn650","3 Months",25.0],["pn651","1 Year",30.0]]],["Dynamedex+DynaAI",[["pn690","1 Year",40.0]]],["Dynamic Health",[["pn811","3 Months",24.0],["pn812","1 Year",30.0]]],["eBook EBSCOhost (400K)",[["pn334","3 Months",30.0],["pn195","6 Months",35.0],["pn333","1 Year",40.0]]],["eBook EBSCOhost (462K)",[["pn336","3 Months",30.0],["pn198","6 Months",35.0],["pn335","1 Year",40.0]]],["eBook EBSCOhost (600K)",[["pn338","3 Months",30.0],["pn201","6 Months",35.0],["pn337","1 Year",45.0]]],["EBSCO eBooks Business (23,000 e-books)",[["pn815","1 Year",45.0]]],["EBSCO eBooks Community College (62,000 e-books)",[["pn669","3 Months",27.5]]],["EBSCO eBooks University Press(37,000 e-books)",[["pn817","1 Year",45.0]]],["Education Source Ultimate( Ebscohost )",[["pn641","3 Months",26.0],["pn640","6 Months",36.0],["pn639","1 Year",35.0]]],["Embase,ClinicalKey,Sciencedirect",[["pn40","1 Year",40.0]]],["Emerald Journals",[["pn867","3 Months",27.5],["pn870","6 Months",32.5]]],["Engineeringvilage (Compendex)",[["pn47","6 Months",30.0],["pn46","1 Year",35.0]]],["Epocrates",[["pn314","1 Year",40.0]]],["ESI - Essential Science Indicators +JCR",[["pn55","1 Year",27.5]]],["eTG complete-application",[["pn302","1 Year",30.0]]],["ETG Therapeutic Guidelines (WebProxy)",[["pn224","1 Year",30.0]]],["European Journal of Prosthodontics and Restorative Dentistry",[["pn190","3 Months",26.0],["pn188","1 Year",30.0]]],["ExamMaster",[["pn831","6 Months",35.0]]],["Expert path (WebProxy)",[["pn18","1 Month",24.0],["pn17","3 Months",25.0],["pn16","1 Year",30.0]]],["F.A. Davis AT Collection-Access",[["pn107","1 Year",30.0]]],["France-Clinicalkey Student (EMC Consult) webproxy",[["pn803","6 Months",35.0],["pn802","1 Year",45.0]]],["Grammarly Pro",[["pn367","1 Year",35.0]]],["Grammarly Pro + AI",[["pn826","1 Year",40.0]]],["Harvard Business Review Press (600 e-books)",[["pn668","3 Months",24.0]]],["IEEE Journals (WebProxy)",[["pn871","3 Months",30.0],["pn872","1 Year",35.0]]],["IGI Global (Ebooks & Journals)",[["pn19","2 Months",45.0],["pn20","1 Year",95.0]]],["IGI Global (Journals)",[["pn37","2 Months",30.0],["pn38","1 Year",45.0]]],["InCites-Clarivate Analytics",[["pn56","1 Year",30.0]]],["JAMA All Journals",[["pn404","1 Year",30.0]]],["JAMA: The Journal of the American Medical",[["pn152","1 Year",30.0]]],["JCR-Journal Citation Reports+ ESI",[["pn408","1 Year",27.5]]],["Journal of Neurosurgery",[["pn648","1 Month",25.0],["pn649","1 Year",30.0]]],["Lecturio",[["pn354","1 Year",55.0]]],["Library & Information Science Source ( Ebscohost )",[["pn211","3 Months",24.0],["pn210","6 Months",25.0],["pn209","1 Year",30.0]]],["Library, Information Science & Technology Fulltext (LISTA)",[["pn214","3 Months",24.0],["pn213","6 Months",25.0],["pn212","1 Year",30.0]]],["Lwwhealthlibrary Advanced Practice Nursing",[["pn393","1 Year",30.0]]],["Lwwhealthlibrary Anesthesiology",[["pn407","1 Year",30.0]]],["Lwwhealthlibrary Board Review Series",[["pn251","1 Year",30.0]]],["Lwwhealthlibrary Clerkship",[["pn272","1 Year",30.0]]],["Lwwhealthlibrary Emergency Medicine",[["pn400","1 Year",30.0]]],["Lwwhealthlibrary Exercise Science",[["pn254","1 Year",30.0]]],["Lwwhealthlibrary Internal Medicine",[["pn263","1 Year",30.0]]],["Lwwhealthlibrary International Anatomical Sciences",[["pn394","1 Year",30.0]]],["Lwwhealthlibrary International Premium Basic Sciences",[["pn395","1 Year",30.0]]],["Lwwhealthlibrary Lippincott Advisor",[["pn410","1 Year",30.0]]],["Lwwhealthlibrary Made Incredibly Easy!",[["pn248","1 Year",30.0]]],["Lwwhealthlibrary Neurology",[["pn245","1 Year",30.0]]],["Lwwhealthlibrary ObGyn",[["pn396","1 Year",30.0]]],["Lwwhealthlibrary Occupational Therapy",[["pn398","1 Year",30.0]]],["Lwwhealthlibrary Oncology",[["pn399","1 Year",30.0]]],["Lwwhealthlibrary Ophthalmology",[["pn257","1 Year",30.0]]],["Lwwhealthlibrary Orthopaedic Surgery",[["pn628","1 Year",30.0]]],["Lwwhealthlibrary Osteopathic Medicine",[["pn269","1 Year",30.0]]],["Lwwhealthlibrary Pathology",[["pn236","1 Year",30.0]]],["Lwwhealthlibrary Physical Therapy",[["pn239","1 Year",30.0]]],["Lwwhealthlibrary Premium Pharmacy",[["pn260","1 Year",30.0]]],["Lwwhealthlibrary Psychiatry",[["pn638","1 Year",30.0]]],["Lwwhealthlibrary Surgery",[["pn397","1 Year",30.0]]],["Mathscinet ( Ebscohost )",[["pn217","3 Months",24.0],["pn216","6 Months",25.0],["pn215","1 Year",30.0]]],["MEDLINE ( Ebscohost )",[["pn220","3 Months",24.0],["pn221","6 Months",25.0],["pn218","1 Year",27.5]]],["MEDLINE Ultimate (Ebscohost)",[["pn219","3 Months",25.0],["pn223","6 Months",30.0],["pn222","1 Year",35.0]]],["MedOne ComSci",[["pn610","1 Year",35.0]]],["MedOne Education",[["pn318","1 Year",30.0]]],["Medone Education+Neurosurgery+Plastic Surgery+Otolaryngology",[["pn627","1 Year",40.0]]],["MedOne Neurosurgery",[["pn327","1 Year",35.0]]],["Medone Neurosurgery+Plastic Surgery",[["pn612","1 Year",35.0]]],["Medone Neurosurgery+Plastic Surgery+Otolaryngology",[["pn614","1 Year",35.0]]],["Medone Neurosurgery+Plastic Surgery+Radiology",[["pn613","1 Year",40.0]]],["MedOne Ophthalmology",[["pn372","1 Year",35.0]]],["MedOne Plastic Surgery",[["pn353","1 Year",35.0]]],["MedOne Radiology",[["pn326","1 Year",35.0]]],["Natural Medicines -NatMed Pro",[["pn317","1 Year",30.0]]],["Nature Journals (webproxy)",[["pn204","1 Month",25.0],["pn205","3 Months",27.5],["pn206","1 Year",45.0]]],["Nursing Reference Center Plus (Ebscohost)",[["pn722","3 Months",25.0],["pn723","6 Months",27.5],["pn724","1 Year",30.0]]],["OMMBID",[["pn116","1 Year",30.0]]],["OnePetro",[["pn830","1 Year",45.0]]],["Osmosis - 05.20.2024",[["pn620","1 Month",24.0]]],["Osmosis - 30.12.2024",[["pn355","1 Year",35.0]]],["Osmosis - 30.12.2025",[["pn855","1 Year",40.0]]],["OverDrive eBooks Account (164k)",[["pn325","1 Year",30.0]]],["OverDrive eBooks Account (266k)",[["pn330","1 Year",32.5]]],["OverDrive eBooks Account (276k)",[["pn329","1 Year",32.5]]],["OverDrive eBooks Account (300k)",[["pn331","1 Year",35.0]]],["OverDrive eBooks Account (434k)",[["pn332","1 Year",40.0]]],["Ovid Journals Type 1 (Webproxy)",[["pn693","1 Month",25.0],["pn694","6 Months",30.0],["pn695","1 Year",35.0]]],["Ovid Journals Type 2 (Webproxy)",[["pn696","1 Month",30.0],["pn697","6 Months",35.0],["pn698","1 Year",45.0]]],["Ovid Journals Type 3 (Webproxy)",[["pn701","1 Month",35.0],["pn700","6 Months",50.0],["pn699","1 Year",60.0]]],["Oxford Journals (WebProxy)",[["pn189","2 Months",27.5],["pn881","6 Months",35.0],["pn882","1 Year",45.0]]],["Oxford Journals and ebooks (WebProxy)",[["pn177","2 Months",35.0],["pn880","1 Year",70.0]]],["Pediatric Patient Education",[["pn364","1 Year",30.0]]],["Pediatric Surgery Library",[["pn371","1 Year",27.5]]],["PEP - Psychoanalytic Electronic Publishing",[["pn721","1 Year",32.5]]],["pepid (WebProxy)",[["pn660","1 Month",24.0],["pn661","3 Months",26.0],["pn662","1 Year",32.5]]],["Pharmacotherapy Principles & Practice-Access",[["pn119","1 Year",30.0]]],["ProQuest Central (WebProxy)",[["pn181","1 Month",24.0],["pn187","3 Months",26.0],["pn185","1 Year",32.5]]],["ProQuest Dissertations and Theses (WebProxy)",[["pn665","1 Month",24.0],["pn663","3 Months",26.0],["pn664","1 Year",32.5]]],["Reaxys",[["pn49","6 Months",30.0],["pn48","1 Year",32.5]]],["Red Book 2024–2027 (AAP)",[["pn342","1 Year",30.0]]],["Rehabilitation & Sports Medicine (ebscohost)",[["pn229","3 Months",24.0],["pn228","6 Months",25.0],["pn227","1 Year",30.0]]],["Rockefeller University Press",[["pn676","1 Year",32.5]]],["Sage Journals",[["pn866","6 Months",35.0],["pn862","1 Year",35.0]]],["ScienceDirect (Type 3)",[["pn633","1 Year",40.0]]],["Sciencedirect,scival,ClinicalKey",[["pn51","6 Months",30.0],["pn50","1 Year",35.0]]],["Sciencedirect,Scopus,Embase,ClinicalKey,Reaxys,EngVillage",[["pn41","1 Year",50.0]]],["Sciencedirect,Scopus,Embase,Scival,Reaxys,EngVillage",[["pn45","6 Months",32.5],["pn44","1 Year",40.0]]],["Scopus AI",[["pn879","6 Months",35.0],["pn878","1 Year",40.0]]],["SPANISH-Clinicalkey Student",[["pn801","1 Year",30.0]]],["SPANISH-Clinicalkey.es + Clinicalkey Student",[["pn356","1 Year",35.0]]],["SPANISH-Lwwhealthlibrary Ciencias Básicas",[["pn363","1 Year",30.0]]],["SPORTDiscus with Full Text ( Ebscohost )",[["pn235","3 Months",24.0],["pn234","6 Months",25.0],["pn233","1 Year",30.0]]],["Springer Journals+ebooks",[["pn34","3 Months",30.0],["pn208","1 Year",60.0]]],["Statdx,ClinicalKey,Sciencedirect,Scopus,scival",[["pn53","6 Months",30.0],["pn52","1 Year",35.0]]],["Statdx,Expertpath,Immunoquery,ClinicalKey,Sciencedirect,Scopus,Scival",[["pn684","6 Months",35.0],["pn409","1 Year",45.0]]],["Statista",[["pn39","2 Months",35.0],["pn21","6 Months",45.0],["pn179","1 Year",65.0]]],["StatRef-Type 1",[["pn313","3 Months",24.0],["pn312","6 Months",26.0],["pn311","1 Year",30.0]]],["StatRef-Type 2",[["pn645","3 Months",24.0],["pn647","6 Months",27.5],["pn646","1 Year",30.0]]],["TandF ejournals (Taylor & Francis) webproxy",[["pn836","2 Months",24.0],["pn837","6 Months",27.5],["pn838","1 Year",35.0]]],["TandF ejournals (webproxy)",[["pn904","2 Months",24.0],["pn903","6 Months",27.5],["pn902","1 Year",35.0]]],["The Medical Letter App",[["pn382","1 Year",30.0]]],["Total Patents",[["pn58","1 Year",30.0]]],["Turnitin- Dec 2025",[["pn266","2 Months",25.0]]],["Turnitin- DEC 2026",[["pn232","1 Year",35.0]]],["Ucentral",[["pn328","1 Year",30.0]]],["Usmle Easy",[["pn319","1 Year",30.0]]],["uWISE (APGO )",[["pn352","6 Months",30.0]]],["VisualDx+AI",[["pn373","1 Year",35.0]]],["Wiley eBooks",[["pn666","2 Months",30.0],["pn823","1 Year",50.0]]],["Wiley ejournals",[["pn30","2 Months",24.0],["pn29","6 Months",27.5],["pn28","1 Year",35.0]]],["WOS (Full databases)",[["pn54","1 Year",30.0]]],["WOS (Full databases)+AI",[["pn689","1 Year",40.0]]],["WOS (Full databases)+ESI+JCR+Incites",[["pn411","1 Year",40.0]]],["WOS (Full databases)+ESI+JCR+Incites+AI",[["pn374","1 Year",45.0]]],["WOS (partial databases)+AI",[["pn674","1 Year",35.0]]]];
+/* PANEL-CATALOG:END */
 const CATALOG = [
   {id:'imd',name:'iMD',emoji:'🎓',groups:[
     {label:'VIP Access',items:[
@@ -632,6 +649,14 @@ const CATALOG = [
   ]},
 ];
 
+// Extra subscriptions from panel_catalog.json (generated block above): one
+// tab; a product with several durations is one row whose button opens the
+// list of durations to pick from.
+CATALOG.splice(CATALOG.length-1, 0, {
+  id:'panel', name:'More Subscriptions', emoji:'🗂', row2:true,
+  panel: PANEL_CATALOG.map(([name, vs]) => ({name, variants: vs.map(([id,label,price]) => ({id,label,price}))})),
+});
+
 // Admin edits from 📦 Manage Stock in the bot (bot.py's _shop_url): edited
 // prices replace the hardcoded ones above so tiles match what checkout
 // charges, and removed items are hidden. Point-in-time snapshot like
@@ -648,8 +673,13 @@ const REMOVED_IDS = new Set((SUBS_DATA && SUBS_DATA.rm) || []);
       cat.groups = cat.groups.filter(g => g.items.length);
     }
     if (cat.single) { cat.single = cat.single.filter(keep); cat.single.forEach(reprice); }
+    if (cat.panel) {
+      cat.panel.forEach(p => { p.variants = p.variants.filter(keep); p.variants.forEach(reprice); });
+      cat.panel = cat.panel.filter(p => p.variants.length);
+    }
     // Drop a category left empty, except "other", which also hosts custom items.
-    const empty = !(cat.groups && cat.groups.length) && !(cat.single && cat.single.length);
+    const empty = !(cat.groups && cat.groups.length) && !(cat.single && cat.single.length)
+      && !(cat.panel && cat.panel.length);
     if (empty && cat.id !== 'other') CATALOG.splice(c, 1);
   }
 })();
@@ -669,6 +699,9 @@ CATALOG.forEach(c=>{
   if(c.single) c.single.forEach(i=>{
     IMAP[i.id]={...i, catId:c.id, catName:c.name, sub:'1 Year', fullname: i.name+' — 1 Year'};
   });
+  if(c.panel) c.panel.forEach(p=>p.variants.forEach(v=>{
+    IMAP[v.id]={id:v.id, name:p.name, price:v.price, sub:v.label, catId:c.id, catName:c.name, fullname:p.name+' — '+v.label};
+  }));
 });
 
 // ── Brand logos (small data-URI icons) — used for the iMD/Uptodate/Amboss
@@ -1231,9 +1264,49 @@ function buildCatalog(){
       const alphabetical=[...cat.single].sort((a,b)=>a.name.localeCompare(b.name));
       alphabetical.forEach(i=>sec.appendChild(makeRow({...i,sub:'1 Year'},true)));
     }
+    if(cat.panel){
+      const lbl=document.createElement('div'); lbl.className='sl'; lbl.textContent='Tap Durations to choose how long'; sec.appendChild(lbl);
+      [...cat.panel].sort((a,b)=>a.name.localeCompare(b.name)).forEach(p=>{
+        sec.appendChild(p.variants.length>1 ? makePanelRow(p) : makeRow({id:p.variants[0].id,name:p.name,price:p.variants[0].price,sub:p.variants[0].label,e:'🗂'},true));
+      });
+    }
     secEl.appendChild(sec);
   });
 }
+
+// A product with several durations: one row, and a button that opens the
+// list of durations (each with its own price and + button).
+function panelFromPrice(p){
+  return Math.min(...p.variants.map(v=>hasCoworkerDiscount(v.id)?coworkerPrice(v.price,v.id):v.price));
+}
+function makePanelRow(p){
+  const d=document.createElement('div'); d.className='solo'; d.dataset.panelName=p.name;
+  d.innerHTML=`<div style="font-size:21px">🗂</div>
+    <div class="ri"><div class="rn">${escHtml(p.name)}</div><div class="rs">${p.variants.length} durations</div></div>
+    <div class="rp panel-from">from $${panelFromPrice(p)}</div>
+    <button class="dur-btn" onclick="openDurations(this.closest('[data-panel-name]').dataset.panelName)">⏱ Durations</button>`;
+  return d;
+}
+function refreshPanelFromPrices(){
+  document.querySelectorAll('[data-panel-name]').forEach(row=>{
+    const cat=CATALOG.find(c=>c.id==='panel');
+    const p=cat&&cat.panel.find(x=>x.name===row.dataset.panelName);
+    const el=row.querySelector('.panel-from'); if(p&&el) el.textContent='from $'+panelFromPrice(p);
+  });
+}
+function openDurations(name){
+  const cat=CATALOG.find(c=>c.id==='panel');
+  const p=cat&&cat.panel.find(x=>x.name===name); if(!p) return;
+  document.getElementById('durTitle').textContent=p.name;
+  const list=document.getElementById('durList'); list.innerHTML='';
+  const card=document.createElement('div'); card.className='card';
+  p.variants.forEach(v=>{
+    card.appendChild(makeRow({id:v.id,name:v.label,price:v.price,sub:''},false));
+  });
+  list.appendChild(card);
+  document.getElementById('durOverlay').classList.add('on');
+}
+function closeDurations(){document.getElementById('durOverlay').classList.remove('on')}
 
 // The price shown on a catalog row. In the admin's coworker preview a ✏️
 // sits beside it to set a custom price for that coworker (see openCwPriceEdit).
@@ -1241,7 +1314,7 @@ function rowPriceHtml(id, basePrice){
   const price = hasCoworkerDiscount(id)
     ? `<span style="text-decoration:line-through;color:var(--hint);font-weight:400;font-size:11px;margin-right:3px">$${basePrice}</span>$${coworkerPrice(basePrice,id)}`
     : `$${basePrice}`;
-  return price + (PREVIEW_CW ? `<button class="cw-edit" title="Edit this coworker's price" onclick="event.stopPropagation();openCwPriceEdit('${id}')">✏️</button>` : '');
+  return price + ((PREVIEW_CW||ADMIN_EDIT) ? `<button class="cw-edit" title="Edit this price" onclick="event.stopPropagation();openCwPriceEdit('${id}')">✏️</button>` : '');
 }
 function makeRow(itm,solo){
   const d=document.createElement('div'); d.className=solo?'solo':'row';
@@ -1409,17 +1482,27 @@ function closeOrderDetail(){document.getElementById('orderDetailOverlay').classL
 // (PREVIEW_CW set); the server accepts it from the admin's own verified
 // account only, so the pencil does nothing for anyone else.
 let cwEditId=null;
+// Two modes share this popup: in the admin's coworker preview it sets what
+// THAT coworker pays; on the admin's own Shop link it changes the regular
+// price for everyone.
 function openCwPriceEdit(id){
   const row=document.querySelector('[data-item-id="'+id+'"]');
   if(!row) return;
   cwEditId=id;
   const base=parseFloat(row.dataset.base);
-  const shown=hasCoworkerDiscount(id)?coworkerPrice(base,id):base;
-  document.getElementById('cwPriceTitle').textContent=row.dataset.name;
-  document.getElementById('cwPriceInfo').textContent=
-    CW_NAME+' currently sees $'+shown+(COWORKER_ITEM_PRICES[id]!=null?' (custom price)':' (their default)')+'. Regular price: $'+base+'.';
+  const info=document.getElementById('cwPriceInfo');
   const input=document.getElementById('cwPriceInput');
-  input.value=COWORKER_ITEM_PRICES[id]!=null?COWORKER_ITEM_PRICES[id]:'';
+  document.getElementById('cwPriceTitle').textContent=(IMAP[id]&&IMAP[id].fullname)||row.dataset.name;
+  if(PREVIEW_CW){
+    const shown=hasCoworkerDiscount(id)?coworkerPrice(base,id):base;
+    info.textContent=CW_NAME+' currently sees $'+shown+(COWORKER_ITEM_PRICES[id]!=null?' (custom price)':' (their default)')+'. Regular price: $'+base+'.';
+    input.value=COWORKER_ITEM_PRICES[id]!=null?COWORKER_ITEM_PRICES[id]:'';
+    document.getElementById('cwPriceReset').textContent='↩️ Use their default price';
+  }else{
+    info.textContent='Regular price: $'+base+(PRICE_OVERRIDES[id]!=null?' (edited)':'')+'. Changing it changes the price for every customer.';
+    input.value=base;
+    document.getElementById('cwPriceReset').textContent='↩️ Back to the original price';
+  }
   document.getElementById('cwPriceMsg').textContent='';
   document.getElementById('cwPriceOverlay').classList.add('on');
   setTimeout(()=>input.focus(),150);
@@ -1436,19 +1519,37 @@ async function saveCwPrice(useDefault){
   const btn=document.getElementById('cwPriceSave'); btn.disabled=true;
   msg.style.color='var(--hint)'; msg.textContent='Saving…';
   try{
-    const resp=await fetch(withAuth('/api/set_coworker_price'),{
+    const resp=await fetch(withAuth(PREVIEW_CW?'/api/set_coworker_price':'/api/set_item_price'),{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({item_id:id,price:price}),
     });
     const data=await resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
     if(!data.ok){ msg.style.color='#dc2626'; msg.textContent=data.error||'Could not save the price.'; return; }
-    if(data.custom) COWORKER_ITEM_PRICES[id]=data.price; else delete COWORKER_ITEM_PRICES[id];
+    let toast;
+    if(PREVIEW_CW){
+      if(data.custom) COWORKER_ITEM_PRICES[id]=data.price; else delete COWORKER_ITEM_PRICES[id];
+      toast=data.custom?CW_NAME+' now sees $'+data.price:'Back to '+CW_NAME+"'s default $"+data.default;
+    }else{
+      // The regular price itself changed: update everything built from it.
+      if(data.edited) PRICE_OVERRIDES[id]=data.price; else delete PRICE_OVERRIDES[id];
+      if(IMAP[id]) IMAP[id].price=data.price;
+      CATALOG.forEach(c=>{
+        const fix=i=>{ if(i.id===id) i.price=data.price; };
+        if(c.groups) c.groups.forEach(g=>g.items.forEach(fix));
+        if(c.single) c.single.forEach(fix);
+        if(c.panel) c.panel.forEach(p=>p.variants.forEach(fix));
+      });
+      document.querySelectorAll('[data-item-id="'+id+'"]').forEach(row=>{ row.dataset.base=data.price; });
+      if(cart[id]) cart[id].price=data.price;
+      toast=data.edited?'Price is now $'+data.price:'Back to the original $'+data.price;
+    }
     document.querySelectorAll('[data-item-id="'+id+'"]').forEach(row=>{
       const rp=row.querySelector('.rp'); if(rp) rp.innerHTML=rowPriceHtml(id, parseFloat(row.dataset.base));
     });
-    try{ renderBasket(); }catch(e){}
+    refreshPanelFromPrices();
+    try{ syncBasket(); renderBasket(); }catch(e){}
     closeCwPriceEdit();
-    showToast(data.custom?CW_NAME+' now sees $'+data.price:'Back to '+CW_NAME+"'s default $"+data.default);
+    showToast(toast);
   }catch(e){
     msg.style.color='#dc2626'; msg.textContent='Network error — please try again.';
   }finally{ btn.disabled=false; }
