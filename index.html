@@ -138,6 +138,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .rp{font-size:14px;font-weight:700;color:var(--teal2);flex-shrink:0}
 .dur-btn{flex-shrink:0;margin-left:8px;background:transparent;border:1.5px solid var(--teal2);color:var(--teal2);
   border-radius:20px;padding:7px 11px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
+.panel-wrap.open > .solo{border-bottom-left-radius:0;border-bottom-right-radius:0;margin-bottom:0;border-color:var(--teal2)}
+.dur-list{display:none;margin:0 0 7px;border:1px solid var(--teal2);border-top:none;
+  border-radius:0 0 var(--r) var(--r);background:var(--bg2);overflow:hidden}
+.panel-wrap.open > .dur-list{display:block}
+.dur-list .row{padding-left:34px}
 .cw-edit{background:none;border:none;font-size:13px;padding:0 0 0 5px;cursor:pointer;color:inherit}
 .add-btn{width:28px;height:28px;border-radius:50%;border:none;background:var(--acc);
   color:var(--atxt);font-size:17px;display:flex;align-items:center;justify-content:center;
@@ -431,15 +436,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     <div class="sheet-handle"></div>
     <div class="sheet-title">📦 Order Details</div>
     <div id="orderDetailContent" style="padding:0 15px 15px"></div>
-  </div>
-</div>
-
-<!-- Durations of one subscription (the button beside it) -->
-<div class="overlay" id="durOverlay" onclick="if(event.target===this)closeDurations()">
-  <div class="sheet">
-    <div class="sheet-handle"></div>
-    <div class="sheet-title" id="durTitle">Durations</div>
-    <div id="durList" style="padding:0 15px 15px"></div>
   </div>
 </div>
 
@@ -1280,12 +1276,14 @@ function panelFromPrice(p){
   return Math.min(...p.variants.map(v=>hasCoworkerDiscount(v.id)?coworkerPrice(v.price,v.id):v.price));
 }
 function makePanelRow(p){
-  const d=document.createElement('div'); d.className='solo'; d.dataset.panelName=p.name;
-  d.innerHTML=`<div style="font-size:21px">🗂</div>
-    <div class="ri"><div class="rn">${escHtml(p.name)}</div><div class="rs">${p.variants.length} durations</div></div>
-    <div class="rp panel-from">from $${panelFromPrice(p)}</div>
-    <button class="dur-btn" onclick="openDurations(this.closest('[data-panel-name]').dataset.panelName)">⏱ Durations</button>`;
-  return d;
+  const w=document.createElement('div'); w.className='panel-wrap'; w.dataset.panelName=p.name;
+  w.innerHTML=`<div class="solo">
+      <div style="font-size:21px">🗂</div>
+      <div class="ri"><div class="rn">${escHtml(p.name)}</div><div class="rs">${p.variants.length} durations</div></div>
+      <div class="rp panel-from">from $${panelFromPrice(p)}</div>
+      <button class="dur-btn" onclick="toggleDurations(this)">⏱ Durations ▾</button>
+    </div><div class="dur-list"></div>`;
+  return w;
 }
 function refreshPanelFromPrices(){
   document.querySelectorAll('[data-panel-name]').forEach(row=>{
@@ -1294,19 +1292,19 @@ function refreshPanelFromPrices(){
     const el=row.querySelector('.panel-from'); if(p&&el) el.textContent='from $'+panelFromPrice(p);
   });
 }
-function openDurations(name){
-  const cat=CATALOG.find(c=>c.id==='panel');
-  const p=cat&&cat.panel.find(x=>x.name===name); if(!p) return;
-  document.getElementById('durTitle').textContent=p.name;
-  const list=document.getElementById('durList'); list.innerHTML='';
-  const card=document.createElement('div'); card.className='card';
-  p.variants.forEach(v=>{
-    card.appendChild(makeRow({id:v.id,name:v.label,price:v.price,sub:''},false));
-  });
-  list.appendChild(card);
-  document.getElementById('durOverlay').classList.add('on');
+// The button drops the list of durations (each with its own price and +)
+// straight down from the row; tapping it again folds it back up.
+function toggleDurations(btn){
+  const w=btn.closest('.panel-wrap'); if(!w) return;
+  const list=w.querySelector('.dur-list');
+  if(!list.childElementCount){
+    const cat=CATALOG.find(c=>c.id==='panel');
+    const p=cat&&cat.panel.find(x=>x.name===w.dataset.panelName); if(!p) return;
+    p.variants.forEach(v=>list.appendChild(makeRow({id:v.id,name:v.label,price:v.price,sub:''},false)));
+  }
+  const open=w.classList.toggle('open');
+  btn.textContent=open?'⏱ Durations ▴':'⏱ Durations ▾';
 }
-function closeDurations(){document.getElementById('durOverlay').classList.remove('on')}
 
 // The price shown on a catalog row. In the admin's coworker preview a ✏️
 // sits beside it to set a custom price for that coworker (see openCwPriceEdit).
