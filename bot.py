@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "32"
+MINI_APP_VERSION = "33"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -3501,6 +3501,8 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
             # coworkers, never regular customers.
             "cwid": coworker_login[0] if coworker_login else 0,
         }
+        if preview_coworker_id and coworker_login:
+            data["cwn"] = coworker_login[1]
         return f"{MINI_APP_URL}?v={MINI_APP_VERSION}{auth_params}&subs={_encode(data)}"
     except Exception:
         logger.exception("_shop_url: failed to encode subscription data for user %s", user_id)
@@ -10310,6 +10312,49 @@ def _effective_preview_coworker_id(request, user_id: int):
     return coworker_login[0] if coworker_login else None
 
 
+async def http_set_coworker_price(request):
+    """Lets the admin edit a coworker's price for one subscription from the
+    Shop preview (the ✏️ beside each price). Strictly the admin's own
+    verified identity — anyone else gets 403 even with a valid token of their
+    own — and only for the coworker the preview link was built for."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    if user_id != ADMIN_CHAT_ID:
+        return web.json_response({"ok": False, "error": "Admin only"}, status=403, headers=headers)
+    try:
+        coworker_id = int(request.query.get("previewcw", "0"))
+        data = await request.json()
+        item_id = data["item_id"]
+        price = data.get("price")
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    coworker = db_get_coworker(coworker_id) if coworker_id else None
+    if not coworker:
+        return web.json_response({"ok": False, "error": "That coworker no longer exists."}, status=404, headers=headers)
+    if not isinstance(item_id, str) or item_id not in MENU:
+        return web.json_response({"ok": False, "error": "Unknown subscription."}, status=400, headers=headers)
+    if price is not None:
+        if isinstance(price, bool) or not isinstance(price, (int, float)) or not math.isfinite(price) \
+                or price <= 0 or price > 10000:
+            return web.json_response({"ok": False, "error": "Enter a price above 0."}, status=400, headers=headers)
+        price = round(float(price), 2)
+    db_set_coworker_item_price(coworker_id, item_id, price)
+    default = round(MENU[item_id][1] * (1 - coworker[3] / 100), 2)
+    return web.json_response(
+        {"ok": True, "item_id": item_id, "custom": price is not None,
+         "price": price if price is not None else default, "default": default},
+        headers=headers,
+    )
+
+
+async def http_set_coworker_price_options(request):
+    from aiohttp import web
+    return web.Response(status=200, headers=_post_cors_headers())
+
+
 async def http_my_orders(request):
     """Every paid order unit for the authenticated customer — the data
     behind the Mini App's Orders tab list. An optional ?q= searches the
@@ -10606,6 +10651,8 @@ async def start_api_server(application):
     api_app.router.add_post("/api/create_order", http_create_order)
     api_app.router.add_post("/api/register_account", http_register_account)
     api_app.router.add_get("/api/sales_export", http_sales_export)
+    api_app.router.add_post("/api/set_coworker_price", http_set_coworker_price)
+    api_app.router.add_options("/api/set_coworker_price", http_set_coworker_price_options)
     api_app.router.add_post("/api/submit_order", http_submit_order)
     api_app.router.add_options("/api/submit_order", http_submit_order_options)
 
