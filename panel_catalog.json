@@ -101,18 +101,6 @@
    ]
   },
   {
-   "name": "Access APN (Advanced Practice Nursing)",
-   "variants": [
-    {
-     "id": "pn62",
-     "months": 12,
-     "label": "1 Year",
-     "panel_price": 10.0,
-     "price": 30.0
-    }
-   ]
-  },
-  {
    "name": "Access Cardiology",
    "variants": [
     {
@@ -478,18 +466,6 @@
    ]
   },
   {
-   "name": "Bates's Visual Guide (webproxy)",
-   "variants": [
-    {
-     "id": "pn296",
-     "months": 12,
-     "label": "1 Year",
-     "panel_price": 10.0,
-     "price": 30.0
-    }
-   ]
-  },
-  {
    "name": "BMJ Journals (WebProxy)",
    "variants": [
     {
@@ -626,13 +602,6 @@
    "name": "ClinicalKey Student (Direct)",
    "variants": [
     {
-     "id": "pn900",
-     "months": 6,
-     "label": "6 Months",
-     "panel_price": 10.0,
-     "price": 30.0
-    },
-    {
      "id": "pn821",
      "months": 12,
      "label": "1 Year",
@@ -644,13 +613,6 @@
   {
    "name": "ClinicalKey,Clinicalkey student",
    "variants": [
-    {
-     "id": "pn901",
-     "months": 6,
-     "label": "6 Months",
-     "panel_price": 15.0,
-     "price": 35.0
-    },
     {
      "id": "pn42",
      "months": 12,
@@ -987,18 +949,6 @@
    ]
   },
   {
-   "name": "Epocrates",
-   "variants": [
-    {
-     "id": "pn314",
-     "months": 12,
-     "label": "1 Year",
-     "panel_price": 20.0,
-     "price": 40.0
-    }
-   ]
-  },
-  {
    "name": "ESI - Essential Science Indicators +JCR",
    "variants": [
     {
@@ -1007,18 +957,6 @@
      "label": "1 Year",
      "panel_price": 7.5,
      "price": 27.5
-    }
-   ]
-  },
-  {
-   "name": "eTG complete-application",
-   "variants": [
-    {
-     "id": "pn302",
-     "months": 12,
-     "label": "1 Year",
-     "panel_price": 10.0,
-     "price": 30.0
     }
    ]
   },
@@ -1147,18 +1085,6 @@
    ]
   },
   {
-   "name": "Harvard Business Review Press (600 e-books)",
-   "variants": [
-    {
-     "id": "pn668",
-     "months": 3,
-     "label": "3 Months",
-     "panel_price": 4.0,
-     "price": 24.0
-    }
-   ]
-  },
-  {
    "name": "IEEE Journals (WebProxy)",
    "variants": [
     {
@@ -1240,18 +1166,6 @@
    ]
   },
   {
-   "name": "JAMA: The Journal of the American Medical",
-   "variants": [
-    {
-     "id": "pn152",
-     "months": 12,
-     "label": "1 Year",
-     "panel_price": 10.0,
-     "price": 30.0
-    }
-   ]
-  },
-  {
    "name": "JCR-Journal Citation Reports+ ESI",
    "variants": [
     {
@@ -1279,18 +1193,6 @@
      "label": "1 Year",
      "panel_price": 10.0,
      "price": 30.0
-    }
-   ]
-  },
-  {
-   "name": "Lecturio",
-   "variants": [
-    {
-     "id": "pn354",
-     "months": 12,
-     "label": "1 Year",
-     "panel_price": 35.0,
-     "price": 55.0
     }
    ]
   },
@@ -1909,42 +1811,6 @@
    ]
   },
   {
-   "name": "Osmosis - 05.20.2024",
-   "variants": [
-    {
-     "id": "pn620",
-     "months": 1,
-     "label": "1 Month",
-     "panel_price": 4.0,
-     "price": 24.0
-    }
-   ]
-  },
-  {
-   "name": "Osmosis - 30.12.2024",
-   "variants": [
-    {
-     "id": "pn355",
-     "months": 12,
-     "label": "1 Year",
-     "panel_price": 15.0,
-     "price": 35.0
-    }
-   ]
-  },
-  {
-   "name": "Osmosis - 30.12.2025",
-   "variants": [
-    {
-     "id": "pn855",
-     "months": 12,
-     "label": "1 Year",
-     "panel_price": 20.0,
-     "price": 40.0
-    }
-   ]
-  },
-  {
    "name": "OverDrive eBooks Account (164k)",
    "variants": [
     {
@@ -2545,13 +2411,6 @@
    "name": "Statista",
    "variants": [
     {
-     "id": "pn39",
-     "months": 2,
-     "label": "2 Months",
-     "panel_price": 15.0,
-     "price": 35.0
-    },
-    {
      "id": "pn21",
      "months": 6,
      "label": "6 Months",
@@ -2628,20 +2487,6 @@
      "label": "2 Months",
      "panel_price": 4.0,
      "price": 24.0
-    },
-    {
-     "id": "pn837",
-     "months": 6,
-     "label": "6 Months",
-     "panel_price": 7.5,
-     "price": 27.5
-    },
-    {
-     "id": "pn838",
-     "months": 12,
-     "label": "1 Year",
-     "panel_price": 15.0,
-     "price": 35.0
     }
    ]
   },
@@ -2668,18 +2513,6 @@
      "label": "1 Year",
      "panel_price": 15.0,
      "price": 35.0
-    }
-   ]
-  },
-  {
-   "name": "The Medical Letter App",
-   "variants": [
-    {
-     "id": "pn382",
-     "months": 12,
-     "label": "1 Year",
-     "panel_price": 10.0,
-     "price": 30.0
     }
    ]
   },
@@ -2724,18 +2557,6 @@
    "variants": [
     {
      "id": "pn328",
-     "months": 12,
-     "label": "1 Year",
-     "panel_price": 10.0,
-     "price": 30.0
-    }
-   ]
-  },
-  {
-   "name": "Usmle Easy",
-   "variants": [
-    {
-     "id": "pn319",
      "months": 12,
      "label": "1 Year",
      "panel_price": 10.0,
@@ -2888,8 +2709,6 @@
   ],
   "already_in_bot": {
    "Access Medicine": "accessmedicine",
-   "Amboss": "amboss_*",
-   "Amboss 30/12/2024": "amboss_*",
    "Best practice BMJ": "bmj_best_practice",
    "BoardVitals": "boardvitals",
    "BoardVitals VIP": "boardvitals",
@@ -2905,9 +2724,7 @@
    "Lexidrug App MAY/2027": "lexicomp",
    "Lexidrug App SEP/2027": "lexicomp",
    "Merative Micromedex (IBM) - webproxy+app": "micromedex",
-   "Merative Micromedex (IBM)-APPs": "micromedex",
    "NEJM": "nejm",
-   "Sanford Guide (APP)": "sanford_guide",
    "Sanford Guide (Webproxy)": "sanford_guide",
    "ScienceDirect (Type 1)": "sciencedirect_noai",
    "ScienceDirect (Type 2)+AI": "sciencedirect_ai",
@@ -2917,8 +2734,6 @@
    "StatDX (WebProxy)": "statdx",
    "VisualDx": "visualdx"
   },
-  "skipped": {
-   "Open": "two products share this name and each duration appears twice — unclear what it is"
-  }
+  "skipped": {}
  }
 }
