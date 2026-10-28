@@ -1068,6 +1068,10 @@ def db_init():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_imd_name ON imd_catalog(name)")
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE imd_catalog ADD COLUMN year INTEGER")  # newest-first search order
+    except sqlite3.OperationalError:
+        pass  # already there
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS tickets (
@@ -1259,6 +1263,7 @@ def db_init():
     conn.close()
 
     load_bundled_imd_catalog()
+    backfill_imd_years()
 
 
 def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, message_id: int = None) -> int:
@@ -7666,13 +7671,15 @@ def db_imd_search(query: str, limit: int = 10, offset: int = 0):
     1. Case-insensitive full-phrase match (LOWER LIKE)
     2. All-words match (every word must appear, case-insensitive)
     3. Any-word match (at least one word, for showing 'similars')
-    Results from earlier strategies always come first."""
+    Results from earlier strategies always come first. Within a strategy the newest come first
+    (by the year in the title); titles without a year follow, alphabetically."""
     conn = sqlite3.connect(DB_PATH)
     q = query.strip().lower()
 
     def run(where_clause, params):
         rows  = conn.execute(
-            f"SELECT name, category FROM imd_catalog WHERE {where_clause} ORDER BY name LIMIT ? OFFSET ?",
+            f"SELECT name, category FROM imd_catalog WHERE {where_clause} "
+            "ORDER BY year IS NULL, year DESC, name LIMIT ? OFFSET ?",
             params + [limit, offset],
         ).fetchall()
         count = conn.execute(
@@ -7705,17 +7712,42 @@ def db_imd_search(query: str, limit: int = 10, offset: int = 0):
     return rows, count
 
 
+_IMD_YEAR_RE = re.compile(r"(?<!\d)(19[89]\d|20[0-3]\d)(?!\d)")
+
+
+def imd_title_year(title: str):
+    """The latest year a resource title mentions ("Conn's Current Therapy 2015", "... 2010-2011"),
+    or None. The catalog has no dates of its own; this is what orders results newest first."""
+    years = [int(y) for y in _IMD_YEAR_RE.findall(title or "")]
+    return max(years) if years else None
+
+
 def db_imd_save_catalog(names: list):
     """Replaces the entire catalog with a fresh extraction."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM imd_catalog")
     now = datetime.utcnow().isoformat()
     conn.executemany(
-        "INSERT INTO imd_catalog (name, category, extracted_at) VALUES (?, ?, ?)",
-        [(name, category, now) for name, category in names],
+        "INSERT INTO imd_catalog (name, category, extracted_at, year) VALUES (?, ?, ?, ?)",
+        [(name, category, now, imd_title_year(name)) for name, category in names],
     )
     conn.commit()
     conn.close()
+
+
+def backfill_imd_years():
+    """Fills the year of catalog rows saved before the column existed (once)."""
+    if db_get_meta("imd_catalog_years_done") == "1":
+        return
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT id, name FROM imd_catalog").fetchall()
+    conn.executemany(
+        "UPDATE imd_catalog SET year = ? WHERE id = ?",
+        [(imd_title_year(name), rid) for rid, name in rows if imd_title_year(name)],
+    )
+    conn.commit()
+    conn.close()
+    db_set_meta("imd_catalog_years_done", "1")
 
 
 # iMD publishes its full resource list as a SQLite file (an FTS4 table
