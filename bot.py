@@ -1094,6 +1094,10 @@ def db_init():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_imd_name ON imd_catalog(name)")
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE imd_catalog ADD COLUMN year INTEGER")  # newest-first search order
+    except sqlite3.OperationalError:
+        pass  # already there
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS tickets (
@@ -1301,6 +1305,7 @@ def db_init():
     conn.close()
 
     load_bundled_imd_catalog()
+    backfill_imd_years()
 
 
 def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, message_id: int = None) -> int:
@@ -7778,13 +7783,15 @@ def db_imd_search(query: str, limit: int = 10, offset: int = 0):
     1. Case-insensitive full-phrase match (LOWER LIKE)
     2. All-words match (every word must appear, case-insensitive)
     3. Any-word match (at least one word, for showing 'similars')
-    Results from earlier strategies always come first."""
+    Results from earlier strategies always come first. Within a strategy the newest come first
+    (by the year in the title); titles without a year follow, alphabetically."""
     conn = sqlite3.connect(DB_PATH)
     q = query.strip().lower()
 
     def run(where_clause, params):
         rows  = conn.execute(
-            f"SELECT name, category FROM imd_catalog WHERE {where_clause} ORDER BY name LIMIT ? OFFSET ?",
+            f"SELECT name, category FROM imd_catalog WHERE {where_clause} "
+            "ORDER BY year IS NULL, year DESC, name LIMIT ? OFFSET ?",
             params + [limit, offset],
         ).fetchall()
         count = conn.execute(
@@ -7817,17 +7824,42 @@ def db_imd_search(query: str, limit: int = 10, offset: int = 0):
     return rows, count
 
 
+_IMD_YEAR_RE = re.compile(r"(?<!\d)(19[89]\d|20[0-3]\d)(?!\d)")
+
+
+def imd_title_year(title: str):
+    """The latest year a resource title mentions ("Conn's Current Therapy 2015", "... 2010-2011"),
+    or None. The catalog has no dates of its own; this is what orders results newest first."""
+    years = [int(y) for y in _IMD_YEAR_RE.findall(title or "")]
+    return max(years) if years else None
+
+
 def db_imd_save_catalog(names: list):
     """Replaces the entire catalog with a fresh extraction."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM imd_catalog")
     now = datetime.utcnow().isoformat()
     conn.executemany(
-        "INSERT INTO imd_catalog (name, category, extracted_at) VALUES (?, ?, ?)",
-        [(name, category, now) for name, category in names],
+        "INSERT INTO imd_catalog (name, category, extracted_at, year) VALUES (?, ?, ?, ?)",
+        [(name, category, now, imd_title_year(name)) for name, category in names],
     )
     conn.commit()
     conn.close()
+
+
+def backfill_imd_years():
+    """Fills the year of catalog rows saved before the column existed (once)."""
+    if db_get_meta("imd_catalog_years_done") == "1":
+        return
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT id, name FROM imd_catalog").fetchall()
+    conn.executemany(
+        "UPDATE imd_catalog SET year = ? WHERE id = ?",
+        [(imd_title_year(name), rid) for rid, name in rows if imd_title_year(name)],
+    )
+    conn.commit()
+    conn.close()
+    db_set_meta("imd_catalog_years_done", "1")
 
 
 # iMD publishes its full resource list as a SQLite file (an FTS4 table
@@ -7945,6 +7977,105 @@ def load_bundled_imd_catalog():
         logger.info("Loaded %d iMD resources from bundled catalog snapshot", len(catalog))
     except Exception:
         logger.exception("Failed to load bundled iMD catalog snapshot")
+
+
+IMD_DBS_URL = "https://imedicaldoctor.net/dbs.db"
+IMD_DBS_MAX_BYTES = 150 * 1024 * 1024
+IMD_SYNC_EVERY_DAYS = 6.5     # the daily check below syncs when the last good sync is older than this
+IMD_SYNC_MIN_KEEP = 0.5       # a new list smaller than this share of the current one is refused
+_imd_sync_lock = asyncio.Lock()
+
+
+async def _download_imd_dbs(dest: str):
+    """Plain download of iMD's published resource list. Raises if the answer isn't the SQLite
+    file (the site may answer with a bot-check page; that is not worked around, the admin is
+    told and can upload the file instead)."""
+    import aiohttp
+    timeout = aiohttp.ClientTimeout(total=300, connect=30)
+    async with aiohttp.ClientSession(headers={"User-Agent": "MedicAccountsBot/1.0"}, timeout=timeout) as http:
+        async with http.get(IMD_DBS_URL, allow_redirects=True) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"the site answered HTTP {resp.status}")
+            size = 0
+            with open(dest, "wb") as out:
+                async for chunk in resp.content.iter_chunked(1 << 20):
+                    size += len(chunk)
+                    if size > IMD_DBS_MAX_BYTES:
+                        raise RuntimeError("the file is much bigger than expected")
+                    out.write(chunk)
+    if not _is_sqlite_file(dest):
+        raise RuntimeError("the site answered with a web page instead of the file (probably its bot check)")
+
+
+async def sync_imd_catalog_from_link() -> tuple:
+    """Downloads iMD's dbs.db and rebuilds the catalog from it. Returns (ok, message, count).
+    The existing catalog is only replaced by a complete, plausible new list."""
+    import shutil
+    import tempfile
+    async with _imd_sync_lock:
+        workdir = tempfile.mkdtemp()
+        path = os.path.join(workdir, "dbs.db")
+        try:
+            try:
+                await _download_imd_dbs(path)
+            except Exception as exc:
+                logger.warning("iMD catalog sync: download failed: %s", exc)
+                return False, str(exc) or exc.__class__.__name__, 0
+            try:
+                catalog = await asyncio.to_thread(build_imd_catalog_from_dbs, path)
+            except (sqlite3.Error, ValueError) as exc:
+                return False, f"the downloaded file isn't a usable resource list ({exc})", 0
+            current = db_imd_catalog_count()
+            if current and len(catalog) < current * IMD_SYNC_MIN_KEEP:
+                return False, (
+                    f"the new list has only {len(catalog):,} resources against {current:,} now, "
+                    "so I kept the current one"
+                ), 0
+            db_imd_save_catalog(catalog)
+            db_set_meta("imd_catalog_synced_at", datetime.utcnow().isoformat(timespec="seconds"))
+            db_set_meta("imd_catalog_sync_source", "link")
+            logger.info("iMD catalog synced from %s: %d resources (was %d)", IMD_DBS_URL, len(catalog), current)
+            return True, f"{len(catalog):,} resources (was {current:,})", len(catalog)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
+async def imd_catalog_sync_job(context: ContextTypes.DEFAULT_TYPE):
+    """Daily check that keeps the iMD catalog fresh: syncs from the link when the last good sync
+    (from the link or an upload) is older than a week. A failure is retried the next day and the
+    admin is told once a week."""
+    last = db_get_meta("imd_catalog_synced_at")
+    if last:
+        try:
+            if datetime.utcnow() - datetime.fromisoformat(last) < timedelta(days=IMD_SYNC_EVERY_DAYS):
+                return
+        except ValueError:
+            pass
+    ok, message, _ = await sync_imd_catalog_from_link()
+    if ok:
+        db_set_meta("imd_catalog_fail_notified_at", "")
+        if ADMIN_CHAT_ID:
+            try:
+                await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"🔬 iMD catalog updated from the link: {message}.")
+            except Exception:
+                logger.exception("imd sync: couldn't notify the admin")
+        return
+    notified = db_get_meta("imd_catalog_fail_notified_at")
+    try:
+        recent = bool(notified) and datetime.utcnow() - datetime.fromisoformat(notified) < timedelta(days=7)
+    except ValueError:
+        recent = False
+    if ADMIN_CHAT_ID and not recent:
+        db_set_meta("imd_catalog_fail_notified_at", datetime.utcnow().isoformat(timespec="seconds"))
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"⚠️ The weekly iMD catalog update from imedicaldoctor.net failed: {message}.\n\n"
+                     "The current catalog stays in use and I'll try again tomorrow. You can also send me "
+                     "dbs.db as a zip (🔬 Update iMD Catalog).",
+            )
+        except Exception:
+            logger.exception("imd sync: couldn't notify the admin")
 
 
 def _is_sqlite_file(path: str) -> bool:
@@ -8432,11 +8563,17 @@ async def imd_catalog_extract_start(update: Update, context: ContextTypes.DEFAUL
     count = db_imd_catalog_count()
     msg = ""
     if count:
-        msg = f"Current catalog has {count:,} databases.\n\n"
+        synced = db_get_meta("imd_catalog_synced_at")
+        msg = (
+            f"Current catalog has {count:,} databases"
+            + (f", last updated {synced[:10]}" if synced else "")
+            + ".\nIt tries to update itself from imedicaldoctor.net once a week.\n\n"
+        )
     await update.message.reply_text(
         f"{msg}{IMD_DBS_UPLOAD_INSTRUCTIONS}\n\n"
-        "Or extract the list by logging into imdweb.org instead:",
+        "Or update it right now from the link, or extract the list by logging into imdweb.org:",
         reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌐 Update now from the link", callback_data="imdcat:fetch")],
             [InlineKeyboardButton("🔑 Extract via imdweb.org login", callback_data="imdcat:login")],
         ]),
     )
@@ -8514,6 +8651,8 @@ async def imd_dbs_file_received(update: Update, context: ContextTypes.DEFAULT_TY
             except sqlite3.Error:
                 raise ValueError("the database has no iMD resource list (no 'DBs' table)")
             db_imd_save_catalog(catalog)
+            db_set_meta("imd_catalog_synced_at", datetime.utcnow().isoformat(timespec="seconds"))
+            db_set_meta("imd_catalog_sync_source", "upload")
             return len(catalog)
 
         saved = await asyncio.to_thread(unpack)
@@ -8542,6 +8681,16 @@ async def imd_catalog_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer("Not authorized.", show_alert=True)
         return
     await query.answer()
+
+    if query.data == "imdcat:fetch":
+        await query.edit_message_text("🌐 Downloading iMD's resource list from imedicaldoctor.net… (up to a couple of minutes)")
+        ok, message, _ = await sync_imd_catalog_from_link()
+        await query.edit_message_text(
+            f"✅ iMD catalog updated: {message}." if ok
+            else f"❌ Couldn't update from the link: {message}.\n\nThe current catalog is unchanged. "
+                 "You can still send me dbs.db as a zip."
+        )
+        return
 
     if query.data == "imdcat:login":
         clear_admin_flow_state(context.user_data)
@@ -9227,6 +9376,31 @@ async def http_imd_search(request):
         },
         headers=_imd_search_cors_headers(),
     )
+
+
+async def http_imd_resources(request):
+    """Is this resource in iMD? The support chatbot's lookup in the same catalog the Mini App's
+    "What does iMD include?" search uses. ?q= (2+ characters); returns up to 15 matches.
+    X-Api-Key protected."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    query = (request.query.get("q") or "").strip()
+    if len(query) < 2:
+        return web.json_response({"error": "q must be at least 2 characters"}, status=400)
+    rows, total = db_imd_search(query, limit=15)
+    words = [w for w in query.lower().split() if len(w) > 1]
+    exact = bool(rows) and (
+        query.lower() in rows[0][0].lower() or all(w in rows[0][0].lower() for w in words)
+    )
+    return web.json_response({
+        "query": query,
+        "total": total,
+        "exact_match": exact,
+        "results": [{"name": name, "category": category} for name, category in rows],
+        "catalog_count": db_imd_catalog_count(),
+        "updated_at": db_get_meta("imd_catalog_synced_at"),
+    })
 
 
 async def http_imd_search_options(request):
@@ -10715,6 +10889,7 @@ async def start_api_server(application):
     # the approval flow).
     api_app["application"] = application
     api_app.router.add_get("/api/imd_search", http_imd_search)
+    api_app.router.add_get("/api/imd_resources", http_imd_resources)
     api_app.router.add_options("/api/imd_search", http_imd_search_options)
     api_app.router.add_get("/api/my_orders", http_my_orders)
     api_app.router.add_options("/api/my_orders", http_imd_search_options)
@@ -16553,6 +16728,12 @@ def main():
             nightly_backup_job,
             time=dt_time(hour=backup_hour_utc, minute=0),
             name="nightly_db_backup",
+        )
+        # iMD resource list: checked daily, synced from imedicaldoctor.net when a week old.
+        app.job_queue.run_daily(
+            imd_catalog_sync_job,
+            time=dt_time(hour=3, minute=30),
+            name="imd_catalog_sync",
         )
         # Daily sales Excel to the admin 5 minutes after local midnight.
         app.job_queue.run_daily(
