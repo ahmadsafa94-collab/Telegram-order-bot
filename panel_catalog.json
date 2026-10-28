@@ -1,0 +1,2924 @@
+{
+ "markup": 20.0,
+ "source": "supplier panel Products list",
+ "products": [
+  {
+   "name": "5MinuteConsult",
+   "variants": [
+    {
+     "id": "pn275",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 8.0,
+     "price": 28.0
+    }
+   ]
+  },
+  {
+   "name": "AAP Pediatric Care",
+   "variants": [
+    {
+     "id": "pn340",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "AAP- 5 journals All",
+   "variants": [
+    {
+     "id": "pn608",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "AAP-Pediatrics + Pediatrics In Review",
+   "variants": [
+    {
+     "id": "pn813",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 7.5,
+     "price": 27.5
+    }
+   ]
+  },
+  {
+   "name": "Academic Search Ultimate ( Ebscohost )",
+   "variants": [
+    {
+     "id": "pn157",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn156",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn155",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Access All Products",
+   "variants": [
+    {
+     "id": "pn384",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 100.0,
+     "price": 120.0
+    }
+   ]
+  },
+  {
+   "name": "Access Anesthesiology",
+   "variants": [
+    {
+     "id": "pn59",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Access APN (Advanced Practice Nursing)",
+   "variants": [
+    {
+     "id": "pn62",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Access Cardiology",
+   "variants": [
+    {
+     "id": "pn65",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Access DermatologyDxRx",
+   "variants": [
+    {
+     "id": "pn68",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Access Emergency Medicine",
+   "variants": [
+    {
+     "id": "pn71",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Access Hematology Oncology",
+   "variants": [
+    {
+     "id": "pn74",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Access Medicina",
+   "variants": [
+    {
+     "id": "pn77",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 7.5,
+     "price": 27.5
+    }
+   ]
+  },
+  {
+   "name": "Access Neurology",
+   "variants": [
+    {
+     "id": "pn83",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Access ObGyn",
+   "variants": [
+    {
+     "id": "pn86",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Access Pediatrics",
+   "variants": [
+    {
+     "id": "pn89",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Access Pharmacy",
+   "variants": [
+    {
+     "id": "pn92",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Access Physiotherapy",
+   "variants": [
+    {
+     "id": "pn95",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Access Surgery",
+   "variants": [
+    {
+     "id": "pn98",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "AccessWorldmed",
+   "variants": [
+    {
+     "id": "pn864",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Acland’s Video Atlas of Human Anatomy",
+   "variants": [
+    {
+     "id": "pn287",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 7.5,
+     "price": 27.5
+    }
+   ]
+  },
+  {
+   "name": "ALtmetrics",
+   "variants": [
+    {
+     "id": "pn626",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "American Association for Cancer Research - AACR Journals",
+   "variants": [
+    {
+     "id": "pn848",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "American Diabetes Association FULL JOURNALS Journals",
+   "variants": [
+    {
+     "id": "pn884",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "APA PsycArticles ( Ebscohost )",
+   "variants": [
+    {
+     "id": "pn160",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn159",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn158",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "APA PsycBooks ( Ebscohost )",
+   "variants": [
+    {
+     "id": "pn163",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn162",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn161",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "APA PsycExtra ( Ebscohost )",
+   "variants": [
+    {
+     "id": "pn370",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn834",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "APA PsycInfo ( Ebscohost )",
+   "variants": [
+    {
+     "id": "pn166",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn165",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn164",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "APA PsycTests ( Ebscohost )",
+   "variants": [
+    {
+     "id": "pn169",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn168",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn167",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "APA PsycTherapy ( Ebscohost )",
+   "variants": [
+    {
+     "id": "pn172",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn854",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn833",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "ASME Digital Collection",
+   "variants": [
+    {
+     "id": "pn829",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "ASTM Standards",
+   "variants": [
+    {
+     "id": "pn827",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 35.0,
+     "price": 55.0
+    }
+   ]
+  },
+  {
+   "name": "Bates's Visual Guide (webproxy)",
+   "variants": [
+    {
+     "id": "pn296",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "BMJ Journals (WebProxy)",
+   "variants": [
+    {
+     "id": "pn180",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn183",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 25.0,
+     "price": 45.0
+    }
+   ]
+  },
+  {
+   "name": "Business Source Ultimate ( VIA Ebscohost )",
+   "variants": [
+    {
+     "id": "pn175",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn174",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn173",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Case Files Collection-Access",
+   "variants": [
+    {
+     "id": "pn101",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "CINAHL (Ebscohost)",
+   "variants": [
+    {
+     "id": "pn178",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn176",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "CINAHL Ultimate (Ebscohost)",
+   "variants": [
+    {
+     "id": "pn184",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 6.0,
+     "price": 26.0
+    },
+    {
+     "id": "pn182",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Clinical pharmacology (WebProxy)",
+   "variants": [
+    {
+     "id": "pn677",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn678",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 7.5,
+     "price": 27.5
+    }
+   ]
+  },
+  {
+   "name": "ClinicalKey Nursing (WebProxy)",
+   "variants": [
+    {
+     "id": "pn680",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn679",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 7.5,
+     "price": 27.5
+    }
+   ]
+  },
+  {
+   "name": "ClinicalKey Student (Direct)",
+   "variants": [
+    {
+     "id": "pn900",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn821",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "ClinicalKey,Clinicalkey student",
+   "variants": [
+    {
+     "id": "pn901",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 15.0,
+     "price": 35.0
+    },
+    {
+     "id": "pn42",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Cochrane Library",
+   "variants": [
+    {
+     "id": "pn321",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "combo products of therapeuticresearch.com",
+   "variants": [
+    {
+     "id": "pn366",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Complete Anatomy",
+   "variants": [
+    {
+     "id": "pn832",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Dental Update",
+   "variants": [
+    {
+     "id": "pn203",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 7.5,
+     "price": 27.5
+    }
+   ]
+  },
+  {
+   "name": "Dentistry & Oral Sciences (ebscohost)",
+   "variants": [
+    {
+     "id": "pn193",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn192",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn191",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "DerWent (Patent)-Web Of Science",
+   "variants": [
+    {
+     "id": "pn57",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Dynamed+ Dynamed Decision",
+   "variants": [
+    {
+     "id": "pn650",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn651",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Dynamedex+DynaAI",
+   "variants": [
+    {
+     "id": "pn690",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "Dynamic Health",
+   "variants": [
+    {
+     "id": "pn811",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn812",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "eBook EBSCOhost (400K)",
+   "variants": [
+    {
+     "id": "pn334",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn195",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 15.0,
+     "price": 35.0
+    },
+    {
+     "id": "pn333",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "eBook EBSCOhost (462K)",
+   "variants": [
+    {
+     "id": "pn336",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn198",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 15.0,
+     "price": 35.0
+    },
+    {
+     "id": "pn335",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "eBook EBSCOhost (600K)",
+   "variants": [
+    {
+     "id": "pn338",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn201",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 15.0,
+     "price": 35.0
+    },
+    {
+     "id": "pn337",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 25.0,
+     "price": 45.0
+    }
+   ]
+  },
+  {
+   "name": "EBSCO eBooks Business (23,000 e-books)",
+   "variants": [
+    {
+     "id": "pn815",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 25.0,
+     "price": 45.0
+    }
+   ]
+  },
+  {
+   "name": "EBSCO eBooks Community College (62,000 e-books)",
+   "variants": [
+    {
+     "id": "pn669",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 7.5,
+     "price": 27.5
+    }
+   ]
+  },
+  {
+   "name": "EBSCO eBooks University Press(37,000 e-books)",
+   "variants": [
+    {
+     "id": "pn817",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 25.0,
+     "price": 45.0
+    }
+   ]
+  },
+  {
+   "name": "Education Source Ultimate( Ebscohost )",
+   "variants": [
+    {
+     "id": "pn641",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 6.0,
+     "price": 26.0
+    },
+    {
+     "id": "pn640",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 16.0,
+     "price": 36.0
+    },
+    {
+     "id": "pn639",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Embase,ClinicalKey,Sciencedirect",
+   "variants": [
+    {
+     "id": "pn40",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "Emerald Journals",
+   "variants": [
+    {
+     "id": "pn867",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 7.5,
+     "price": 27.5
+    },
+    {
+     "id": "pn870",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 12.5,
+     "price": 32.5
+    }
+   ]
+  },
+  {
+   "name": "Engineeringvilage (Compendex)",
+   "variants": [
+    {
+     "id": "pn47",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn46",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Epocrates",
+   "variants": [
+    {
+     "id": "pn314",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "ESI - Essential Science Indicators +JCR",
+   "variants": [
+    {
+     "id": "pn55",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 7.5,
+     "price": 27.5
+    }
+   ]
+  },
+  {
+   "name": "eTG complete-application",
+   "variants": [
+    {
+     "id": "pn302",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "ETG Therapeutic Guidelines (WebProxy)",
+   "variants": [
+    {
+     "id": "pn224",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "European Journal of Prosthodontics and Restorative Dentistry",
+   "variants": [
+    {
+     "id": "pn190",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 6.0,
+     "price": 26.0
+    },
+    {
+     "id": "pn188",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "ExamMaster",
+   "variants": [
+    {
+     "id": "pn831",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Expert path (WebProxy)",
+   "variants": [
+    {
+     "id": "pn18",
+     "months": 1,
+     "label": "1 Month",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn17",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn16",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "F.A. Davis AT Collection-Access",
+   "variants": [
+    {
+     "id": "pn107",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "France-Clinicalkey Student (EMC Consult) webproxy",
+   "variants": [
+    {
+     "id": "pn803",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 15.0,
+     "price": 35.0
+    },
+    {
+     "id": "pn802",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 25.0,
+     "price": 45.0
+    }
+   ]
+  },
+  {
+   "name": "Grammarly Pro",
+   "variants": [
+    {
+     "id": "pn367",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Grammarly Pro + AI",
+   "variants": [
+    {
+     "id": "pn826",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "Harvard Business Review Press (600 e-books)",
+   "variants": [
+    {
+     "id": "pn668",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    }
+   ]
+  },
+  {
+   "name": "IEEE Journals (WebProxy)",
+   "variants": [
+    {
+     "id": "pn871",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn872",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "IGI Global (Ebooks & Journals)",
+   "variants": [
+    {
+     "id": "pn19",
+     "months": 2,
+     "label": "2 Months",
+     "panel_price": 25.0,
+     "price": 45.0
+    },
+    {
+     "id": "pn20",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 75.0,
+     "price": 95.0
+    }
+   ]
+  },
+  {
+   "name": "IGI Global (Journals)",
+   "variants": [
+    {
+     "id": "pn37",
+     "months": 2,
+     "label": "2 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn38",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 25.0,
+     "price": 45.0
+    }
+   ]
+  },
+  {
+   "name": "InCites-Clarivate Analytics",
+   "variants": [
+    {
+     "id": "pn56",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "JAMA All Journals",
+   "variants": [
+    {
+     "id": "pn404",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "JAMA: The Journal of the American Medical",
+   "variants": [
+    {
+     "id": "pn152",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "JCR-Journal Citation Reports+ ESI",
+   "variants": [
+    {
+     "id": "pn408",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 7.5,
+     "price": 27.5
+    }
+   ]
+  },
+  {
+   "name": "Journal of Neurosurgery",
+   "variants": [
+    {
+     "id": "pn648",
+     "months": 1,
+     "label": "1 Month",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn649",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lecturio",
+   "variants": [
+    {
+     "id": "pn354",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 35.0,
+     "price": 55.0
+    }
+   ]
+  },
+  {
+   "name": "Library & Information Science Source ( Ebscohost )",
+   "variants": [
+    {
+     "id": "pn211",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn210",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn209",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Library, Information Science & Technology Fulltext (LISTA)",
+   "variants": [
+    {
+     "id": "pn214",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn213",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn212",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Advanced Practice Nursing",
+   "variants": [
+    {
+     "id": "pn393",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Anesthesiology",
+   "variants": [
+    {
+     "id": "pn407",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Board Review Series",
+   "variants": [
+    {
+     "id": "pn251",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Clerkship",
+   "variants": [
+    {
+     "id": "pn272",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Emergency Medicine",
+   "variants": [
+    {
+     "id": "pn400",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Exercise Science",
+   "variants": [
+    {
+     "id": "pn254",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Internal Medicine",
+   "variants": [
+    {
+     "id": "pn263",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary International Anatomical Sciences",
+   "variants": [
+    {
+     "id": "pn394",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary International Premium Basic Sciences",
+   "variants": [
+    {
+     "id": "pn395",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Lippincott Advisor",
+   "variants": [
+    {
+     "id": "pn410",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Made Incredibly Easy!",
+   "variants": [
+    {
+     "id": "pn248",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Neurology",
+   "variants": [
+    {
+     "id": "pn245",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary ObGyn",
+   "variants": [
+    {
+     "id": "pn396",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Occupational Therapy",
+   "variants": [
+    {
+     "id": "pn398",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Oncology",
+   "variants": [
+    {
+     "id": "pn399",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Ophthalmology",
+   "variants": [
+    {
+     "id": "pn257",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Orthopaedic Surgery",
+   "variants": [
+    {
+     "id": "pn628",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Osteopathic Medicine",
+   "variants": [
+    {
+     "id": "pn269",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Pathology",
+   "variants": [
+    {
+     "id": "pn236",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Physical Therapy",
+   "variants": [
+    {
+     "id": "pn239",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Premium Pharmacy",
+   "variants": [
+    {
+     "id": "pn260",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Psychiatry",
+   "variants": [
+    {
+     "id": "pn638",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Lwwhealthlibrary Surgery",
+   "variants": [
+    {
+     "id": "pn397",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Mathscinet ( Ebscohost )",
+   "variants": [
+    {
+     "id": "pn217",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn216",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn215",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "MEDLINE ( Ebscohost )",
+   "variants": [
+    {
+     "id": "pn220",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn221",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn218",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 7.5,
+     "price": 27.5
+    }
+   ]
+  },
+  {
+   "name": "MEDLINE Ultimate (Ebscohost)",
+   "variants": [
+    {
+     "id": "pn219",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn223",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn222",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "MedOne ComSci",
+   "variants": [
+    {
+     "id": "pn610",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "MedOne Education",
+   "variants": [
+    {
+     "id": "pn318",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Medone Education+Neurosurgery+Plastic Surgery+Otolaryngology",
+   "variants": [
+    {
+     "id": "pn627",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "MedOne Neurosurgery",
+   "variants": [
+    {
+     "id": "pn327",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Medone Neurosurgery+Plastic Surgery",
+   "variants": [
+    {
+     "id": "pn612",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Medone Neurosurgery+Plastic Surgery+Otolaryngology",
+   "variants": [
+    {
+     "id": "pn614",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Medone Neurosurgery+Plastic Surgery+Radiology",
+   "variants": [
+    {
+     "id": "pn613",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "MedOne Ophthalmology",
+   "variants": [
+    {
+     "id": "pn372",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "MedOne Plastic Surgery",
+   "variants": [
+    {
+     "id": "pn353",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "MedOne Radiology",
+   "variants": [
+    {
+     "id": "pn326",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Natural Medicines -NatMed Pro",
+   "variants": [
+    {
+     "id": "pn317",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Nature Journals (webproxy)",
+   "variants": [
+    {
+     "id": "pn204",
+     "months": 1,
+     "label": "1 Month",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn205",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 7.5,
+     "price": 27.5
+    },
+    {
+     "id": "pn206",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 25.0,
+     "price": 45.0
+    }
+   ]
+  },
+  {
+   "name": "Nursing Reference Center Plus (Ebscohost)",
+   "variants": [
+    {
+     "id": "pn722",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn723",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 7.5,
+     "price": 27.5
+    },
+    {
+     "id": "pn724",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "OMMBID",
+   "variants": [
+    {
+     "id": "pn116",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "OnePetro",
+   "variants": [
+    {
+     "id": "pn830",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 25.0,
+     "price": 45.0
+    }
+   ]
+  },
+  {
+   "name": "Osmosis - 05.20.2024",
+   "variants": [
+    {
+     "id": "pn620",
+     "months": 1,
+     "label": "1 Month",
+     "panel_price": 4.0,
+     "price": 24.0
+    }
+   ]
+  },
+  {
+   "name": "Osmosis - 30.12.2024",
+   "variants": [
+    {
+     "id": "pn355",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Osmosis - 30.12.2025",
+   "variants": [
+    {
+     "id": "pn855",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "OverDrive eBooks Account (164k)",
+   "variants": [
+    {
+     "id": "pn325",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "OverDrive eBooks Account (266k)",
+   "variants": [
+    {
+     "id": "pn330",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 12.5,
+     "price": 32.5
+    }
+   ]
+  },
+  {
+   "name": "OverDrive eBooks Account (276k)",
+   "variants": [
+    {
+     "id": "pn329",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 12.5,
+     "price": 32.5
+    }
+   ]
+  },
+  {
+   "name": "OverDrive eBooks Account (300k)",
+   "variants": [
+    {
+     "id": "pn331",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "OverDrive eBooks Account (434k)",
+   "variants": [
+    {
+     "id": "pn332",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "Ovid Journals Type 1 (Webproxy)",
+   "variants": [
+    {
+     "id": "pn693",
+     "months": 1,
+     "label": "1 Month",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn694",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn695",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Ovid Journals Type 2 (Webproxy)",
+   "variants": [
+    {
+     "id": "pn696",
+     "months": 1,
+     "label": "1 Month",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn697",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 15.0,
+     "price": 35.0
+    },
+    {
+     "id": "pn698",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 25.0,
+     "price": 45.0
+    }
+   ]
+  },
+  {
+   "name": "Ovid Journals Type 3 (Webproxy)",
+   "variants": [
+    {
+     "id": "pn701",
+     "months": 1,
+     "label": "1 Month",
+     "panel_price": 15.0,
+     "price": 35.0
+    },
+    {
+     "id": "pn700",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 30.0,
+     "price": 50.0
+    },
+    {
+     "id": "pn699",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 40.0,
+     "price": 60.0
+    }
+   ]
+  },
+  {
+   "name": "Oxford Journals (WebProxy)",
+   "variants": [
+    {
+     "id": "pn189",
+     "months": 2,
+     "label": "2 Months",
+     "panel_price": 7.5,
+     "price": 27.5
+    },
+    {
+     "id": "pn881",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 15.0,
+     "price": 35.0
+    },
+    {
+     "id": "pn882",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 25.0,
+     "price": 45.0
+    }
+   ]
+  },
+  {
+   "name": "Oxford Journals and ebooks (WebProxy)",
+   "variants": [
+    {
+     "id": "pn177",
+     "months": 2,
+     "label": "2 Months",
+     "panel_price": 15.0,
+     "price": 35.0
+    },
+    {
+     "id": "pn880",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 50.0,
+     "price": 70.0
+    }
+   ]
+  },
+  {
+   "name": "Pediatric Patient Education",
+   "variants": [
+    {
+     "id": "pn364",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Pediatric Surgery Library",
+   "variants": [
+    {
+     "id": "pn371",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 7.5,
+     "price": 27.5
+    }
+   ]
+  },
+  {
+   "name": "PEP - Psychoanalytic Electronic Publishing",
+   "variants": [
+    {
+     "id": "pn721",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 12.5,
+     "price": 32.5
+    }
+   ]
+  },
+  {
+   "name": "pepid (WebProxy)",
+   "variants": [
+    {
+     "id": "pn660",
+     "months": 1,
+     "label": "1 Month",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn661",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 6.0,
+     "price": 26.0
+    },
+    {
+     "id": "pn662",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 12.5,
+     "price": 32.5
+    }
+   ]
+  },
+  {
+   "name": "Pharmacotherapy Principles & Practice-Access",
+   "variants": [
+    {
+     "id": "pn119",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "ProQuest Central (WebProxy)",
+   "variants": [
+    {
+     "id": "pn181",
+     "months": 1,
+     "label": "1 Month",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn187",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 6.0,
+     "price": 26.0
+    },
+    {
+     "id": "pn185",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 12.5,
+     "price": 32.5
+    }
+   ]
+  },
+  {
+   "name": "ProQuest Dissertations and Theses (WebProxy)",
+   "variants": [
+    {
+     "id": "pn665",
+     "months": 1,
+     "label": "1 Month",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn663",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 6.0,
+     "price": 26.0
+    },
+    {
+     "id": "pn664",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 12.5,
+     "price": 32.5
+    }
+   ]
+  },
+  {
+   "name": "Reaxys",
+   "variants": [
+    {
+     "id": "pn49",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn48",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 12.5,
+     "price": 32.5
+    }
+   ]
+  },
+  {
+   "name": "Red Book 2024–2027 (AAP)",
+   "variants": [
+    {
+     "id": "pn342",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Rehabilitation & Sports Medicine (ebscohost)",
+   "variants": [
+    {
+     "id": "pn229",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn228",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn227",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Rockefeller University Press",
+   "variants": [
+    {
+     "id": "pn676",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 12.5,
+     "price": 32.5
+    }
+   ]
+  },
+  {
+   "name": "Sage Journals",
+   "variants": [
+    {
+     "id": "pn866",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 15.0,
+     "price": 35.0
+    },
+    {
+     "id": "pn862",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "ScienceDirect (Type 3)",
+   "variants": [
+    {
+     "id": "pn633",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "Sciencedirect,scival,ClinicalKey",
+   "variants": [
+    {
+     "id": "pn51",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn50",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Sciencedirect,Scopus,Embase,ClinicalKey,Reaxys,EngVillage",
+   "variants": [
+    {
+     "id": "pn41",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 30.0,
+     "price": 50.0
+    }
+   ]
+  },
+  {
+   "name": "Sciencedirect,Scopus,Embase,Scival,Reaxys,EngVillage",
+   "variants": [
+    {
+     "id": "pn45",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 12.5,
+     "price": 32.5
+    },
+    {
+     "id": "pn44",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "Scopus AI",
+   "variants": [
+    {
+     "id": "pn879",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 15.0,
+     "price": 35.0
+    },
+    {
+     "id": "pn878",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "SPANISH-Clinicalkey Student",
+   "variants": [
+    {
+     "id": "pn801",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "SPANISH-Clinicalkey.es + Clinicalkey Student",
+   "variants": [
+    {
+     "id": "pn356",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "SPANISH-Lwwhealthlibrary Ciencias Básicas",
+   "variants": [
+    {
+     "id": "pn363",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "SPORTDiscus with Full Text ( Ebscohost )",
+   "variants": [
+    {
+     "id": "pn235",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn234",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    },
+    {
+     "id": "pn233",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Springer Journals+ebooks",
+   "variants": [
+    {
+     "id": "pn34",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn208",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 40.0,
+     "price": 60.0
+    }
+   ]
+  },
+  {
+   "name": "Statdx,ClinicalKey,Sciencedirect,Scopus,scival",
+   "variants": [
+    {
+     "id": "pn53",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn52",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Statdx,Expertpath,Immunoquery,ClinicalKey,Sciencedirect,Scopus,Scival",
+   "variants": [
+    {
+     "id": "pn684",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 15.0,
+     "price": 35.0
+    },
+    {
+     "id": "pn409",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 25.0,
+     "price": 45.0
+    }
+   ]
+  },
+  {
+   "name": "Statista",
+   "variants": [
+    {
+     "id": "pn39",
+     "months": 2,
+     "label": "2 Months",
+     "panel_price": 15.0,
+     "price": 35.0
+    },
+    {
+     "id": "pn21",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 25.0,
+     "price": 45.0
+    },
+    {
+     "id": "pn179",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 45.0,
+     "price": 65.0
+    }
+   ]
+  },
+  {
+   "name": "StatRef-Type 1",
+   "variants": [
+    {
+     "id": "pn313",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn312",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 6.0,
+     "price": 26.0
+    },
+    {
+     "id": "pn311",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "StatRef-Type 2",
+   "variants": [
+    {
+     "id": "pn645",
+     "months": 3,
+     "label": "3 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn647",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 7.5,
+     "price": 27.5
+    },
+    {
+     "id": "pn646",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "TandF ejournals (Taylor & Francis) webproxy",
+   "variants": [
+    {
+     "id": "pn836",
+     "months": 2,
+     "label": "2 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn837",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 7.5,
+     "price": 27.5
+    },
+    {
+     "id": "pn838",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "TandF ejournals (webproxy)",
+   "variants": [
+    {
+     "id": "pn904",
+     "months": 2,
+     "label": "2 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn903",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 7.5,
+     "price": 27.5
+    },
+    {
+     "id": "pn902",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "The Medical Letter App",
+   "variants": [
+    {
+     "id": "pn382",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Total Patents",
+   "variants": [
+    {
+     "id": "pn58",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Turnitin- Dec 2025",
+   "variants": [
+    {
+     "id": "pn266",
+     "months": 2,
+     "label": "2 Months",
+     "panel_price": 5.0,
+     "price": 25.0
+    }
+   ]
+  },
+  {
+   "name": "Turnitin- DEC 2026",
+   "variants": [
+    {
+     "id": "pn232",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Ucentral",
+   "variants": [
+    {
+     "id": "pn328",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "Usmle Easy",
+   "variants": [
+    {
+     "id": "pn319",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "uWISE (APGO )",
+   "variants": [
+    {
+     "id": "pn352",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "VisualDx+AI",
+   "variants": [
+    {
+     "id": "pn373",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "Wiley eBooks",
+   "variants": [
+    {
+     "id": "pn666",
+     "months": 2,
+     "label": "2 Months",
+     "panel_price": 10.0,
+     "price": 30.0
+    },
+    {
+     "id": "pn823",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 30.0,
+     "price": 50.0
+    }
+   ]
+  },
+  {
+   "name": "Wiley ejournals",
+   "variants": [
+    {
+     "id": "pn30",
+     "months": 2,
+     "label": "2 Months",
+     "panel_price": 4.0,
+     "price": 24.0
+    },
+    {
+     "id": "pn29",
+     "months": 6,
+     "label": "6 Months",
+     "panel_price": 7.5,
+     "price": 27.5
+    },
+    {
+     "id": "pn28",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  },
+  {
+   "name": "WOS (Full databases)",
+   "variants": [
+    {
+     "id": "pn54",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 10.0,
+     "price": 30.0
+    }
+   ]
+  },
+  {
+   "name": "WOS (Full databases)+AI",
+   "variants": [
+    {
+     "id": "pn689",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "WOS (Full databases)+ESI+JCR+Incites",
+   "variants": [
+    {
+     "id": "pn411",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 20.0,
+     "price": 40.0
+    }
+   ]
+  },
+  {
+   "name": "WOS (Full databases)+ESI+JCR+Incites+AI",
+   "variants": [
+    {
+     "id": "pn374",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 25.0,
+     "price": 45.0
+    }
+   ]
+  },
+  {
+   "name": "WOS (partial databases)+AI",
+   "variants": [
+    {
+     "id": "pn674",
+     "months": 12,
+     "label": "1 Year",
+     "panel_price": 15.0,
+     "price": 35.0
+    }
+   ]
+  }
+ ],
+ "excluded": {
+  "uptodate": [
+   "Uptodate",
+   "UpToDate (webProxy)",
+   "Uptodate + AI Expert",
+   "UpToDate Advanced",
+   "UpToDate Advanced (webproxy)",
+   "UpToDate Advanced+ AI Expert",
+   "UpToDate Offline",
+   "UpToDate Offline+ AI Expert",
+   "UpToDate VIP (Offline+Advanced)",
+   "UpToDate VIP+ AI Expert"
+  ],
+  "already_in_bot": {
+   "Access Medicine": "accessmedicine",
+   "Amboss": "amboss_*",
+   "Amboss 30/12/2024": "amboss_*",
+   "Best practice BMJ": "bmj_best_practice",
+   "BoardVitals": "boardvitals",
+   "BoardVitals VIP": "boardvitals",
+   "ClinicalKey (Direct)": "clinicalkey",
+   "ClinicalKey (WebProxy)": "clinicalkey",
+   "Dynamed": "dynamed",
+   "DynaMedEX": "dynamedex",
+   "Embase": "embase",
+   "JAMAevidence -Mhmedical": "jama_evidence",
+   "Learning BMJ": "bmj_learning",
+   "Lexidrug (webproxy)": "lexicomp",
+   "Lexidrug App DEC/2026": "lexicomp",
+   "Lexidrug App MAY/2027": "lexicomp",
+   "Lexidrug App SEP/2027": "lexicomp",
+   "Merative Micromedex (IBM) - webproxy+app": "micromedex",
+   "Merative Micromedex (IBM)-APPs": "micromedex",
+   "NEJM": "nejm",
+   "Sanford Guide (APP)": "sanford_guide",
+   "Sanford Guide (Webproxy)": "sanford_guide",
+   "ScienceDirect (Type 1)": "sciencedirect_noai",
+   "ScienceDirect (Type 2)+AI": "sciencedirect_ai",
+   "Scopus": "scopus",
+   "Springer Journals": "springerlink_journals",
+   "Springer Journals (WebProxy)": "springerlink_journals",
+   "StatDX (WebProxy)": "statdx",
+   "VisualDx": "visualdx"
+  },
+  "skipped": {
+   "Open": "two products share this name and each duration appears twice — unclear what it is"
+  }
+ }
+}

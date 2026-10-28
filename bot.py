@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "33"
+MINI_APP_VERSION = "37"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -259,6 +259,32 @@ SINGLE_MAIN_ITEMS = [
     "statdx", "nejm", "jama_evidence", "scopus", "springerlink", "springerlink_journals",
     "sanford_guide", "embase", "micromedex",
 ]
+
+# Extra subscriptions imported from the supplier panel (panel_catalog.json,
+# built by tools/panel_catalog.py and mirrored into index.html). They live
+# in MENU only — deliberately NOT in SINGLE_MAIN_ITEMS / all_toggleable_items:
+# those feed one-button-per-item admin keyboards that Telegram cannot send
+# with 280 more buttons. Their price is edited from the Shop itself.
+PANEL_ITEM_IDS = set()
+PANEL_CATALOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel_catalog.json")
+
+
+def _load_panel_catalog():
+    try:
+        with open(PANEL_CATALOG_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    for product in data.get("products", []):
+        for v in product.get("variants", []):
+            MENU[v["id"]] = (f"{product['name']} - {v['label']}", float(v["price"]))
+            PANEL_ITEM_IDS.add(v["id"])
+
+
+_load_panel_catalog()
+# Every item's price before any admin edit, so a price edited from the Shop
+# can be put back. Custom (admin-added) items are added in main().
+BASE_PRICES = {item_id: price for item_id, (_, price) in MENU.items()}
 
 # Admin edits from 📦 Manage Stock → Edit, layered on top of MENU at
 # startup (see main()). {item_id: (name_or_None, price_or_None,
@@ -2351,6 +2377,30 @@ def db_set_item_override(item_id: str, name: str = None, price: float = None, du
     conn.close()
 
 
+def db_clear_item_price(item_id: str):
+    """Drops just the price edit for an item (name/duration edits stay)."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE item_overrides SET price = NULL WHERE item_id = ?", (item_id,))
+    conn.commit()
+    conn.close()
+
+
+def apply_item_price(item_id: str, price):
+    """Sets (or with price=None, restores the original of) an item's price
+    for good: stored in item_overrides, and applied to MENU right away so the
+    very next checkout charges it."""
+    name, current = MENU[item_id]
+    ov = ITEM_OVERRIDES.get(item_id, (None, None, None, False))
+    if price is None:
+        db_clear_item_price(item_id)
+        ITEM_OVERRIDES[item_id] = (ov[0], None, ov[2], ov[3])
+        MENU[item_id] = (name, BASE_PRICES.get(item_id, current))
+    else:
+        db_set_item_override(item_id, price=price)
+        ITEM_OVERRIDES[item_id] = (ov[0], price, ov[2], ov[3])
+        MENU[item_id] = (name, price)
+
+
 def db_set_item_removed(item_id: str, removed: bool):
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
@@ -3503,6 +3553,8 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
         }
         if preview_coworker_id and coworker_login:
             data["cwn"] = coworker_login[1]
+        elif user_id == ADMIN_CHAT_ID:
+            data["adm"] = 1  # shows the ✏️ price editor; the server re-checks who is asking
         return f"{MINI_APP_URL}?v={MINI_APP_VERSION}{auth_params}&subs={_encode(data)}"
     except Exception:
         logger.exception("_shop_url: failed to encode subscription data for user %s", user_id)
@@ -6877,7 +6929,10 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == A_CUSTOMER_VIEW:
         await update.message.reply_text(
             "Switched to the customer menu. Send /start to return to the admin panel.",
-            reply_markup=main_menu_keyboard(0),  # no user context, so no badge
+            # The admin's own id, not 0: a link built for user 0 has no login
+            # token, so the Shop could not tell it is the admin (no price
+            # pencil) and I've Paid had nowhere to post.
+            reply_markup=main_menu_keyboard(ADMIN_CHAT_ID),
         )
 
     elif text == A_BACKUP:
@@ -10312,6 +10367,37 @@ def _effective_preview_coworker_id(request, user_id: int):
     return coworker_login[0] if coworker_login else None
 
 
+async def http_set_item_price(request):
+    """The ✏️ in the Shop when the admin opens it as a customer: changes an
+    item's regular price for everyone. Admin's own verified account only."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    if user_id != ADMIN_CHAT_ID:
+        return web.json_response({"ok": False, "error": "Admin only"}, status=403, headers=headers)
+    try:
+        data = await request.json()
+        item_id = data["item_id"]
+        price = data.get("price")
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if not isinstance(item_id, str) or item_id not in MENU:
+        return web.json_response({"ok": False, "error": "Unknown subscription."}, status=400, headers=headers)
+    if price is not None:
+        if isinstance(price, bool) or not isinstance(price, (int, float)) or not math.isfinite(price) \
+                or price <= 0 or price > 10000:
+            return web.json_response({"ok": False, "error": "Enter a price above 0."}, status=400, headers=headers)
+        price = round(float(price), 2)
+    apply_item_price(item_id, price)
+    return web.json_response(
+        {"ok": True, "item_id": item_id, "price": MENU[item_id][1], "original": BASE_PRICES.get(item_id, MENU[item_id][1]),
+         "edited": price is not None},
+        headers=headers,
+    )
+
+
 async def http_set_coworker_price(request):
     """Lets the admin edit a coworker's price for one subscription from the
     Shop preview (the ✏️ beside each price). Strictly the admin's own
@@ -10651,6 +10737,8 @@ async def start_api_server(application):
     api_app.router.add_post("/api/create_order", http_create_order)
     api_app.router.add_post("/api/register_account", http_register_account)
     api_app.router.add_get("/api/sales_export", http_sales_export)
+    api_app.router.add_post("/api/set_item_price", http_set_item_price)
+    api_app.router.add_options("/api/set_item_price", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_coworker_price", http_set_coworker_price)
     api_app.router.add_options("/api/set_coworker_price", http_set_coworker_price_options)
     api_app.router.add_post("/api/submit_order", http_submit_order)
@@ -16356,6 +16444,7 @@ def main():
     # just the built-in catalog on every restart.
     for item_id, name, price in db_load_custom_items():
         MENU[item_id] = (name, price)
+        BASE_PRICES[item_id] = price
         if item_id not in SINGLE_MAIN_ITEMS:
             SINGLE_MAIN_ITEMS.append(item_id)
 
