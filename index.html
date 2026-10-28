@@ -138,6 +138,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .rp{font-size:14px;font-weight:700;color:var(--teal2);flex-shrink:0}
 .dur-btn{flex-shrink:0;margin-left:8px;background:transparent;border:1.5px solid var(--teal2);color:var(--teal2);
   border-radius:20px;padding:7px 11px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
+.dur-btn.need{border-color:#ef4444;color:#ef4444;animation:durGlow 1s ease-in-out infinite}
+@keyframes durGlow{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0)}50%{box-shadow:0 0 12px 3px rgba(239,68,68,.8)}}
 .dur-anchor{position:relative;flex-shrink:0;margin-left:8px}
 .dur-anchor .dur-btn{margin-left:0;min-width:118px;text-align:center}
 .dur-menu{display:none;position:absolute;right:0;top:calc(100% + 4px);min-width:100%;width:max-content;z-index:30;
@@ -147,7 +149,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .dur-opt{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:9px 8px;font-size:11.5px;
   cursor:pointer;border-bottom:1px solid rgba(255,255,255,.07);white-space:nowrap}
 .dur-opt:last-child{border-bottom:none}
-.dur-opt.in{background:rgba(45,212,191,.16)}
+.dur-opt.sel{background:rgba(45,212,191,.16)}
 .dur-opt .lbl{font-weight:600}
 .panel-from{color:var(--teal2)}.ri{min-width:0}
 .dur-opt .rp{font-size:11.5px}
@@ -1283,50 +1285,90 @@ function buildCatalog(){
 function panelFromPrice(p){
   return Math.min(...p.variants.map(v=>hasCoworkerDiscount(v.id)?coworkerPrice(v.price,v.id):v.price));
 }
+// "3 durations · from $X" until one is chosen, then "6 Months · $X".
+function panelSubHtml(row,p){
+  const sel=row.dataset.selected&&p.variants.find(v=>v.id===row.dataset.selected);
+  if(sel){
+    const price=hasCoworkerDiscount(sel.id)?coworkerPrice(sel.price,sel.id):sel.price;
+    return `${escHtml(sel.label)} · <b class="panel-from">$${price}</b>`;
+  }
+  return `${p.variants.length} durations · <b class="panel-from">from $${panelFromPrice(p)}</b>`;
+}
+function panelOf(row){
+  const cat=CATALOG.find(c=>c.id==='panel');
+  return cat&&cat.panel.find(x=>x.name===row.dataset.panelName);
+}
 function makePanelRow(p){
-  const d=document.createElement('div'); d.className='solo'; d.dataset.panelName=p.name;
+  const d=document.createElement('div'); d.className='solo'; d.dataset.panelName=p.name; d.dataset.selected='';
   d.innerHTML=`<div style="font-size:21px">🗂</div>
-    <div class="ri"><div class="rn">${escHtml(p.name)}</div><div class="rs">${p.variants.length} durations · <b class="panel-from">from $${panelFromPrice(p)}</b></div></div>
-    <div class="dur-anchor"><button class="dur-btn" onclick="toggleDurations(this)">⏱ Durations ▾</button><div class="dur-menu"></div></div>`;
+    <div class="ri"><div class="rn">${escHtml(p.name)}</div><div class="rs">${panelSubHtml(d,p)}</div></div>
+    <div class="dur-anchor"><button class="dur-btn" onclick="toggleDurations(this)">⏱ Durations ▾</button><div class="dur-menu"></div></div>
+    <button class="add-btn" onclick="addPanelSelected(this)">+</button>`;
   return d;
 }
 function refreshPanelFromPrices(){
   document.querySelectorAll('[data-panel-name]').forEach(row=>{
-    const cat=CATALOG.find(c=>c.id==='panel');
-    const p=cat&&cat.panel.find(x=>x.name===row.dataset.panelName);
-    const el=row.querySelector('.panel-from'); if(p&&el) el.textContent='from $'+panelFromPrice(p);
+    const p=panelOf(row), el=row.querySelector('.rs'); if(p&&el) el.innerHTML=panelSubHtml(row,p);
   });
 }
 // The button opens a small menu hanging from it — as wide as the button —
-// listing the durations; tap one to add it. Tapping the button again, or
-// anywhere else, closes it.
+// listing the durations; tap one to SELECT it (the button then shows it) and
+// use the row's + to add the selected duration. Tapping + before choosing
+// makes the button glow red instead. Tapping the button again, or anywhere
+// else, closes the menu.
+function durBtnText(row,open){
+  const sel=row.dataset.selected&&IMAP[row.dataset.selected];
+  return '⏱ '+(sel?sel.sub:'Durations')+(open?' ▴':' ▾');
+}
 function closeAllDurations(except){
   document.querySelectorAll('.dur-anchor.open').forEach(a=>{
     if(a===except) return;
-    a.classList.remove('open'); a.querySelector('.dur-btn').textContent='⏱ Durations ▾';
+    a.classList.remove('open');
+    const btn=a.querySelector('.dur-btn'); btn.textContent=durBtnText(btn.closest('[data-panel-name]'),false);
   });
 }
 function toggleDurations(btn){
   const anchor=btn.closest('.dur-anchor'); if(!anchor) return;
+  const row=btn.closest('[data-panel-name]');
   closeAllDurations(anchor);
   const menu=anchor.querySelector('.dur-menu');
   if(!menu.childElementCount){
-    const cat=CATALOG.find(c=>c.id==='panel');
-    const name=btn.closest('[data-panel-name]').dataset.panelName;
-    const p=cat&&cat.panel.find(x=>x.name===name); if(!p) return;
+    const p=panelOf(row); if(!p) return;
     p.variants.forEach(v=>{
       const o=document.createElement('div'); o.className='dur-opt';
       o.dataset.itemId=v.id; o.dataset.base=v.price; o.dataset.name=p.name;
       o.onclick=()=>pickDuration(o,v.id);
       o.innerHTML=`<span class="lbl">${escHtml(v.label)}</span><span class="rp">${rowPriceHtml(v.id,v.price,true)}</span>`;
-      if(cart[v.id]) o.classList.add('in');
       menu.appendChild(o);
     });
   }
+  menu.querySelectorAll('.dur-opt').forEach(o=>o.classList.toggle('sel',o.dataset.itemId===row.dataset.selected));
   const open=anchor.classList.toggle('open');
-  btn.textContent=open?'⏱ Durations ▴':'⏱ Durations ▾';
+  btn.classList.remove('need');
+  btn.textContent=durBtnText(row,open);
 }
-function pickDuration(el,id){ addItem(id); el.classList.add('in'); }
+function pickDuration(el,id){
+  const row=el.closest('[data-panel-name]');
+  row.dataset.selected=id;
+  // the row's + now adds this duration, and shows ✓ if it is already in the basket
+  const add=row.querySelector('.add-btn');
+  add.id='ab-'+id;
+  add.textContent=cart[id]?'✓':'+'; add.classList.toggle('in',!!cart[id]);
+  const p=panelOf(row); if(p) row.querySelector('.rs').innerHTML=panelSubHtml(row,p);
+  closeAllDurations();
+  row.querySelector('.dur-btn').textContent=durBtnText(row,false);
+}
+function addPanelSelected(btn){
+  const row=btn.closest('[data-panel-name]');
+  const id=row.dataset.selected;
+  if(!id){
+    const d=row.querySelector('.dur-btn');
+    d.classList.add('need');
+    showToast('Choose a duration first');
+    return;
+  }
+  addItem(id);
+}
 document.addEventListener('click',e=>{ if(!e.target.closest('.dur-anchor')) closeAllDurations(); });
 
 // The price shown on a catalog row. In the admin's coworker preview a ✏️
