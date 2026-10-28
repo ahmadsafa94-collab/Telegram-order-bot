@@ -136,6 +136,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .rn{font-size:13px;font-weight:500;line-height:1.3}
 .rs{font-size:11px;color:var(--hint);margin-top:1px}
 .rp{font-size:14px;font-weight:700;color:var(--teal2);flex-shrink:0}
+.cw-edit{background:none;border:none;font-size:13px;padding:0 0 0 5px;cursor:pointer;color:inherit}
 .add-btn{width:28px;height:28px;border-radius:50%;border:none;background:var(--acc);
   color:var(--atxt);font-size:17px;display:flex;align-items:center;justify-content:center;
   cursor:pointer;flex-shrink:0;margin-left:8px;transition:all .15s}
@@ -431,6 +432,23 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   </div>
 </div>
 
+<!-- Admin-only: edit one subscription's price for the coworker being previewed -->
+<div class="overlay" id="cwPriceOverlay" onclick="if(event.target===this)closeCwPriceEdit()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="cwPriceTitle">Edit price</div>
+    <div style="padding:0 15px 15px">
+      <div id="cwPriceInfo" style="font-size:13px;color:var(--hint);margin-bottom:10px"></div>
+      <input id="cwPriceInput" type="number" inputmode="decimal" min="0" step="0.01" placeholder="New price in $"
+        style="width:100%;background:transparent;border:1.5px solid var(--field-border);border-radius:10px;padding:11px 12px;color:var(--text);font-size:15px">
+      <div id="cwPriceMsg" style="font-size:12px;margin-top:6px;min-height:16px"></div>
+      <button class="btn" id="cwPriceSave" onclick="saveCwPrice(false)">Save price</button>
+      <button class="btn sec" style="margin-top:8px" onclick="saveCwPrice(true)">↩️ Use their default price</button>
+      <button class="btn sec" style="margin-top:8px" onclick="closeCwPriceEdit()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- Purchase history sheet (Orders tab) -->
 <div class="overlay" id="historyOverlay" onclick="if(event.target===this)closePurchaseHistory()">
   <div class="sheet">
@@ -502,6 +520,7 @@ const API_BASE = _qs.get('api') || (SUBS_DATA && SUBS_DATA.api) || '';
 // so My Orders/purchase history can show THAT coworker's data too, not
 // just the catalog's preview pricing — see withAuth() below.
 const PREVIEW_CW = _qs.get('previewcw') || '';
+const CW_NAME = (SUBS_DATA && SUBS_DATA.cwn) || 'this coworker';
 
 // Credit balance and active discount codes — point-in-time snapshot from
 // page load, used only for display/estimation. The server re-verifies
@@ -1216,12 +1235,19 @@ function buildCatalog(){
   });
 }
 
+// The price shown on a catalog row. In the admin's coworker preview a ✏️
+// sits beside it to set a custom price for that coworker (see openCwPriceEdit).
+function rowPriceHtml(id, basePrice){
+  const price = hasCoworkerDiscount(id)
+    ? `<span style="text-decoration:line-through;color:var(--hint);font-weight:400;font-size:11px;margin-right:3px">$${basePrice}</span>$${coworkerPrice(basePrice,id)}`
+    : `$${basePrice}`;
+  return price + (PREVIEW_CW ? `<button class="cw-edit" title="Edit this coworker's price" onclick="event.stopPropagation();openCwPriceEdit('${id}')">✏️</button>` : '');
+}
 function makeRow(itm,solo){
   const d=document.createElement('div'); d.className=solo?'solo':'row';
+  d.dataset.itemId=itm.id; d.dataset.base=itm.price; d.dataset.name=itm.name;
   const oos=OOS_IDS.has(itm.id);
-  const priceHtml = hasCoworkerDiscount(itm.id)
-    ? `<span style="text-decoration:line-through;color:var(--hint);font-weight:400;font-size:11px;margin-right:3px">$${itm.price}</span>$${coworkerPrice(itm.price,itm.id)}`
-    : `$${itm.price}`;
+  const priceHtml = rowPriceHtml(itm.id, itm.price);
   d.innerHTML=`${solo?`<div style="font-size:21px">${itm.e||'📦'}</div>`:''}
     <div class="ri"><div class="rn">${itm.name}</div><div class="rs">${itm.sub||''}</div></div>
     <div class="rp">${priceHtml}</div>
@@ -1377,6 +1403,56 @@ async function openOrderDetail(fulfilmentId, deliveryId){
   }
 }
 function closeOrderDetail(){document.getElementById('orderDetailOverlay').classList.remove('on')}
+
+// ── Admin: edit a coworker's price from the preview ──────────────────
+// Only ever reachable from the admin's "Preview Shop as This Coworker" link
+// (PREVIEW_CW set); the server accepts it from the admin's own verified
+// account only, so the pencil does nothing for anyone else.
+let cwEditId=null;
+function openCwPriceEdit(id){
+  const row=document.querySelector('[data-item-id="'+id+'"]');
+  if(!row) return;
+  cwEditId=id;
+  const base=parseFloat(row.dataset.base);
+  const shown=hasCoworkerDiscount(id)?coworkerPrice(base,id):base;
+  document.getElementById('cwPriceTitle').textContent=row.dataset.name;
+  document.getElementById('cwPriceInfo').textContent=
+    CW_NAME+' currently sees $'+shown+(COWORKER_ITEM_PRICES[id]!=null?' (custom price)':' (their default)')+'. Regular price: $'+base+'.';
+  const input=document.getElementById('cwPriceInput');
+  input.value=COWORKER_ITEM_PRICES[id]!=null?COWORKER_ITEM_PRICES[id]:'';
+  document.getElementById('cwPriceMsg').textContent='';
+  document.getElementById('cwPriceOverlay').classList.add('on');
+  setTimeout(()=>input.focus(),150);
+}
+function closeCwPriceEdit(){document.getElementById('cwPriceOverlay').classList.remove('on'); cwEditId=null;}
+async function saveCwPrice(useDefault){
+  const msg=document.getElementById('cwPriceMsg');
+  let price=null;
+  if(!useDefault){
+    price=parseFloat(document.getElementById('cwPriceInput').value);
+    if(!(price>0)){ msg.style.color='#dc2626'; msg.textContent='Enter a price above 0.'; return; }
+  }
+  const id=cwEditId; if(!id) return;
+  const btn=document.getElementById('cwPriceSave'); btn.disabled=true;
+  msg.style.color='var(--hint)'; msg.textContent='Saving…';
+  try{
+    const resp=await fetch(withAuth('/api/set_coworker_price'),{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({item_id:id,price:price}),
+    });
+    const data=await resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
+    if(!data.ok){ msg.style.color='#dc2626'; msg.textContent=data.error||'Could not save the price.'; return; }
+    if(data.custom) COWORKER_ITEM_PRICES[id]=data.price; else delete COWORKER_ITEM_PRICES[id];
+    document.querySelectorAll('[data-item-id="'+id+'"]').forEach(row=>{
+      const rp=row.querySelector('.rp'); if(rp) rp.innerHTML=rowPriceHtml(id, parseFloat(row.dataset.base));
+    });
+    try{ renderBasket(); }catch(e){}
+    closeCwPriceEdit();
+    showToast(data.custom?CW_NAME+' now sees $'+data.price:'Back to '+CW_NAME+"'s default $"+data.default);
+  }catch(e){
+    msg.style.color='#dc2626'; msg.textContent='Network error — please try again.';
+  }finally{ btn.disabled=false; }
+}
 
 function orderTicket(fulfilmentId){
   tg.sendData(JSON.stringify({action:'order_ticket', fulfilment_id: fulfilmentId}));

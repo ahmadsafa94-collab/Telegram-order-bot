@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "32"
+MINI_APP_VERSION = "33"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -1190,6 +1190,22 @@ def db_init():
         except sqlite3.OperationalError:
             pass
 
+    # Per-coworker, per-subscription fixed prices set from the admin's
+    # Coworkers panel. A row overrides the coworker's default (their
+    # percentage discount) for that one subscription; iMD's three durations
+    # live in the coworkers.imd_*_price columns instead, so the older
+    # "Edit Prices" menu and this one always agree.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS coworker_prices (
+            coworker_id INTEGER NOT NULL,
+            item_id TEXT NOT NULL,
+            price REAL NOT NULL,
+            PRIMARY KEY (coworker_id, item_id)
+        )
+        """
+    )
+
     # coworker_id on orders/users is added later — ALTER TABLE is skipped
     # if the column already exists, same pattern as every other late column
     # above. orders.coworker_id tags which coworker (if any) placed an
@@ -1972,6 +1988,50 @@ def db_update_coworker_password(coworker_id: int, new_password: str):
     conn.close()
 
 
+_IMD_PRICE_COLUMNS = {"imd_6m": "imd_6m_price", "imd_1y": "imd_1y_price", "imd_2y": "imd_2y_price"}
+
+
+def db_get_coworker_price_overrides(coworker_id: int) -> dict:
+    """{item_id: fixed price} for every subscription the admin set a custom
+    price on for this coworker, iMD durations included."""
+    conn = sqlite3.connect(DB_PATH)
+    overrides = {
+        item_id: price
+        for item_id, price in conn.execute(
+            "SELECT item_id, price FROM coworker_prices WHERE coworker_id = ?", (coworker_id,)
+        )
+    }
+    imd = conn.execute(
+        "SELECT imd_6m_price, imd_1y_price, imd_2y_price FROM coworkers WHERE id = ?", (coworker_id,)
+    ).fetchone()
+    conn.close()
+    if imd:
+        for item_id, price in zip(("imd_6m", "imd_1y", "imd_2y"), imd):
+            if price is not None:
+                overrides[item_id] = price
+    return overrides
+
+
+def db_set_coworker_item_price(coworker_id: int, item_id: str, price):
+    """Sets (or, with price=None, removes) one subscription's custom price."""
+    if item_id in _IMD_PRICE_COLUMNS:
+        kwargs = {"imd_6m_price": _KEEP, "imd_1y_price": _KEEP, "imd_2y_price": _KEEP}
+        kwargs[_IMD_PRICE_COLUMNS[item_id]] = price
+        db_set_coworker_imd_prices(coworker_id, kwargs["imd_6m_price"], kwargs["imd_1y_price"], kwargs["imd_2y_price"])
+        return
+    conn = sqlite3.connect(DB_PATH)
+    if price is None:
+        conn.execute("DELETE FROM coworker_prices WHERE coworker_id = ? AND item_id = ?", (coworker_id, item_id))
+    else:
+        conn.execute(
+            "INSERT INTO coworker_prices (coworker_id, item_id, price) VALUES (?, ?, ?) "
+            "ON CONFLICT(coworker_id, item_id) DO UPDATE SET price = excluded.price",
+            (coworker_id, item_id, price),
+        )
+    conn.commit()
+    conn.close()
+
+
 def db_delete_coworker(coworker_id: int):
     """Deletes the coworker account itself. Past orders keep their
     coworker_id as historical record (so sales/stats for them stay
@@ -1981,6 +2041,7 @@ def db_delete_coworker(coworker_id: int):
     find a match — no separate cleanup needed there."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM coworkers WHERE id = ?", (coworker_id,))
+    conn.execute("DELETE FROM coworker_prices WHERE coworker_id = ?", (coworker_id,))
     conn.commit()
     conn.close()
 
@@ -3011,9 +3072,9 @@ def _coworker_unit_price_by_id(item_id: str, coworker_id: int) -> float:
     cw = db_get_coworker(coworker_id)
     if not cw:
         return base_price
-    _, _, _, coworker_pct, _, imd_6m_price, imd_1y_price, imd_2y_price = cw
-    fixed_prices = {"imd_6m": imd_6m_price, "imd_1y": imd_1y_price, "imd_2y": imd_2y_price}
-    fixed = fixed_prices.get(item_id)
+    coworker_pct = cw[3]
+    # A custom price the admin set for this coworker beats their default.
+    fixed = db_get_coworker_price_overrides(coworker_id).get(item_id)
     return fixed if fixed is not None else round(base_price * (1 - coworker_pct / 100), 2)
 
 
@@ -3219,6 +3280,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_discount_field", "discount_data",
     "awaiting_resend_message_for_fulfilment",
     "awaiting_coworker_add_field", "coworker_add_data",
+    "awaiting_coworker_item_price",
     "awaiting_coworker_editprice_pct",
     "awaiting_coworker_editprice_imd_field", "coworker_editprice_imd_duration",
     "awaiting_coworker_editlogin_field", "coworker_editlogin_id",
@@ -3422,14 +3484,7 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
         # Per-item iMD price overrides (fixed $, not a %) — iMD's resale
         # margin doesn't work the same way as the other subscriptions', so
         # coworkers get a flat price there instead when the admin sets one.
-        coworker_imd_prices = {}
-        if coworker_login:
-            if coworker_login[3] is not None:
-                coworker_imd_prices["imd_6m"] = coworker_login[3]
-            if coworker_login[4] is not None:
-                coworker_imd_prices["imd_1y"] = coworker_login[4]
-            if coworker_login[5] is not None:
-                coworker_imd_prices["imd_2y"] = coworker_login[5]
+        coworker_imd_prices = db_get_coworker_price_overrides(coworker_login[0]) if coworker_login else {}
 
         data = {
             "d": delivered,
@@ -3446,6 +3501,8 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
             # coworkers, never regular customers.
             "cwid": coworker_login[0] if coworker_login else 0,
         }
+        if preview_coworker_id and coworker_login:
+            data["cwn"] = coworker_login[1]
         return f"{MINI_APP_URL}?v={MINI_APP_VERSION}{auth_params}&subs={_encode(data)}"
     except Exception:
         logger.exception("_shop_url: failed to encode subscription data for user %s", user_id)
@@ -10255,6 +10312,49 @@ def _effective_preview_coworker_id(request, user_id: int):
     return coworker_login[0] if coworker_login else None
 
 
+async def http_set_coworker_price(request):
+    """Lets the admin edit a coworker's price for one subscription from the
+    Shop preview (the ✏️ beside each price). Strictly the admin's own
+    verified identity — anyone else gets 403 even with a valid token of their
+    own — and only for the coworker the preview link was built for."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    if user_id != ADMIN_CHAT_ID:
+        return web.json_response({"ok": False, "error": "Admin only"}, status=403, headers=headers)
+    try:
+        coworker_id = int(request.query.get("previewcw", "0"))
+        data = await request.json()
+        item_id = data["item_id"]
+        price = data.get("price")
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    coworker = db_get_coworker(coworker_id) if coworker_id else None
+    if not coworker:
+        return web.json_response({"ok": False, "error": "That coworker no longer exists."}, status=404, headers=headers)
+    if not isinstance(item_id, str) or item_id not in MENU:
+        return web.json_response({"ok": False, "error": "Unknown subscription."}, status=400, headers=headers)
+    if price is not None:
+        if isinstance(price, bool) or not isinstance(price, (int, float)) or not math.isfinite(price) \
+                or price <= 0 or price > 10000:
+            return web.json_response({"ok": False, "error": "Enter a price above 0."}, status=400, headers=headers)
+        price = round(float(price), 2)
+    db_set_coworker_item_price(coworker_id, item_id, price)
+    default = round(MENU[item_id][1] * (1 - coworker[3] / 100), 2)
+    return web.json_response(
+        {"ok": True, "item_id": item_id, "custom": price is not None,
+         "price": price if price is not None else default, "default": default},
+        headers=headers,
+    )
+
+
+async def http_set_coworker_price_options(request):
+    from aiohttp import web
+    return web.Response(status=200, headers=_post_cors_headers())
+
+
 async def http_my_orders(request):
     """Every paid order unit for the authenticated customer — the data
     behind the Mini App's Orders tab list. An optional ?q= searches the
@@ -10551,6 +10651,8 @@ async def start_api_server(application):
     api_app.router.add_post("/api/create_order", http_create_order)
     api_app.router.add_post("/api/register_account", http_register_account)
     api_app.router.add_get("/api/sales_export", http_sales_export)
+    api_app.router.add_post("/api/set_coworker_price", http_set_coworker_price)
+    api_app.router.add_options("/api/set_coworker_price", http_set_coworker_price_options)
     api_app.router.add_post("/api/submit_order", http_submit_order)
     api_app.router.add_options("/api/submit_order", http_submit_order_options)
 
@@ -11279,6 +11381,9 @@ async def coworker_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👁 Preview Shop as This Coworker", callback_data=f"coworker_preview:{coworker_id}")]
     )
     buttons.append(
+        [InlineKeyboardButton("💲 Subscription Prices", callback_data=f"cwprices:{coworker_id}:0")]
+    )
+    buttons.append(
         [InlineKeyboardButton("✏️ Edit Prices", callback_data=f"coworker_editprice:{coworker_id}")]
     )
     buttons.append(
@@ -11319,6 +11424,219 @@ async def coworker_preview_shop(update: Update, context: ContextTypes.DEFAULT_TY
             [[InlineKeyboardButton("🛒 Open Shop (Preview)", web_app=WebAppInfo(url=shop_url))]]
         ),
     )
+
+
+CW_PRICES_PER_PAGE = 8
+
+
+def _short_item_name(name: str) -> str:
+    """A compact label for the price list's buttons — the long Uptodate and
+    Amboss names would otherwise be cut off at the same point and look
+    identical. The full name is shown by tapping the label."""
+    for long, short in (
+        (" 1 Year - ", " "), (" - 3 Months", " 3mo"), (" - 1 Month", " 1mo"),
+        ("Mobile App + Browser", "App+Web"), ("Mobile App", "App"),
+        ("Uptodate Online + Offline Access", "Uptodate Offline"),
+        ("Uptodate Online + Pathways Access", "Uptodate Pathways"),
+        ("Uptodate Online", "Uptodate"),
+        ("Amboss Premium (Unlimited Qbanks) + Library", "Amboss Premium+Library"),
+        ("Amboss Library Access Only (Limited Qbanks)", "Amboss Library only"),
+        ("(Without AI)", "(no AI)"), ("(With AI)", "(AI)"), ("(Telegram Bot)", "(Bot)"), ("(Official App)", "(App)"),
+    ):
+        name = name.replace(long, short)
+    name = " ".join(name.split())
+    return name if len(name) <= 30 else name[:29] + "…"
+
+
+def _coworker_price_rows(coworker_id: int):
+    """[(item_id, name, price shown to this coworker, is_custom)] for every
+    subscription on sale, in the catalog's usual order."""
+    coworker = db_get_coworker(coworker_id)
+    if not coworker:
+        return []
+    overrides = db_get_coworker_price_overrides(coworker_id)
+    rows = []
+    items = all_toggleable_items()
+    if "medical_toolkit" in MENU and "medical_toolkit" not in items:
+        items.append("medical_toolkit")
+    for item_id in items:
+        if item_id not in MENU:
+            continue
+        rows.append((
+            item_id, MENU[item_id][0],
+            overrides.get(item_id, round(MENU[item_id][1] * (1 - coworker[3] / 100), 2)),
+            item_id in overrides,
+        ))
+    return rows
+
+
+async def coworker_prices_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """💲 Subscription Prices: every subscription with the price this
+    coworker sees and a ✏️ to set a custom one. Admin-only — the coworker
+    only ever sees the resulting price in the Shop."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    _, coworker_id_str, page_str = query.data.split(":", 2)
+    coworker_id, page = int(coworker_id_str), int(page_str)
+    coworker = db_get_coworker(coworker_id)
+    if not coworker:
+        await query.edit_message_text("That coworker no longer exists.")
+        return
+    rows = _coworker_price_rows(coworker_id)
+    pages = max(1, -(-len(rows) // CW_PRICES_PER_PAGE))
+    page = max(0, min(page, pages - 1))
+    buttons = []
+    for item_id, name, price, custom in rows[page * CW_PRICES_PER_PAGE:(page + 1) * CW_PRICES_PER_PAGE]:
+        label = f"{_short_item_name(name)} — {CURRENCY}{price:.2f}{' ★' if custom else ''}"
+        buttons.append([
+            InlineKeyboardButton(label, callback_data=f"cwpinfo:{coworker_id}:{item_id}"),
+            InlineKeyboardButton("✏️", callback_data=f"cwpe:{coworker_id}:{item_id}"),
+        ])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"cwprices:{coworker_id}:{page - 1}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"cwprices:{coworker_id}:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"coworker:{coworker_id}")])
+    await query.edit_message_text(
+        f"💲 Prices for {coworker[1]} (page {page + 1}/{pages})\n"
+        f"★ = custom price you set. Others use their {coworker[3]:.0f}% discount.\n"
+        "Tap ✏️ to change a price.",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def coworker_price_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    _, coworker_id_str, item_id = query.data.split(":", 2)
+    coworker = db_get_coworker(int(coworker_id_str))
+    if not coworker or item_id not in MENU:
+        await query.answer("Not found.", show_alert=True)
+        return
+    name, base = MENU[item_id]
+    default = round(base * (1 - coworker[3] / 100), 2)
+    custom = db_get_coworker_price_overrides(coworker[0]).get(item_id)
+    text = f"{name}\nRegular price: {CURRENCY}{base:.2f}\nDefault for {coworker[1]}: {CURRENCY}{default:.2f} ({coworker[3]:.0f}% off)"
+    text += f"\nCustom price: {CURRENCY}{custom:.2f}" if custom is not None else "\nNo custom price set."
+    await query.answer(text, show_alert=True)
+
+
+async def coworker_price_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped ✏️ next to one subscription's price."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    _, coworker_id_str, item_id = query.data.split(":", 2)
+    coworker_id = int(coworker_id_str)
+    coworker = db_get_coworker(coworker_id)
+    if not coworker or item_id not in MENU:
+        await query.edit_message_text("That coworker or subscription no longer exists.")
+        return
+    clear_admin_flow_state(context.user_data)
+    context.user_data["awaiting_coworker_item_price"] = f"{coworker_id}:{item_id}"
+    name, base = MENU[item_id]
+    default = round(base * (1 - coworker[3] / 100), 2)
+    custom = db_get_coworker_price_overrides(coworker_id).get(item_id)
+    current = f"{CURRENCY}{custom:.2f} (custom)" if custom is not None else f"{CURRENCY}{default:.2f} (default, {coworker[3]:.0f}% off)"
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=(
+            f"{name} for {coworker[1]} — currently {current}.\n"
+            "Send the new price to show them, or tap below to go back to their default:"
+        ),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("↩️ Use their default price", callback_data=f"cwpd:{coworker_id}:{item_id}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data=f"cwpx:{coworker_id}")],
+        ]),
+    )
+
+
+async def coworker_price_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin tapped '↩️ Use their default price' — removes the custom price."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    _, coworker_id_str, item_id = query.data.split(":", 2)
+    coworker_id = int(coworker_id_str)
+    coworker = db_get_coworker(coworker_id)
+    context.user_data.pop("awaiting_coworker_item_price", None)
+    if not coworker or item_id not in MENU:
+        await query.edit_message_text("That coworker or subscription no longer exists.")
+        return
+    db_set_coworker_item_price(coworker_id, item_id, None)
+    shown = round(MENU[item_id][1] * (1 - coworker[3] / 100), 2)
+    ids = [r[0] for r in _coworker_price_rows(coworker_id)]
+    page = ids.index(item_id) // CW_PRICES_PER_PAGE if item_id in ids else 0
+    await query.edit_message_text(
+        f"✅ {MENU[item_id][0]} is back to {coworker[1]}'s default: {CURRENCY}{shown:.2f}.",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Back to prices", callback_data=f"cwprices:{coworker_id}:{page}")]]
+        ),
+    )
+
+
+async def coworker_price_edit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    key = context.user_data.get("awaiting_coworker_item_price")
+    if not key:
+        return
+    coworker_id_str, item_id = key.split(":", 1)
+    coworker_id = int(coworker_id_str)
+    text = update.message.text.strip()
+    if text == "/clear":
+        price = None
+    else:
+        try:
+            price = round(float(text), 2)
+            if price <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Send a price above 0 (e.g. 18.5), or /clear:")
+            return
+    context.user_data.pop("awaiting_coworker_item_price", None)
+    coworker = db_get_coworker(coworker_id)
+    if not coworker or item_id not in MENU:
+        await update.message.reply_text("That coworker or subscription no longer exists.")
+        return
+    db_set_coworker_item_price(coworker_id, item_id, price)
+    name = MENU[item_id][0]
+    if price is None:
+        shown = round(MENU[item_id][1] * (1 - coworker[3] / 100), 2)
+        msg = f"✅ {name} is back to {coworker[1]}'s default: {CURRENCY}{shown:.2f}."
+    else:
+        msg = f"✅ {coworker[1]} now sees {name} at {CURRENCY}{price:.2f}."
+    ids = [r[0] for r in _coworker_price_rows(coworker_id)]
+    page = ids.index(item_id) // CW_PRICES_PER_PAGE if item_id in ids else 0
+    await update.message.reply_text(
+        msg,
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Back to prices", callback_data=f"cwprices:{coworker_id}:{page}")]]
+        ),
+    )
+
+
+async def coworker_price_edit_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    context.user_data.pop("awaiting_coworker_item_price", None)
+    try:
+        await query.edit_message_text("Cancelled — no changes made.")
+    except Exception:
+        pass
 
 
 async def coworker_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -13128,6 +13446,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if context.user_data.get("awaiting_coworker_add_field"):
             await coworker_add_field_reply(update, context)
+            return
+        if context.user_data.get("awaiting_coworker_item_price"):
+            await coworker_price_edit_reply(update, context)
             return
         if context.user_data.get("awaiting_coworker_editprice_pct"):
             await coworker_editprice_pct_reply(update, context)
@@ -15442,14 +15763,8 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
     coworker_login = db_get_user_coworker(user_id)
     coworker_id = None
     if coworker_login:
-        coworker_id, _coworker_name, coworker_pct, imd_6m_price, imd_1y_price, imd_2y_price = coworker_login
-        imd_fixed_prices = {"imd_6m": imd_6m_price, "imd_1y": imd_1y_price, "imd_2y": imd_2y_price}
-        total = 0.0
-        for item_id, qty in order_items.items():
-            fixed = imd_fixed_prices.get(item_id)
-            unit_price = fixed if fixed is not None else round(MENU[item_id][1] * (1 - coworker_pct / 100), 2)
-            total += unit_price * qty
-        total = round(total, 2)
+        coworker_id = coworker_login[0]
+        total = round(sum(_coworker_unit_price_by_id(i, coworker_id) * q for i, q in order_items.items()), 2)
     else:
         total = sum(MENU[i][1] * q for i, q in order_items.items())
 
@@ -16290,6 +16605,11 @@ def main():
     app.add_handler(CallbackQueryHandler(coworker_add_start, pattern=r"^coworker_add$"))
     app.add_handler(CallbackQueryHandler(coworker_back, pattern=r"^coworker_back$"))
     app.add_handler(CallbackQueryHandler(coworker_pending_list, pattern=r"^coworker_pending:"))
+    app.add_handler(CallbackQueryHandler(coworker_prices_page, pattern=r"^cwprices:"))
+    app.add_handler(CallbackQueryHandler(coworker_price_info, pattern=r"^cwpinfo:"))
+    app.add_handler(CallbackQueryHandler(coworker_price_edit_start, pattern=r"^cwpe:"))
+    app.add_handler(CallbackQueryHandler(coworker_price_edit_cancel, pattern=r"^cwpx:"))
+    app.add_handler(CallbackQueryHandler(coworker_price_reset, pattern=r"^cwpd:"))
     app.add_handler(CallbackQueryHandler(coworker_editprice_start, pattern=r"^coworker_editprice:"))
     app.add_handler(CallbackQueryHandler(coworker_editprice_pct_start, pattern=r"^coworker_editprice_pct:"))
     app.add_handler(CallbackQueryHandler(coworker_editprice_imdmenu, pattern=r"^coworker_editprice_imdmenu:"))
@@ -16341,6 +16661,15 @@ def main():
     else:
         app.add_handler(MessageHandler(filters.Regex(_customer_pat), main_menu_text))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_state_router))
+    # "/skip" and "/clear" are offered as answers by several admin prompts, but
+    # Telegram marks them as commands, which the handler above deliberately
+    # ignores — so they never arrived. Hand just those two (admin only) to the
+    # same router; with no prompt waiting, the router does nothing.
+    if ADMIN_CHAT_ID:
+        app.add_handler(MessageHandler(
+            filters.User(ADMIN_CHAT_ID) & filters.Regex(r"^/(skip|clear)(@\w+)?\s*$"),
+            text_state_router,
+        ))
     app.add_handler(CallbackQueryHandler(menu_button))  # catch-all for menu/cart callbacks
     app.add_error_handler(global_error_handler)
 
