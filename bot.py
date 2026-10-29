@@ -102,7 +102,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "53"
+MINI_APP_VERSION = "55"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -10996,6 +10996,154 @@ async def http_clear_unpaid(request):
     return web.json_response({"ok": True, "count": db_cancel_unpaid_orders(user_id)}, headers=headers)
 
 
+# ── Admin Shop: Delivered Subscriptions and Pending Orders tabs ─────────
+ADMIN_PAGE = 40
+
+
+def db_admin_delivered(query: str = "", offset: int = 0, limit: int = ADMIN_PAGE):
+    """Every delivered unit across all customers, newest first, with the text that was sent.
+    `query` matches the order number, subscription, customer (name or id) or the delivered text."""
+    conn = sqlite3.connect(DB_PATH)
+    ful = conn.execute(
+        "SELECT f.id, f.order_id, f.item_id, f.user_id, o.username, o.created_at "
+        "FROM fulfilment f JOIN orders o ON o.id = f.order_id WHERE f.state = 'delivered' ORDER BY f.id").fetchall()
+    dels = conn.execute("SELECT id, order_id, item_id, message, delivered_at FROM deliveries ORDER BY id").fetchall()
+    conn.close()
+    by_key = {}
+    for did, oid, iid, msg, dat in dels:
+        by_key.setdefault((oid, iid), []).append((did, msg, dat))
+    seen, items = {}, []
+    for fid, oid, iid, uid, uname, created in ful:      # oldest first, so the nth unit gets the nth delivery
+        n = seen.get((oid, iid), 0)
+        seen[(oid, iid)] = n + 1
+        lst = by_key.get((oid, iid), [])
+        did, msg, dat = lst[n] if n < len(lst) else (None, "", created)
+        items.append({
+            "fid": fid, "order_id": oid, "item_id": iid, "name": MENU.get(iid, (iid,))[0],
+            "user_id": uid, "customer": f"@{uname}" if uname else str(uid),
+            "date": (dat or created or "")[:10], "text": (msg or "")[:2000], "delivery_id": did,
+        })
+    items.reverse()
+    q = (query or "").strip().lower()
+    if q.startswith("#") and q[1:].isdigit():          # "#12" is order 12, nothing else
+        items = [i for i in items if i["order_id"] == int(q[1:])]
+    elif q:
+        items = [i for i in items if q in str(i["order_id"]) or q in i["name"].lower() or q in i["customer"].lower()
+                 or q == str(i["user_id"]) or q in i["text"].lower()]
+    return items[offset:offset + limit], len(items)
+
+
+def db_admin_pending() -> list:
+    """Paid orders with units still to deliver, with what the customer filled in."""
+    rows = db_all_pending_items()
+    if not rows:
+        return []
+    conn = sqlite3.connect(DB_PATH)
+    info = dict(conn.execute(
+        "SELECT id, info_json FROM fulfilment WHERE id IN (%s)" % ",".join("?" * len(rows)), [r[0] for r in rows]).fetchall())
+    conn.close()
+    out = []
+    for fid, oid, uid, uname, iid, unit_no, state, created in rows:
+        out.append({
+            "fid": fid, "order_id": oid, "item_id": iid, "name": MENU.get(iid, (iid,))[0], "unit": unit_no,
+            "user_id": uid, "customer": f"@{uname}" if uname else str(uid), "state": state, "date": (created or "")[:10],
+            "info": format_fulfilment_info(iid, info.get(fid)) if info.get(fid) else "",
+            "imd": iid in IMD_TRIGGER_ITEMS,
+        })
+    return out
+
+
+async def http_admin_delivered(request):
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        offset = max(0, int(request.query.get("offset", "0")))
+    except ValueError:
+        offset = 0
+    items, total = db_admin_delivered(request.query.get("q", ""), offset)
+    return web.json_response({"ok": True, "items": items, "total": total, "offset": offset},
+                             headers=_imd_search_cors_headers())
+
+
+async def http_admin_pending(request):
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    return web.json_response({"ok": True, "items": db_admin_pending()}, headers=_imd_search_cors_headers())
+
+
+async def http_admin_deliver(request):
+    """Deliver a pending unit from the admin Shop: sends the typed account details to the
+    customer and marks it delivered, same as 📤 Send Credentials in the chat."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        data = await request.json()
+        fid, text = data["fulfilment_id"], data["text"]
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if isinstance(fid, bool) or not isinstance(fid, int) or not isinstance(text, str) or not text.strip() or len(text) > 3500:
+        return web.json_response({"ok": False, "error": "Type the account details to send."}, status=400, headers=headers)
+    row = db_get_fulfilment(fid)
+    if not row:
+        return web.json_response({"ok": False, "error": "That order unit no longer exists."}, status=404, headers=headers)
+    if row[5] == "delivered":
+        return web.json_response({"ok": False, "error": "Already delivered."}, status=409, headers=headers)
+    if row[3] in IMD_TRIGGER_ITEMS:
+        return web.json_response({"ok": False, "error": "iMD is renewed or registered from the chat — use Open in chat."},
+                                 status=409, headers=headers)
+    application = request.app["application"]
+    try:
+        result = await _deliver_credentials(_HttpContext(application, ADMIN_CHAT_ID), fid, text.strip())
+    except Exception:
+        logger.exception("Admin Shop delivery of unit %s failed", fid)
+        return web.json_response({"ok": False, "error": "Could not send it to the customer (they may have blocked the bot). Nothing was marked delivered."},
+                                 status=502, headers=headers)
+    name, order_id, delivery_id = result
+    return web.json_response({"ok": True, "name": name, "order_id": order_id, "delivery_id": delivery_id}, headers=headers)
+
+
+class _HttpCbUpdate:
+    """An Update with a callback_query, for running a chat button's handler from the Shop."""
+    def __init__(self, user_id: int, data: str):
+        async def _noop(*a, **k):
+            return None
+        self.callback_query = types.SimpleNamespace(
+            from_user=types.SimpleNamespace(id=user_id), data=data, answer=_noop,
+            message=types.SimpleNamespace(chat_id=user_id))
+        self.effective_user = types.SimpleNamespace(id=user_id)
+        self.effective_chat = types.SimpleNamespace(id=user_id)
+        self.message = None
+
+
+async def http_admin_chat_action(request):
+    """"Open in chat": sends the admin the same prompt a chat button would (deliver with its
+    iMD options, or edit what was delivered), to carry on there."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        data = await request.json()
+        action, ident = data["action"], data["id"]
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if isinstance(ident, bool) or not isinstance(ident, int) or action not in ("deliver", "editdeliv"):
+        return web.json_response({"ok": False, "error": "Unknown action"}, status=400, headers=headers)
+    application = request.app["application"]
+    context = _HttpContext(application, ADMIN_CHAT_ID)
+    update = _HttpCbUpdate(ADMIN_CHAT_ID, f"{action}:{ident}")
+    await (deliver_start if action == "deliver" else edit_delivery_start)(update, context)
+    return web.json_response({"ok": True}, headers=headers)
+
+
 BOOK_REQUESTS_PER_HOUR = 5
 
 
@@ -11430,6 +11578,12 @@ async def start_api_server(application):
     api_app.router.add_options("/api/bot_action", http_set_coworker_price_options)
     api_app.router.add_post("/api/clear_unpaid", http_clear_unpaid)
     api_app.router.add_options("/api/clear_unpaid", http_set_coworker_price_options)
+    api_app.router.add_get("/api/admin_delivered", http_admin_delivered)
+    api_app.router.add_get("/api/admin_pending", http_admin_pending)
+    api_app.router.add_post("/api/admin_deliver", http_admin_deliver)
+    api_app.router.add_options("/api/admin_deliver", http_set_coworker_price_options)
+    api_app.router.add_post("/api/admin_chat_action", http_admin_chat_action)
+    api_app.router.add_options("/api/admin_chat_action", http_set_coworker_price_options)
     api_app.router.add_post("/api/request_book", http_request_book)
     api_app.router.add_options("/api/request_book", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_item_title", http_set_item_title)
@@ -15617,13 +15771,28 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not fulfilment_id:
         return  # admin isn't in the middle of delivering anything
 
+    async def confirm(name, order_id, delivery_id):
+        await update.message.reply_text(
+            f"✅ {name} delivered to the customer (Order #{order_id}).",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("✏️ Edit credentials", callback_data=f"editdeliv:{delivery_id}")]]
+            ),
+        )
+
+    if not await _deliver_credentials(context, fulfilment_id, update.message.text, on_delivered=confirm):
+        await update.message.reply_text("That item no longer exists.")
+
+
+async def _deliver_credentials(context, fulfilment_id: int, credentials_text: str, on_delivered=None):
+    """Sends the account details to the customer and marks that unit delivered, exactly
+    as the 📤 Send Credentials chat flow always did. Used by that flow and by the admin
+    Shop's Pending Orders tab. Returns (item name, order id, delivery id), or None when the
+    unit does not exist. A failed message to the customer raises, and nothing is marked."""
     row = db_get_fulfilment(fulfilment_id)
     if not row:
-        await update.message.reply_text("That item no longer exists.")
-        return
+        return None
 
     _, order_id, user_id, item_id, unit_no, state, info_json = row
-    credentials_text = update.message.text
     name = MENU.get(item_id, (item_id,))[0]
 
     sent_message = await context.bot.send_message(
@@ -15635,12 +15804,8 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     delivery_id = db_add_delivery(order_id, user_id, item_id, credentials_text, sent_message.message_id)
     await post_subscription_to_channel(context, order_id, item_id, credentials_text)
     db_set_fulfilment_state(fulfilment_id, "delivered")
-    await update.message.reply_text(
-        f"✅ {name} delivered to the customer (Order #{order_id}).",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("✏️ Edit credentials", callback_data=f"editdeliv:{delivery_id}")]]
-        ),
-    )
+    if on_delivered:
+        await on_delivered(name, order_id, delivery_id)
 
     # A manual delivery ends whatever the customer was mid-way through for
     # this unit, so clear any stale collection state and move the order on —
@@ -15655,6 +15820,7 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ):
         customer_data.pop(key, None)
     await process_next_in_queue(context, user_id, order_id)
+    return name, order_id, delivery_id
 
 
 async def edit_delivery_start(update: Update, context: ContextTypes.DEFAULT_TYPE):

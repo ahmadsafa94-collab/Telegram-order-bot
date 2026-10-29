@@ -628,6 +628,22 @@ body.in-checkout{padding-bottom:100px}
   </div>
 </div>
 
+<!-- Admin: deliver a pending unit -->
+<div class="overlay" id="delOverlay" onclick="if(event.target===this)closeDeliver()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="delTitle">Deliver</div>
+    <div style="padding:0 15px 15px">
+      <div id="delInfo" class="t-meta" style="margin:6px 0 10px;white-space:pre-wrap;overflow-wrap:anywhere"></div>
+      <div style="font-size:12px;color:var(--hint);margin:4px 0">Account details to send to the customer</div>
+      <textarea id="delText" class="cw-input" rows="5" maxlength="3500" placeholder="Username, password, link …" aria-label="Account details"></textarea>
+      <div id="delMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>
+      <button class="btn" id="delSend" onclick="sendDeliver()">📤 Send to customer</button>
+      <button class="btn sec" style="margin-top:8px" onclick="closeDeliver()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- Request a book -->
 <div class="overlay" id="bookOverlay" onclick="if(event.target===this)closeBookRequest()">
   <div class="sheet">
@@ -1198,6 +1214,7 @@ let subsSearchDebounce=null, subsSearchSeq=0;
 function subsSearchInput(v){
   document.getElementById('subsSearchClearBtn').style.display=v?'flex':'none';
   clearTimeout(subsSearchDebounce);
+  if(ADMIN_EDIT){ subsSearchDebounce=setTimeout(()=>loadAdminDelivered(true),300); return; }
   const q=v.trim();
   if(!q){ subsSearchSeq++; renderOrders(); return; }
   subsSearchDebounce=setTimeout(()=>runSubsSearch(q),300);
@@ -1485,15 +1502,25 @@ function loadSubsInChat(){
 }
 
 // Counts on the My Subscriptions and Pending Orders tabs
+let adminPending=[];
 function setTabBadges(){
   const set=(id,n)=>{ const el=document.getElementById(id); el.textContent=n; el.classList.toggle('vis',n>0); };
-  set('tbSubs',(SUBS_DATA&&SUBS_DATA.d?SUBS_DATA.d.length:0));
-  set('tbPending',(SUBS_DATA&&SUBS_DATA.p?SUBS_DATA.p.length:0));
+  // the admin's tabs count every customer's orders, not their own
+  set('tbSubs',ADMIN_EDIT?0:(SUBS_DATA&&SUBS_DATA.d?SUBS_DATA.d.length:0));
+  set('tbPending',ADMIN_EDIT?adminPending.length:(SUBS_DATA&&SUBS_DATA.p?SUBS_DATA.p.length:0));
   const unread=(SUBS_DATA&&SUBS_DATA.an)||0;
   document.getElementById('tbSupportDot').classList.toggle('vis',unread>0);
   document.getElementById('annDot').classList.toggle('vis',unread>0);
 }
 setTabBadges();
+if(ADMIN_EDIT){
+  document.querySelector('.tb[data-tab=subs] span:nth-child(2)').textContent='Delivered';
+  document.querySelector('.credits-btn').style.display='none';   // the admin's own credits are not what this Shop is for
+  document.getElementById('subsSearchInput').placeholder='Search order #, subscription, customer, username, password';
+  document.getElementById('tbSubs').classList.remove('vis'); document.getElementById('tbSubs').textContent='';
+  // the number on Pending Orders is every customer's, fetched once the page is up
+  setTimeout(()=>{ apiGet('/api/admin_pending').then(d=>{ adminPending=d.items||[]; setAdminBadges(); }).catch(()=>{}); },0);
+}
 if(IS_COWORKER){
   document.querySelector('.credits-btn').style.display='none';
   document.getElementById('freeRow').style.display='none';
@@ -1530,7 +1557,7 @@ function showPage(id){
 }
 // ── Bottom tabs ───────────────────────────────────────────────────────
 const TAB_PAGES={catalog:'p1',subs:'pSubs',pending:'pPending',contact:'pContact'};
-const TAB_TITLES={catalog:'Medic SalesBot',subs:'My Subscriptions',pending:'Pending Orders',contact:'Support'};
+const TAB_TITLES={catalog:'Medic SalesBot',subs:ADMIN_EDIT?'Delivered Subscriptions':'My Subscriptions',pending:'Pending Orders',contact:'Support'};
 function switchTab(name){
   if(!TAB_PAGES[name]) name='catalog';
   showPage(TAB_PAGES[name]);
@@ -1539,9 +1566,10 @@ function switchTab(name){
   if(name==='subs'){
     document.getElementById('subsSearchInput').value='';
     document.getElementById('subsSearchClearBtn').style.display='none';
-    subsSearchSeq++; renderOrders();
+    subsSearchSeq++;
+    if(ADMIN_EDIT) loadAdminDelivered(true); else renderOrders();
   }
-  if(name==='pending') renderPending();
+  if(name==='pending'){ if(ADMIN_EDIT) renderAdminPending(); else renderPending(); }
   window.scrollTo(0,0);
 }
 function openTg(url){
@@ -1549,6 +1577,103 @@ function openTg(url){
   window.open(url,'_blank');
 }
 function goCatalog(){switchTab('catalog');tg.MainButton.hide()}
+
+// ── Admin Shop: Delivered Subscriptions and Pending Orders tabs ──────────────
+// In the admin's own (🛠 edit) Shop these two tabs show every customer's orders, and
+// pending ones can be delivered from here.
+let adminDel={items:[],total:0,offset:0}, adminDelSeq=0;
+function setAdminBadges(){
+  const el=document.getElementById('tbPending'); el.textContent=adminPending.length; el.classList.toggle('vis',adminPending.length>0);
+}
+const cardMeta=i=>escHtml(i.customer)+(i.user_id?' · ID '+i.user_id:'')+' · '+escHtml(i.date||'');
+async function loadAdminDelivered(reset){
+  const el=document.getElementById('ordersContent');
+  const q=document.getElementById('subsSearchInput').value.trim();
+  if(reset){ adminDel={items:[],total:0,offset:0}; el.innerHTML=loadingHtml; }
+  const seq=++adminDelSeq;
+  try{
+    const data=await apiGet('/api/admin_delivered?q='+encodeURIComponent(q)+'&offset='+adminDel.offset);
+    if(seq!==adminDelSeq) return;
+    adminDel.items=adminDel.items.concat(data.items||[]); adminDel.total=data.total||0; adminDel.offset=adminDel.items.length;
+    if(!adminDel.items.length){ el.innerHTML='<div class="search-empty">'+(q?'No delivered subscription matches your search.':'Nothing has been delivered yet.')+'</div>'; return; }
+    el.innerHTML='<div class="t-meta" style="margin:0 0 8px">'+adminDel.total+' delivered'+(q?' match your search':'')+'</div>'+
+      adminDel.items.map((i,n)=>
+        '<div class="t-card" id="ad-'+n+'"><div class="t-top" style="cursor:pointer" onclick="toggleAdminCard('+n+')">'+
+        '<div class="t-title">'+escHtml(i.name)+' <span style="color:var(--hint);font-weight:400">#'+i.order_id+'</span><div class="t-meta">'+cardMeta(i)+'</div></div>'+
+        '<span class="t-pill ok">✅</span></div>'+
+        '<div class="ad-body" style="display:none"><div class="t-body">'+(i.text?escHtml(i.text):'<span style="color:var(--hint)">No text on file for this delivery.</span>')+'</div>'+
+        '<div style="display:flex;gap:8px;margin-top:10px">'+
+          (i.text?'<button class="tk-btn" onclick="copyAdminText('+n+')">📋 Copy</button>':'')+
+          (i.delivery_id?'<button class="tk-btn" onclick="adminChat(\'editdeliv\','+i.delivery_id+')">✏️ Edit in chat</button>':'')+
+        '</div></div></div>').join('')+
+      (adminDel.items.length<adminDel.total?'<button class="btn sec" style="margin:4px 0 8px" onclick="loadAdminDelivered(false)">Show more</button>':'');
+  }catch(e){ if(seq===adminDelSeq) el.innerHTML=failHtml(e); }
+}
+function toggleAdminCard(n){
+  const b=document.querySelector('#ad-'+n+' .ad-body'); b.style.display=b.style.display==='none'?'block':'none';
+}
+function copyAdminText(n){
+  navigator.clipboard.writeText(adminDel.items[n].text||'').then(()=>showToast('Copied')).catch(()=>showToast('Select the text and copy it'));
+}
+async function adminChat(action,id){
+  try{
+    const resp=await fetch(withAuth('/api/admin_chat_action'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,id})});
+    const data=await resp.json().catch(()=>({ok:false}));
+    if(!data.ok){ showToast(data.error||'Could not open it in the chat.'); return; }
+    showToast('Continue in the chat…'); setTimeout(()=>{ try{ tg.close(); }catch(e){} },700);
+  }catch(e){ showToast('Network error — please try again.'); }
+}
+
+async function renderAdminPending(){
+  const el=document.getElementById('pendingContent'); el.innerHTML=loadingHtml;
+  try{
+    const data=await apiGet('/api/admin_pending');
+    adminPending=data.items||[]; setAdminBadges();
+    drawAdminPending();
+  }catch(e){ el.innerHTML=failHtml(e); }
+}
+function drawAdminPending(){
+  const el=document.getElementById('pendingContent');
+  if(!adminPending.length){ el.innerHTML='<div class="empty-sheet"><div class="eico">✅</div><div style="font-size:14px;font-weight:600;margin-bottom:6px">Nothing waiting for delivery</div><div style="font-size:12px;color:var(--hint)">Paid orders that still need delivering show up here.</div></div>'; return; }
+  const orders=[]; adminPending.forEach(i=>{ let o=orders.find(x=>x.order_id===i.order_id); if(!o){ o={order_id:i.order_id,customer:i.customer,user_id:i.user_id,date:i.date,units:[]}; orders.push(o); } o.units.push(i); });
+  el.innerHTML='<div class="t-meta" style="margin:0 0 8px">'+adminPending.length+' to deliver · '+orders.length+' order'+(orders.length===1?'':'s')+'</div>'+
+    orders.map(o=>'<div class="sub-section-lbl" style="margin-top:6px">Order #'+o.order_id+' · '+escHtml(o.customer)+' · '+escHtml(o.date)+'</div>'+
+      o.units.map(i=>
+        '<div class="t-card" id="ap-'+i.fid+'"><div class="t-top"><div class="t-title">'+escHtml(i.name)+(i.unit>1?' #'+i.unit:'')+'</div>'+
+        '<span class="t-pill '+(i.state==='needs_info'?'open':'ok')+'">'+(i.state==='needs_info'?'⌛ Waiting for customer':'📤 Ready')+'</span></div>'+
+        (i.info?'<div class="t-body" style="font-size:12px;color:var(--hint)">'+escHtml(i.info)+'</div>':'<div class="t-meta">The customer has not sent any details.</div>')+
+        '<div style="display:flex;gap:8px;margin-top:10px">'+
+          (i.imd?'':'<button class="btn" style="margin:0;padding:10px;width:auto;flex:1.4" onclick="openDeliver('+i.fid+')">📤 Deliver</button>')+
+          '<button class="tk-btn" style="flex:1;width:auto;white-space:nowrap" onclick="adminChat(\'deliver\','+i.fid+')">'+(i.imd?'🤖 Renew / deliver in chat':'💬 Open in chat')+'</button>'+
+        '</div></div>').join('')).join('');
+}
+let deliverFid=null;
+function openDeliver(fid){
+  const i=adminPending.find(x=>x.fid===fid); if(!i) return;
+  deliverFid=fid;
+  document.getElementById('delTitle').textContent=i.name+' · Order #'+i.order_id;
+  document.getElementById('delInfo').textContent=i.customer+(i.state==='needs_info'?'\nThe customer has not sent their details yet.':'')+(i.info?'\n'+i.info:'');
+  document.getElementById('delText').value=''; document.getElementById('delMsg').textContent='';
+  document.getElementById('delOverlay').classList.add('on');
+  setTimeout(()=>document.getElementById('delText').focus(),150);
+}
+function closeDeliver(){document.getElementById('delOverlay').classList.remove('on'); deliverFid=null;}
+async function sendDeliver(){
+  const msg=document.getElementById('delMsg'), btn=document.getElementById('delSend');
+  const text=document.getElementById('delText').value.trim();
+  const bad=t=>{ msg.style.color='#dc2626'; msg.textContent=t; };
+  if(!text) return bad('Type the account details to send.');
+  const fid=deliverFid; if(!fid) return;
+  btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Sending…';
+  try{
+    const resp=await fetch(withAuth('/api/admin_deliver'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fulfilment_id:fid,text})});
+    const data=await resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
+    if(!data.ok){ bad(data.error||'Could not deliver.'); return; }
+    adminPending=adminPending.filter(x=>x.fid!==fid); setAdminBadges(); closeDeliver(); drawAdminPending();
+    showToast('Delivered · '+data.name+' · Order #'+data.order_id);
+  }catch(e){ bad('Network error — please try again.'); }
+  finally{ btn.disabled=false; }
+}
 
 // ── Support tab: tickets, announcements, credits and the free-accounts link ──
 async function apiGet(path){
