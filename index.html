@@ -143,6 +143,23 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .dur-anchor{position:relative;flex-shrink:0;margin-left:8px}
 .dur-anchor .dur-btn{margin-left:0;min-width:112px;text-align:center}
 .dur-btn.one{cursor:default}
+/* A supplier-panel product is two lines: the title, then the duration button and +. */
+.solo.panel-row{flex-direction:column;align-items:stretch;gap:9px}
+.panel-row .pr-top{display:flex;align-items:center;gap:10px;min-width:0}
+.panel-row .pr-top .rn{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.panel-row .pr-top .rn.full{white-space:normal;overflow-wrap:anywhere}
+.panel-row .pr-top .rs{margin:0;flex-shrink:0}
+.panel-row .pr-bot{display:flex;align-items:center;gap:8px}
+.panel-row .dur-anchor{flex:1;min-width:0;margin-left:0}
+.panel-row .dur-anchor .dur-btn{width:100%;min-width:0}
+/* a small shine sweeping across the button says "tap me, there are options" */
+.dur-btn.multi{position:relative;overflow:hidden}
+.dur-btn.multi::after{content:"";position:absolute;top:0;bottom:0;left:-60%;width:38%;pointer-events:none;
+  background:linear-gradient(100deg,transparent,rgba(45,212,191,.42),transparent);transform:skewX(-20deg);
+  animation:durShine 3.4s ease-in-out infinite;animation-delay:var(--sd,0s)}
+@keyframes durShine{0%,60%{left:-60%}100%{left:135%}}
+.dur-anchor.open .dur-btn.multi::after{display:none}
+@media (prefers-reduced-motion:reduce){.dur-btn.multi::after{animation:none;display:none}}
 .dur-menu{display:none;position:absolute;right:0;top:calc(100% + 4px);min-width:100%;width:max-content;z-index:30;
   background:var(--bg2);border:1.5px solid var(--teal2);border-radius:12px;overflow:hidden;
   box-shadow:0 8px 22px rgba(0,0,0,.4)}
@@ -1391,14 +1408,18 @@ function panelOf(row){
   return cat&&cat.panel.find(x=>x.name===row.dataset.panelName);
 }
 function makePanelRow(p){
-  const d=document.createElement('div'); d.className='solo'; d.dataset.panelName=p.name;
+  const d=document.createElement('div'); d.className='solo panel-row'; d.dataset.panelName=p.name;
   const sel=defaultVariant(p); d.dataset.selected=sel.id;
-  d.innerHTML=`<div style="font-size:21px">🗂</div>
-    <div class="ri"><div class="rn">${escHtml(p.title)}</div><div class="rs">${panelSubHtml(d,p)}</div></div>
-    <div class="dur-anchor"><button class="dur-btn${p.variants.length>1?'':' one'}" onclick="toggleDurations(this)"></button><div class="dur-menu"></div></div>
-    <button class="add-btn" id="ab-${sel.id}" onclick="addPanelSelected(this)">${cart[sel.id]?'✓':'+'}</button>`;
+  const several=p.variants.length>1;
+  d.innerHTML=`<div class="pr-top"><span style="font-size:21px">🗂</span>
+      <div class="rn" onclick="this.classList.toggle('full')">${escHtml(p.title)}</div><div class="rs">${panelSubHtml(d,p)}</div></div>
+    <div class="pr-bot">
+      <div class="dur-anchor"><button class="dur-btn${several?' multi':' one'}" onclick="toggleDurations(this)"></button><div class="dur-menu"></div></div>
+      <button class="add-btn" id="ab-${sel.id}" onclick="addPanelSelected(this)">${cart[sel.id]?'✓':'+'}</button>
+    </div>`;
   const add=d.querySelector('.add-btn'); add.classList.toggle('in',!!cart[sel.id]);
-  d.querySelector('.dur-btn').textContent=durBtnText(d,false);
+  const btn=d.querySelector('.dur-btn'); btn.textContent=durBtnText(d,false);
+  if(several) btn.style.setProperty('--sd', (-Math.random()*3.4).toFixed(2)+'s');
   return d;
 }
 function refreshPanelFromPrices(){
