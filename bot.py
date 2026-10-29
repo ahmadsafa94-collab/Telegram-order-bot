@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "47"
+MINI_APP_VERSION = "50"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -3638,7 +3638,6 @@ def main_menu_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
                 [KeyboardButton("🟢 SHOP 🟢\n(Click here to buy)", web_app=WebAppInfo(url=shop_url))],
                 [_badge(ANNOUNCEMENTS_LABEL, ann_count), JOIN_CHANNEL_LABEL],
                 [GET_FREE_LABEL, MY_CREDITS_LABEL],
-                [BOOK_REQUEST_LABEL, TICKET_LABEL],
                 [SUPPORT_LABEL],
             ],
             resize_keyboard=True,
@@ -4089,10 +4088,14 @@ async def book_link_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     request_id = db_create_book_request(user_id, username, link)
     await update.message.reply_text("Thanks! Please wait for an update from us regarding pricing.")
+    await _notify_admin_book_request(context.bot, request_id, user_id, username, link)
 
+
+async def _notify_admin_book_request(bot, request_id: int, user_id: int, username, link: str):
+    """Sends the admin a new book request with its Set Price / Reply / Cancel buttons."""
     if ADMIN_CHAT_ID:
         who = f"@{username}" if username else str(user_id)
-        await context.bot.send_message(
+        await bot.send_message(
             chat_id=ADMIN_CHAT_ID,
             text=f"📚 New book request #{request_id} — {who}\n\n{link}",
             reply_markup=book_request_admin_buttons(request_id),
@@ -9759,11 +9762,11 @@ Buying a subscription:
 6. The payment is verified, the order is confirmed, and the subscription is delivered in the shop bot's chat. Telegram Stars and credits are confirmed instantly.
 
 After ordering:
-- "{MY_SUBS_LABEL}" → "✅ Registered Subscriptions" shows delivered subscriptions and their login details; "⏳ Pending Orders" shows orders not delivered yet and what each is waiting for.
+- In the shop (the 🟢 SHOP button), the bottom tabs are: Catalogue, My Subscriptions (delivered subscriptions and their login details), Pending Orders (orders not delivered yet and what each is waiting for) and Contact us (Support, channel, group).
 - If a customer paid but hasn't uploaded the receipt, they should go back to their "Order #<number>" message in the shop bot chat, tap "✅ I've Paid" and upload it there. Receipts sent anywhere else are not linked to the order.
-- If an order is waiting for details (needs info), "⏳ Pending Orders" → the order asks for the missing information again.
-- Delivery normally happens after confirmation; if it takes more than 48 hours, use "{TICKET_LABEL}" or "{SUPPORT_LABEL}" in the shop bot.
-- Other buttons: "{GET_FREE_LABEL}" (referrals), "{MY_CREDITS_LABEL}", "{BOOK_REQUEST_LABEL}", "{ANNOUNCEMENTS_LABEL}".
+- If an order is waiting for details (needs info), the Pending Orders tab has a button to complete them.
+- Delivery normally happens after confirmation; if it takes more than 48 hours, open a ticket from that order in the Pending Orders tab (or from the subscription's page in My Subscriptions), or use the Contact us tab / "{SUPPORT_LABEL}".
+- Books: the "📚 Request a Book" button at the top of the Catalogue tab (send the book's link). Other buttons: "{GET_FREE_LABEL}" (referrals), "{MY_CREDITS_LABEL}", "{ANNOUNCEMENTS_LABEL}".
 """
 
 # What each order status means for the customer, for the reply bot.
@@ -10758,6 +10761,53 @@ async def http_set_item_cost(request):
     return web.json_response({"ok": True, "item_id": item_id, "cost": cost}, headers=headers)
 
 
+BOOK_REQUESTS_PER_HOUR = 5
+
+
+def db_count_recent_book_requests(user_id: int, minutes: int = 60) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    since = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+    n = conn.execute(
+        "SELECT COUNT(*) FROM book_requests WHERE user_id = ? AND created_at >= ?", (user_id, since)
+    ).fetchone()[0]
+    conn.close()
+    return n
+
+
+async def http_request_book(request):
+    """The 📚 Request a Book button in the Catalogue tab: the customer sends the book's
+    link, it is saved like one sent in the chat (so it is listed under 📚 Book Requests)
+    and the admin gets it with the Set Price / Reply / Cancel buttons."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    try:
+        link = (await request.json())["link"]
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    link = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", link).strip() if isinstance(link, str) else ""
+    if len(link) < 4 or len(link) > 500:
+        return web.json_response({"ok": False, "error": "Paste the link of the book."}, status=400, headers=headers)
+    if db_count_recent_book_requests(user_id) >= BOOK_REQUESTS_PER_HOUR:
+        return web.json_response(
+            {"ok": False, "error": "You have sent several requests already — please wait a while before sending more."},
+            status=429, headers=headers)
+    username = db_get_username(user_id)
+    request_id = db_create_book_request(user_id, username, link)
+    bot_ = request.app["application"].bot
+    try:
+        await bot_.send_message(chat_id=user_id, text="Thanks! Please wait for an update from us regarding pricing.")
+    except Exception:
+        logger.exception("Could not confirm book request #%s to %s", request_id, user_id)
+    try:
+        await _notify_admin_book_request(bot_, request_id, user_id, username, link)
+    except Exception:
+        logger.exception("Could not notify the admin of book request #%s", request_id)
+    return web.json_response({"ok": True, "request_id": request_id}, headers=headers)
+
+
 async def http_set_item_title(request):
     """The ✏️ in the Shop on the admin's own link: renames a subscription (or a
     group such as "Access MhMedical") for everyone. Admin's own verified account
@@ -11136,6 +11186,8 @@ async def start_api_server(application):
     api_app.router.add_options("/api/add_item", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_item_cost", http_set_item_cost)
     api_app.router.add_options("/api/set_item_cost", http_set_coworker_price_options)
+    api_app.router.add_post("/api/request_book", http_request_book)
+    api_app.router.add_options("/api/request_book", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_item_title", http_set_item_title)
     api_app.router.add_options("/api/set_item_title", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_coworker_price", http_set_coworker_price)
