@@ -322,6 +322,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 }
 .pend-action:active{opacity:.82}
 .pend-action.teal{background:var(--teal)}
+.tk-btn{display:block;width:100%;padding:9px 12px;border-radius:10px;border:1.5px solid rgba(255,255,255,.14);background:transparent;
+  color:var(--hint);font-size:12.5px;font-weight:700;cursor:pointer;text-align:center}
+.tk-btn:active{opacity:.8}
 
 /* ── Bottom tab bar ───────────── */
 .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:160;display:flex;background:var(--bg2);
@@ -1262,6 +1265,7 @@ function renderOrders(){
             </div>
             <div class="sub-chevron">›</div>
           </div>
+          ${fid?`<div style="padding:0 15px 12px;width:100%"><button class="tk-btn" onclick="event.stopPropagation();ticketFor(${fid})">🎫 Send a ticket</button></div>`:''}
         </div>`;
         return;
       }
@@ -1343,7 +1347,7 @@ function renderPending(){
         </div>
         ${info.btn&&mine?`<button class="pend-action ${info.cls||''}" onclick="pendAction('${info.action}',${fid||0},${oid||0})">${info.btn}</button>`:''}
         ${!mine?`<div class="sub-meta" style="padding:0 15px 11px 56px">${PREVIEW_CW?'Preview — view only.':'Placed from another account — view only.'}</div>`:''}
-        ${fid&&!PREVIEW_CW?`<button class="pend-action" style="background:transparent;color:var(--hint);border:1.5px solid rgba(255,255,255,.12);margin-top:${info.btn?0:6}px" onclick="orderTicket(${fid})">🎫 Open a ticket about this order</button>`:''}
+        ${fid?`<div style="padding:${info.btn&&mine?0:6}px 15px 12px;width:100%"><button class="tk-btn" onclick="ticketFor(${fid})">🎫 Send a ticket</button></div>`:''}
       </div>`;
   };
   const groups=[
@@ -1967,6 +1971,7 @@ function renderOrdersList(orders, isSearching, targetId){
           '<div style="font-size:11px;color:var(--hint);margin-top:2px">'+statusLabel+'</div>'+
         '</div>'+
       '</div>'+
+      (o.fulfilment_id?'<div style="padding:0 13px 11px"><button class="tk-btn" onclick="event.stopPropagation();ticketFor('+o.fulfilment_id+')">🎫 Send a ticket</button></div>':'')+
     '</div>';
   }).join('');
 }
@@ -2005,7 +2010,7 @@ async function openOrderDetail(fulfilmentId, deliveryId){
       '<div class="card" id="orderDetailCredText" style="padding:11px 13px;white-space:pre-wrap;font-size:13px;line-height:1.6">'+
         escHtml(data.credentials||'')+
       '</div>'+
-      (data.fulfilment_id&&!PREVIEW_CW?'<button class="btn" style="margin-top:12px" onclick="orderTicket('+data.fulfilment_id+')">🎫 Open a Ticket About This Order</button>':'')+
+      (data.fulfilment_id?'<button class="btn" style="margin-top:12px" onclick="ticketFor('+data.fulfilment_id+')">🎫 Send a ticket about this order</button>':'')+
       '<button class="btn sec" style="margin-top:8px" onclick="closeOrderDetail()">← Back</button>';
   }catch(e){
     content.innerHTML='<div class="search-empty">Could not load this order: '+escHtml(e.message||String(e))+'</div>'+backBtn;
@@ -2220,6 +2225,12 @@ async function saveCwPrice(useDefault){
   }finally{ btn.disabled=false; }
 }
 
+// The 🎫 Send a ticket button on every delivered and pending order. In the admin's coworker
+// preview it only shows the button: a ticket there would be opened as the admin.
+function ticketFor(fulfilmentId){
+  if(PREVIEW_CW){ showToast('Preview: the coworker taps this to send a ticket'); return; }
+  orderTicket(fulfilmentId);
+}
 function orderTicket(fulfilmentId){
   closeOrderDetail();
   botAction({action:'order_ticket', fulfilment_id: fulfilmentId});
