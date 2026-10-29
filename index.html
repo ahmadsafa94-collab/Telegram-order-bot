@@ -133,8 +133,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .row{display:flex;align-items:center;gap:10px;padding:11px 13px;border-bottom:1px solid rgba(255,255,255,.05)}
 .row:last-child{border-bottom:none}
 .ri{flex:1;min-width:0}
-.rn{font-size:13px;font-weight:500;line-height:1.3}
-.rs{font-size:11px;color:var(--hint);margin-top:1px}
+.rn{font-size:13px;font-weight:500;line-height:1.3;overflow-wrap:anywhere}
+.rs{font-size:11px;color:var(--hint);margin-top:1px;overflow-wrap:anywhere}
 .rp{font-size:14px;font-weight:700;color:var(--teal2);flex-shrink:0}
 .dur-btn{flex-shrink:0;margin-left:8px;background:transparent;border:1.5px solid var(--teal2);color:var(--teal2);
   border-radius:20px;padding:7px 11px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
@@ -163,6 +163,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .solo{display:flex;align-items:center;gap:10px;padding:11px 13px;
   background:var(--bg2);border:1px solid rgba(255,255,255,.07);
   border-radius:var(--r);margin-bottom:7px}
+/* A family of products (e.g. Access MhMedical): one row that opens to the products inside it. */
+.pgroup-head{cursor:pointer;margin-bottom:7px}
+.pgroup-head .chev{flex-shrink:0;color:var(--hint);font-size:20px;line-height:1;transition:transform .15s}
+.pgroup.open>.pgroup-head .chev{transform:rotate(90deg)}
+.pgroup.open>.pgroup-head{border-color:var(--teal2)}
+.pgroup-body{display:none;margin:0 0 9px 10px;padding-left:8px;border-left:2px solid rgba(45,212,191,.4)}
+.pgroup.open>.pgroup-body{display:block}
+.cw-link{background:none;border:none;color:var(--hint);font-size:12px;padding:6px 0 0;cursor:pointer;text-decoration:underline}
 
 /* ── Detail forms ───────────── */
 .dblock{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);margin-bottom:12px;overflow:hidden}
@@ -225,7 +233,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   max-height:84vh;overflow-y:auto;padding:0 0 32px}
 .sheet-handle{width:38px;height:4px;background:rgba(255,255,255,.18);
   border-radius:99px;margin:10px auto 14px}
-.sheet-title{font-size:16px;font-weight:700;padding:0 15px 11px;
+.sheet-title{font-size:16px;font-weight:700;padding:0 15px 11px;overflow-wrap:anywhere;
   border-bottom:1px solid rgba(255,255,255,.07)}
 
 /* Basket items */
@@ -455,11 +463,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     <div class="sheet-handle"></div>
     <div class="sheet-title" id="cwPriceTitle">Edit price</div>
     <div style="padding:0 15px 15px">
-      <div id="cwPriceInfo" style="font-size:13px;color:var(--hint);margin-bottom:10px"></div>
-      <input id="cwPriceInput" type="number" inputmode="decimal" min="0" step="0.01" placeholder="New price in $"
-        style="width:100%;background:transparent;border:1.5px solid var(--field-border);border-radius:10px;padding:11px 12px;color:var(--text);font-size:15px">
+      <div id="cwTitleBox" style="display:none;margin-bottom:12px">
+        <div style="font-size:12px;color:var(--hint);margin-bottom:4px">Title shown in the shop</div>
+        <input id="cwTitleInput" type="text" maxlength="80" aria-label="Title shown in the shop"
+          style="width:100%;background:transparent;border:1.5px solid var(--field-border);border-radius:10px;padding:11px 12px;color:var(--text);font-size:15px">
+        <button class="cw-link" id="cwTitleReset" type="button" style="display:none" onclick="resetCwTitle()">↩️ Use the original title</button>
+      </div>
+      <div id="cwPriceBox">
+        <div id="cwPriceInfo" style="font-size:13px;color:var(--hint);margin-bottom:10px;overflow-wrap:anywhere"></div>
+        <input id="cwPriceInput" type="number" inputmode="decimal" min="0" step="0.01" placeholder="New price in $"
+          style="width:100%;background:transparent;border:1.5px solid var(--field-border);border-radius:10px;padding:11px 12px;color:var(--text);font-size:15px">
+      </div>
       <div id="cwPriceMsg" style="font-size:12px;margin-top:6px;min-height:16px"></div>
-      <button class="btn" id="cwPriceSave" onclick="saveCwPrice(false)">Save price</button>
+      <button class="btn" id="cwPriceSave" onclick="saveCwPrice(false)">Save</button>
       <button class="btn sec" id="cwPriceReset" style="margin-top:8px" onclick="saveCwPrice(true)">↩️ Use their default price</button>
       <button class="btn sec" style="margin-top:8px" onclick="closeCwPriceEdit()">Cancel</button>
     </div>
@@ -587,7 +603,7 @@ const NO_DETAILS_NEEDED = new Set(['uptodate_ai_2m', 'medical_toolkit']);
 const MANUAL_ACCESS_ITEMS = new Set(['medical_toolkit']);
 
 /* PANEL-CATALOG:START */
-const PANEL_CATALOG = [["5MinuteConsult",[["pn275","1 Year",28.0]]],["AAP Pediatric Care",[["pn340","1 Year",35.0]]],["AAP- 5 journals All",[["pn608","1 Year",30.0]]],["AAP-Pediatrics + Pediatrics In Review",[["pn813","1 Year",27.5]]],["Academic Search Ultimate ( Ebscohost )",[["pn157","3 Months",24.0],["pn156","6 Months",25.0],["pn155","1 Year",30.0]]],["Access All Products",[["pn384","1 Year",120.0]]],["Access Anesthesiology",[["pn59","1 Year",30.0]]],["Access Cardiology",[["pn65","1 Year",30.0]]],["Access DermatologyDxRx",[["pn68","1 Year",30.0]]],["Access Emergency Medicine",[["pn71","1 Year",30.0]]],["Access Hematology Oncology",[["pn74","1 Year",30.0]]],["Access Medicina",[["pn77","1 Year",27.5]]],["Access Neurology",[["pn83","1 Year",30.0]]],["Access ObGyn",[["pn86","1 Year",30.0]]],["Access Pediatrics",[["pn89","1 Year",30.0]]],["Access Pharmacy",[["pn92","1 Year",30.0]]],["Access Physiotherapy",[["pn95","1 Year",30.0]]],["Access Surgery",[["pn98","1 Year",30.0]]],["AccessWorldmed",[["pn864","1 Year",30.0]]],["Acland’s Video Atlas of Human Anatomy",[["pn287","1 Year",27.5]]],["ALtmetrics",[["pn626","3 Months",30.0]]],["American Association for Cancer Research - AACR Journals",[["pn848","1 Year",30.0]]],["American Diabetes Association FULL JOURNALS Journals",[["pn884","1 Year",35.0]]],["APA PsycArticles ( Ebscohost )",[["pn160","3 Months",24.0],["pn159","6 Months",25.0],["pn158","1 Year",30.0]]],["APA PsycBooks ( Ebscohost )",[["pn163","3 Months",24.0],["pn162","6 Months",25.0],["pn161","1 Year",30.0]]],["APA PsycExtra ( Ebscohost )",[["pn370","3 Months",25.0],["pn834","1 Year",35.0]]],["APA PsycInfo ( Ebscohost )",[["pn166","3 Months",24.0],["pn165","6 Months",25.0],["pn164","1 Year",30.0]]],["APA PsycTests ( Ebscohost )",[["pn169","3 Months",24.0],["pn168","6 Months",25.0],["pn167","1 Year",30.0]]],["APA PsycTherapy ( Ebscohost )",[["pn172","3 Months",25.0],["pn854","6 Months",30.0],["pn833","1 Year",35.0]]],["ASME Digital Collection",[["pn829","1 Year",40.0]]],["ASTM Standards",[["pn827","1 Year",55.0]]],["BMJ Journals (WebProxy)",[["pn180","3 Months",30.0],["pn183","1 Year",45.0]]],["Business Source Ultimate ( VIA Ebscohost )",[["pn175","3 Months",24.0],["pn174","6 Months",25.0],["pn173","1 Year",30.0]]],["Case Files Collection-Access",[["pn101","1 Year",30.0]]],["CINAHL (Ebscohost)",[["pn178","3 Months",24.0],["pn176","1 Year",30.0]]],["CINAHL Ultimate (Ebscohost)",[["pn184","3 Months",26.0],["pn182","1 Year",35.0]]],["Clinical pharmacology (WebProxy)",[["pn677","6 Months",25.0],["pn678","1 Year",27.5]]],["ClinicalKey Nursing (WebProxy)",[["pn680","6 Months",25.0],["pn679","1 Year",27.5]]],["ClinicalKey Student (Direct)",[["pn821","1 Year",30.0]]],["ClinicalKey,Clinicalkey student",[["pn42","1 Year",35.0]]],["Cochrane Library",[["pn321","1 Year",30.0]]],["combo products of therapeuticresearch.com",[["pn366","1 Year",35.0]]],["Complete Anatomy",[["pn832","6 Months",30.0]]],["Dental Update",[["pn203","1 Year",27.5]]],["Dentistry & Oral Sciences (ebscohost)",[["pn193","3 Months",25.0],["pn192","6 Months",30.0],["pn191","1 Year",35.0]]],["DerWent (Patent)-Web Of Science",[["pn57","1 Year",30.0]]],["Dynamed+ Dynamed Decision",[["pn650","3 Months",25.0],["pn651","1 Year",30.0]]],["Dynamedex+DynaAI",[["pn690","1 Year",40.0]]],["Dynamic Health",[["pn811","3 Months",24.0],["pn812","1 Year",30.0]]],["eBook EBSCOhost (400K)",[["pn334","3 Months",30.0],["pn195","6 Months",35.0],["pn333","1 Year",40.0]]],["eBook EBSCOhost (462K)",[["pn336","3 Months",30.0],["pn198","6 Months",35.0],["pn335","1 Year",40.0]]],["eBook EBSCOhost (600K)",[["pn338","3 Months",30.0],["pn201","6 Months",35.0],["pn337","1 Year",45.0]]],["EBSCO eBooks Business (23,000 e-books)",[["pn815","1 Year",45.0]]],["EBSCO eBooks Community College (62,000 e-books)",[["pn669","3 Months",27.5]]],["EBSCO eBooks University Press(37,000 e-books)",[["pn817","1 Year",45.0]]],["Education Source Ultimate( Ebscohost )",[["pn641","3 Months",26.0],["pn640","6 Months",36.0],["pn639","1 Year",35.0]]],["Embase,ClinicalKey,Sciencedirect",[["pn40","1 Year",40.0]]],["Emerald Journals",[["pn867","3 Months",27.5],["pn870","6 Months",32.5]]],["Engineeringvilage (Compendex)",[["pn47","6 Months",30.0],["pn46","1 Year",35.0]]],["ESI - Essential Science Indicators +JCR",[["pn55","1 Year",27.5]]],["ETG Therapeutic Guidelines (WebProxy)",[["pn224","1 Year",30.0]]],["European Journal of Prosthodontics and Restorative Dentistry",[["pn190","3 Months",26.0],["pn188","1 Year",30.0]]],["ExamMaster",[["pn831","6 Months",35.0]]],["Expert path (WebProxy)",[["pn18","1 Month",24.0],["pn17","3 Months",25.0],["pn16","1 Year",30.0]]],["F.A. Davis AT Collection-Access",[["pn107","1 Year",30.0]]],["France-Clinicalkey Student (EMC Consult) webproxy",[["pn803","6 Months",35.0],["pn802","1 Year",45.0]]],["Grammarly Pro",[["pn367","1 Year",35.0]]],["Grammarly Pro + AI",[["pn826","1 Year",40.0]]],["IEEE Journals (WebProxy)",[["pn871","3 Months",30.0],["pn872","1 Year",35.0]]],["IGI Global (Ebooks & Journals)",[["pn19","2 Months",45.0],["pn20","1 Year",95.0]]],["IGI Global (Journals)",[["pn37","2 Months",30.0],["pn38","1 Year",45.0]]],["InCites-Clarivate Analytics",[["pn56","1 Year",30.0]]],["JAMA All Journals",[["pn404","1 Year",30.0]]],["JCR-Journal Citation Reports+ ESI",[["pn408","1 Year",27.5]]],["Journal of Neurosurgery",[["pn648","1 Month",25.0],["pn649","1 Year",30.0]]],["Library & Information Science Source ( Ebscohost )",[["pn211","3 Months",24.0],["pn210","6 Months",25.0],["pn209","1 Year",30.0]]],["Library, Information Science & Technology Fulltext (LISTA)",[["pn214","3 Months",24.0],["pn213","6 Months",25.0],["pn212","1 Year",30.0]]],["Lwwhealthlibrary Advanced Practice Nursing",[["pn393","1 Year",30.0]]],["Lwwhealthlibrary Anesthesiology",[["pn407","1 Year",30.0]]],["Lwwhealthlibrary Board Review Series",[["pn251","1 Year",30.0]]],["Lwwhealthlibrary Clerkship",[["pn272","1 Year",30.0]]],["Lwwhealthlibrary Emergency Medicine",[["pn400","1 Year",30.0]]],["Lwwhealthlibrary Exercise Science",[["pn254","1 Year",30.0]]],["Lwwhealthlibrary Internal Medicine",[["pn263","1 Year",30.0]]],["Lwwhealthlibrary International Anatomical Sciences",[["pn394","1 Year",30.0]]],["Lwwhealthlibrary International Premium Basic Sciences",[["pn395","1 Year",30.0]]],["Lwwhealthlibrary Lippincott Advisor",[["pn410","1 Year",30.0]]],["Lwwhealthlibrary Made Incredibly Easy!",[["pn248","1 Year",30.0]]],["Lwwhealthlibrary Neurology",[["pn245","1 Year",30.0]]],["Lwwhealthlibrary ObGyn",[["pn396","1 Year",30.0]]],["Lwwhealthlibrary Occupational Therapy",[["pn398","1 Year",30.0]]],["Lwwhealthlibrary Oncology",[["pn399","1 Year",30.0]]],["Lwwhealthlibrary Ophthalmology",[["pn257","1 Year",30.0]]],["Lwwhealthlibrary Orthopaedic Surgery",[["pn628","1 Year",30.0]]],["Lwwhealthlibrary Osteopathic Medicine",[["pn269","1 Year",30.0]]],["Lwwhealthlibrary Pathology",[["pn236","1 Year",30.0]]],["Lwwhealthlibrary Physical Therapy",[["pn239","1 Year",30.0]]],["Lwwhealthlibrary Premium Pharmacy",[["pn260","1 Year",30.0]]],["Lwwhealthlibrary Psychiatry",[["pn638","1 Year",30.0]]],["Lwwhealthlibrary Surgery",[["pn397","1 Year",30.0]]],["Mathscinet ( Ebscohost )",[["pn217","3 Months",24.0],["pn216","6 Months",25.0],["pn215","1 Year",30.0]]],["MEDLINE ( Ebscohost )",[["pn220","3 Months",24.0],["pn221","6 Months",25.0],["pn218","1 Year",27.5]]],["MEDLINE Ultimate (Ebscohost)",[["pn219","3 Months",25.0],["pn223","6 Months",30.0],["pn222","1 Year",35.0]]],["MedOne ComSci",[["pn610","1 Year",35.0]]],["MedOne Education",[["pn318","1 Year",30.0]]],["Medone Education+Neurosurgery+Plastic Surgery+Otolaryngology",[["pn627","1 Year",40.0]]],["MedOne Neurosurgery",[["pn327","1 Year",35.0]]],["Medone Neurosurgery+Plastic Surgery",[["pn612","1 Year",35.0]]],["Medone Neurosurgery+Plastic Surgery+Otolaryngology",[["pn614","1 Year",35.0]]],["Medone Neurosurgery+Plastic Surgery+Radiology",[["pn613","1 Year",40.0]]],["MedOne Ophthalmology",[["pn372","1 Year",35.0]]],["MedOne Plastic Surgery",[["pn353","1 Year",35.0]]],["MedOne Radiology",[["pn326","1 Year",35.0]]],["Natural Medicines -NatMed Pro",[["pn317","1 Year",30.0]]],["Nature Journals (webproxy)",[["pn204","1 Month",25.0],["pn205","3 Months",27.5],["pn206","1 Year",45.0]]],["Nursing Reference Center Plus (Ebscohost)",[["pn722","3 Months",25.0],["pn723","6 Months",27.5],["pn724","1 Year",30.0]]],["OMMBID",[["pn116","1 Year",30.0]]],["OnePetro",[["pn830","1 Year",45.0]]],["OverDrive eBooks Account (164k)",[["pn325","1 Year",30.0]]],["OverDrive eBooks Account (266k)",[["pn330","1 Year",32.5]]],["OverDrive eBooks Account (276k)",[["pn329","1 Year",32.5]]],["OverDrive eBooks Account (300k)",[["pn331","1 Year",35.0]]],["OverDrive eBooks Account (434k)",[["pn332","1 Year",40.0]]],["Ovid Journals Type 1 (Webproxy)",[["pn693","1 Month",25.0],["pn694","6 Months",30.0],["pn695","1 Year",35.0]]],["Ovid Journals Type 2 (Webproxy)",[["pn696","1 Month",30.0],["pn697","6 Months",35.0],["pn698","1 Year",45.0]]],["Ovid Journals Type 3 (Webproxy)",[["pn701","1 Month",35.0],["pn700","6 Months",50.0],["pn699","1 Year",60.0]]],["Oxford Journals (WebProxy)",[["pn189","2 Months",27.5],["pn881","6 Months",35.0],["pn882","1 Year",45.0]]],["Oxford Journals and ebooks (WebProxy)",[["pn177","2 Months",35.0],["pn880","1 Year",70.0]]],["Pediatric Patient Education",[["pn364","1 Year",30.0]]],["Pediatric Surgery Library",[["pn371","1 Year",27.5]]],["PEP - Psychoanalytic Electronic Publishing",[["pn721","1 Year",32.5]]],["pepid (WebProxy)",[["pn660","1 Month",24.0],["pn661","3 Months",26.0],["pn662","1 Year",32.5]]],["Pharmacotherapy Principles & Practice-Access",[["pn119","1 Year",30.0]]],["ProQuest Central (WebProxy)",[["pn181","1 Month",24.0],["pn187","3 Months",26.0],["pn185","1 Year",32.5]]],["ProQuest Dissertations and Theses (WebProxy)",[["pn665","1 Month",24.0],["pn663","3 Months",26.0],["pn664","1 Year",32.5]]],["Reaxys",[["pn49","6 Months",30.0],["pn48","1 Year",32.5]]],["Red Book 2024–2027 (AAP)",[["pn342","1 Year",30.0]]],["Rehabilitation & Sports Medicine (ebscohost)",[["pn229","3 Months",24.0],["pn228","6 Months",25.0],["pn227","1 Year",30.0]]],["Rockefeller University Press",[["pn676","1 Year",32.5]]],["Sage Journals",[["pn866","6 Months",35.0],["pn862","1 Year",35.0]]],["ScienceDirect (Type 3)",[["pn633","1 Year",40.0]]],["Sciencedirect,scival,ClinicalKey",[["pn51","6 Months",30.0],["pn50","1 Year",35.0]]],["Sciencedirect,Scopus,Embase,ClinicalKey,Reaxys,EngVillage",[["pn41","1 Year",50.0]]],["Sciencedirect,Scopus,Embase,Scival,Reaxys,EngVillage",[["pn45","6 Months",32.5],["pn44","1 Year",40.0]]],["Scopus AI",[["pn879","6 Months",35.0],["pn878","1 Year",40.0]]],["SPANISH-Clinicalkey Student",[["pn801","1 Year",30.0]]],["SPANISH-Clinicalkey.es + Clinicalkey Student",[["pn356","1 Year",35.0]]],["SPANISH-Lwwhealthlibrary Ciencias Básicas",[["pn363","1 Year",30.0]]],["SPORTDiscus with Full Text ( Ebscohost )",[["pn235","3 Months",24.0],["pn234","6 Months",25.0],["pn233","1 Year",30.0]]],["Springer Journals+ebooks",[["pn34","3 Months",30.0],["pn208","1 Year",60.0]]],["Statdx,ClinicalKey,Sciencedirect,Scopus,scival",[["pn53","6 Months",30.0],["pn52","1 Year",35.0]]],["Statdx,Expertpath,Immunoquery,ClinicalKey,Sciencedirect,Scopus,Scival",[["pn684","6 Months",35.0],["pn409","1 Year",45.0]]],["Statista",[["pn21","6 Months",45.0],["pn179","1 Year",65.0]]],["StatRef-Type 1",[["pn313","3 Months",24.0],["pn312","6 Months",26.0],["pn311","1 Year",30.0]]],["StatRef-Type 2",[["pn645","3 Months",24.0],["pn647","6 Months",27.5],["pn646","1 Year",30.0]]],["TandF ejournals (Taylor & Francis) webproxy",[["pn836","2 Months",24.0]]],["TandF ejournals (webproxy)",[["pn904","2 Months",24.0],["pn903","6 Months",27.5],["pn902","1 Year",35.0]]],["Total Patents",[["pn58","1 Year",30.0]]],["Turnitin- Dec 2025",[["pn266","2 Months",25.0]]],["Turnitin- DEC 2026",[["pn232","1 Year",35.0]]],["Ucentral",[["pn328","1 Year",30.0]]],["uWISE (APGO )",[["pn352","6 Months",30.0]]],["VisualDx+AI",[["pn373","1 Year",35.0]]],["Wiley eBooks",[["pn666","2 Months",30.0],["pn823","1 Year",50.0]]],["Wiley ejournals",[["pn30","2 Months",24.0],["pn29","6 Months",27.5],["pn28","1 Year",35.0]]],["WOS (Full databases)",[["pn54","1 Year",30.0]]],["WOS (Full databases)+AI",[["pn689","1 Year",40.0]]],["WOS (Full databases)+ESI+JCR+Incites",[["pn411","1 Year",40.0]]],["WOS (Full databases)+ESI+JCR+Incites+AI",[["pn374","1 Year",45.0]]],["WOS (partial databases)+AI",[["pn674","1 Year",35.0]]]];
+const PANEL_CATALOG = [["5MinuteConsult",[["pn275","1 Year",28.0]]],["AAP Pediatric Care",[["pn340","1 Year",35.0]],["grp:aap","AAP (American Academy of Pediatrics)","Pediatric Care"]],["AAP- 5 journals All",[["pn608","1 Year",30.0]],["grp:aap","AAP (American Academy of Pediatrics)","5 journals All"]],["AAP-Pediatrics + Pediatrics In Review",[["pn813","1 Year",27.5]],["grp:aap","AAP (American Academy of Pediatrics)","Pediatrics + Pediatrics In Review"]],["Academic Search Ultimate ( Ebscohost )",[["pn157","3 Months",24.0],["pn156","6 Months",25.0],["pn155","1 Year",30.0]]],["Access All Products",[["pn384","1 Year",120.0]],["grp:access","Access MhMedical","All Products"]],["Access Anesthesiology",[["pn59","1 Year",30.0]],["grp:access","Access MhMedical","Anesthesiology"]],["Access Cardiology",[["pn65","1 Year",30.0]],["grp:access","Access MhMedical","Cardiology"]],["Access DermatologyDxRx",[["pn68","1 Year",30.0]],["grp:access","Access MhMedical","DermatologyDxRx"]],["Access Emergency Medicine",[["pn71","1 Year",30.0]],["grp:access","Access MhMedical","Emergency Medicine"]],["Access Hematology Oncology",[["pn74","1 Year",30.0]],["grp:access","Access MhMedical","Hematology Oncology"]],["Access Medicina",[["pn77","1 Year",27.5]],["grp:access","Access MhMedical","Medicina"]],["Access Neurology",[["pn83","1 Year",30.0]],["grp:access","Access MhMedical","Neurology"]],["Access ObGyn",[["pn86","1 Year",30.0]],["grp:access","Access MhMedical","ObGyn"]],["Access Pediatrics",[["pn89","1 Year",30.0]],["grp:access","Access MhMedical","Pediatrics"]],["Access Pharmacy",[["pn92","1 Year",30.0]],["grp:access","Access MhMedical","Pharmacy"]],["Access Physiotherapy",[["pn95","1 Year",30.0]],["grp:access","Access MhMedical","Physiotherapy"]],["Access Surgery",[["pn98","1 Year",30.0]],["grp:access","Access MhMedical","Surgery"]],["AccessWorldmed",[["pn864","1 Year",30.0]]],["Acland’s Video Atlas of Human Anatomy",[["pn287","1 Year",27.5]]],["ALtmetrics",[["pn626","3 Months",30.0]]],["American Association for Cancer Research - AACR Journals",[["pn848","1 Year",30.0]]],["American Diabetes Association FULL JOURNALS Journals",[["pn884","1 Year",35.0]]],["APA PsycArticles ( Ebscohost )",[["pn160","3 Months",24.0],["pn159","6 Months",25.0],["pn158","1 Year",30.0]],["grp:apa","APA PsycNet (EBSCOhost)","PsycArticles"]],["APA PsycBooks ( Ebscohost )",[["pn163","3 Months",24.0],["pn162","6 Months",25.0],["pn161","1 Year",30.0]],["grp:apa","APA PsycNet (EBSCOhost)","PsycBooks"]],["APA PsycExtra ( Ebscohost )",[["pn370","3 Months",25.0],["pn834","1 Year",35.0]],["grp:apa","APA PsycNet (EBSCOhost)","PsycExtra"]],["APA PsycInfo ( Ebscohost )",[["pn166","3 Months",24.0],["pn165","6 Months",25.0],["pn164","1 Year",30.0]],["grp:apa","APA PsycNet (EBSCOhost)","PsycInfo"]],["APA PsycTests ( Ebscohost )",[["pn169","3 Months",24.0],["pn168","6 Months",25.0],["pn167","1 Year",30.0]],["grp:apa","APA PsycNet (EBSCOhost)","PsycTests"]],["APA PsycTherapy ( Ebscohost )",[["pn172","3 Months",25.0],["pn854","6 Months",30.0],["pn833","1 Year",35.0]],["grp:apa","APA PsycNet (EBSCOhost)","PsycTherapy"]],["ASME Digital Collection",[["pn829","1 Year",40.0]]],["ASTM Standards",[["pn827","1 Year",55.0]]],["BMJ Journals (WebProxy)",[["pn180","3 Months",30.0],["pn183","1 Year",45.0]]],["Business Source Ultimate ( VIA Ebscohost )",[["pn175","3 Months",24.0],["pn174","6 Months",25.0],["pn173","1 Year",30.0]]],["Case Files Collection-Access",[["pn101","1 Year",30.0]]],["CINAHL (Ebscohost)",[["pn178","3 Months",24.0],["pn176","1 Year",30.0]]],["CINAHL Ultimate (Ebscohost)",[["pn184","3 Months",26.0],["pn182","1 Year",35.0]]],["Clinical pharmacology (WebProxy)",[["pn677","6 Months",25.0],["pn678","1 Year",27.5]]],["ClinicalKey Nursing (WebProxy)",[["pn680","6 Months",25.0],["pn679","1 Year",27.5]],["grp:clinicalkey","ClinicalKey","Nursing (WebProxy)"]],["ClinicalKey Student (Direct)",[["pn821","1 Year",30.0]],["grp:clinicalkey","ClinicalKey","Student (Direct)"]],["ClinicalKey, Clinicalkey student",[["pn42","1 Year",35.0]],["grp:clinicalkey","ClinicalKey","ClinicalKey + ClinicalKey Student"]],["Cochrane Library",[["pn321","1 Year",30.0]]],["combo products of therapeuticresearch.com",[["pn366","1 Year",35.0]]],["Complete Anatomy",[["pn832","6 Months",30.0]]],["Dental Update",[["pn203","1 Year",27.5]]],["Dentistry & Oral Sciences (ebscohost)",[["pn193","3 Months",25.0],["pn192","6 Months",30.0],["pn191","1 Year",35.0]]],["DerWent (Patent)-Web Of Science",[["pn57","1 Year",30.0]]],["Dynamed + Dynamed Decision",[["pn650","3 Months",25.0],["pn651","1 Year",30.0]]],["Dynamedex + DynaAI",[["pn690","1 Year",40.0]]],["Dynamic Health",[["pn811","3 Months",24.0],["pn812","1 Year",30.0]]],["eBook EBSCOhost (400K)",[["pn334","3 Months",30.0],["pn195","6 Months",35.0],["pn333","1 Year",40.0]],["grp:ebsco_ebook","eBook EBSCOhost","400K e-books"]],["eBook EBSCOhost (462K)",[["pn336","3 Months",30.0],["pn198","6 Months",35.0],["pn335","1 Year",40.0]],["grp:ebsco_ebook","eBook EBSCOhost","462K e-books"]],["eBook EBSCOhost (600K)",[["pn338","3 Months",30.0],["pn201","6 Months",35.0],["pn337","1 Year",45.0]],["grp:ebsco_ebook","eBook EBSCOhost","600K e-books"]],["EBSCO eBooks Business (23,000 e-books)",[["pn815","1 Year",45.0]],["grp:ebsco_ebooks","EBSCO eBooks","Business (23,000 e-books)"]],["EBSCO eBooks Community College (62,000 e-books)",[["pn669","3 Months",27.5]],["grp:ebsco_ebooks","EBSCO eBooks","Community College (62,000 e-books)"]],["EBSCO eBooks University Press(37,000 e-books)",[["pn817","1 Year",45.0]],["grp:ebsco_ebooks","EBSCO eBooks","University Press (37,000 e-books)"]],["Education Source Ultimate( Ebscohost )",[["pn641","3 Months",26.0],["pn640","6 Months",36.0],["pn639","1 Year",35.0]]],["Embase, ClinicalKey, Sciencedirect",[["pn40","1 Year",40.0]]],["Emerald Journals",[["pn867","3 Months",27.5],["pn870","6 Months",32.5]]],["Engineeringvilage (Compendex)",[["pn47","6 Months",30.0],["pn46","1 Year",35.0]]],["ESI - Essential Science Indicators + JCR",[["pn55","1 Year",27.5]]],["ETG Therapeutic Guidelines (WebProxy)",[["pn224","1 Year",30.0]]],["European Journal of Prosthodontics and Restorative Dentistry",[["pn190","3 Months",26.0],["pn188","1 Year",30.0]]],["ExamMaster",[["pn831","6 Months",35.0]]],["Expert path (WebProxy)",[["pn18","1 Month",24.0],["pn17","3 Months",25.0],["pn16","1 Year",30.0]]],["F.A. Davis AT Collection-Access",[["pn107","1 Year",30.0]]],["France-Clinicalkey Student (EMC Consult) webproxy",[["pn803","6 Months",35.0],["pn802","1 Year",45.0]]],["Grammarly Pro",[["pn367","1 Year",35.0]]],["Grammarly Pro + AI",[["pn826","1 Year",40.0]]],["IEEE Journals (WebProxy)",[["pn871","3 Months",30.0],["pn872","1 Year",35.0]]],["IGI Global (Ebooks & Journals)",[["pn19","2 Months",45.0],["pn20","1 Year",95.0]]],["IGI Global (Journals)",[["pn37","2 Months",30.0],["pn38","1 Year",45.0]]],["InCites-Clarivate Analytics",[["pn56","1 Year",30.0]]],["JAMA All Journals",[["pn404","1 Year",30.0]]],["JCR-Journal Citation Reports + ESI",[["pn408","1 Year",27.5]]],["Journal of Neurosurgery",[["pn648","1 Month",25.0],["pn649","1 Year",30.0]]],["Library & Information Science Source ( Ebscohost )",[["pn211","3 Months",24.0],["pn210","6 Months",25.0],["pn209","1 Year",30.0]]],["Library, Information Science & Technology Fulltext (LISTA)",[["pn214","3 Months",24.0],["pn213","6 Months",25.0],["pn212","1 Year",30.0]]],["Lwwhealthlibrary Advanced Practice Nursing",[["pn393","1 Year",30.0]],["grp:lww","LWW Health Library","Advanced Practice Nursing"]],["Lwwhealthlibrary Anesthesiology",[["pn407","1 Year",30.0]],["grp:lww","LWW Health Library","Anesthesiology"]],["Lwwhealthlibrary Board Review Series",[["pn251","1 Year",30.0]],["grp:lww","LWW Health Library","Board Review Series"]],["Lwwhealthlibrary Clerkship",[["pn272","1 Year",30.0]],["grp:lww","LWW Health Library","Clerkship"]],["Lwwhealthlibrary Emergency Medicine",[["pn400","1 Year",30.0]],["grp:lww","LWW Health Library","Emergency Medicine"]],["Lwwhealthlibrary Exercise Science",[["pn254","1 Year",30.0]],["grp:lww","LWW Health Library","Exercise Science"]],["Lwwhealthlibrary Internal Medicine",[["pn263","1 Year",30.0]],["grp:lww","LWW Health Library","Internal Medicine"]],["Lwwhealthlibrary International Anatomical Sciences",[["pn394","1 Year",30.0]],["grp:lww","LWW Health Library","International Anatomical Sciences"]],["Lwwhealthlibrary International Premium Basic Sciences",[["pn395","1 Year",30.0]],["grp:lww","LWW Health Library","International Premium Basic Sciences"]],["Lwwhealthlibrary Lippincott Advisor",[["pn410","1 Year",30.0]],["grp:lww","LWW Health Library","Lippincott Advisor"]],["Lwwhealthlibrary Made Incredibly Easy!",[["pn248","1 Year",30.0]],["grp:lww","LWW Health Library","Made Incredibly Easy!"]],["Lwwhealthlibrary Neurology",[["pn245","1 Year",30.0]],["grp:lww","LWW Health Library","Neurology"]],["Lwwhealthlibrary ObGyn",[["pn396","1 Year",30.0]],["grp:lww","LWW Health Library","ObGyn"]],["Lwwhealthlibrary Occupational Therapy",[["pn398","1 Year",30.0]],["grp:lww","LWW Health Library","Occupational Therapy"]],["Lwwhealthlibrary Oncology",[["pn399","1 Year",30.0]],["grp:lww","LWW Health Library","Oncology"]],["Lwwhealthlibrary Ophthalmology",[["pn257","1 Year",30.0]],["grp:lww","LWW Health Library","Ophthalmology"]],["Lwwhealthlibrary Orthopaedic Surgery",[["pn628","1 Year",30.0]],["grp:lww","LWW Health Library","Orthopaedic Surgery"]],["Lwwhealthlibrary Osteopathic Medicine",[["pn269","1 Year",30.0]],["grp:lww","LWW Health Library","Osteopathic Medicine"]],["Lwwhealthlibrary Pathology",[["pn236","1 Year",30.0]],["grp:lww","LWW Health Library","Pathology"]],["Lwwhealthlibrary Physical Therapy",[["pn239","1 Year",30.0]],["grp:lww","LWW Health Library","Physical Therapy"]],["Lwwhealthlibrary Premium Pharmacy",[["pn260","1 Year",30.0]],["grp:lww","LWW Health Library","Premium Pharmacy"]],["Lwwhealthlibrary Psychiatry",[["pn638","1 Year",30.0]],["grp:lww","LWW Health Library","Psychiatry"]],["Lwwhealthlibrary Surgery",[["pn397","1 Year",30.0]],["grp:lww","LWW Health Library","Surgery"]],["Mathscinet ( Ebscohost )",[["pn217","3 Months",24.0],["pn216","6 Months",25.0],["pn215","1 Year",30.0]]],["MEDLINE ( Ebscohost )",[["pn220","3 Months",24.0],["pn221","6 Months",25.0],["pn218","1 Year",27.5]]],["MEDLINE Ultimate (Ebscohost)",[["pn219","3 Months",25.0],["pn223","6 Months",30.0],["pn222","1 Year",35.0]]],["MedOne ComSci",[["pn610","1 Year",35.0]],["grp:medone","MedOne","ComSci"]],["MedOne Education",[["pn318","1 Year",30.0]],["grp:medone","MedOne","Education"]],["Medone Education + Neurosurgery + Plastic Surgery + Otolaryngology",[["pn627","1 Year",40.0]],["grp:medone","MedOne","Education + Neurosurgery + Plastic Surgery + Otolaryngology"]],["MedOne Neurosurgery",[["pn327","1 Year",35.0]],["grp:medone","MedOne","Neurosurgery"]],["Medone Neurosurgery + Plastic Surgery",[["pn612","1 Year",35.0]],["grp:medone","MedOne","Neurosurgery + Plastic Surgery"]],["Medone Neurosurgery + Plastic Surgery + Otolaryngology",[["pn614","1 Year",35.0]],["grp:medone","MedOne","Neurosurgery + Plastic Surgery + Otolaryngology"]],["Medone Neurosurgery + Plastic Surgery + Radiology",[["pn613","1 Year",40.0]],["grp:medone","MedOne","Neurosurgery + Plastic Surgery + Radiology"]],["MedOne Ophthalmology",[["pn372","1 Year",35.0]],["grp:medone","MedOne","Ophthalmology"]],["MedOne Plastic Surgery",[["pn353","1 Year",35.0]],["grp:medone","MedOne","Plastic Surgery"]],["MedOne Radiology",[["pn326","1 Year",35.0]],["grp:medone","MedOne","Radiology"]],["Natural Medicines -NatMed Pro",[["pn317","1 Year",30.0]]],["Nature Journals (webproxy)",[["pn204","1 Month",25.0],["pn205","3 Months",27.5],["pn206","1 Year",45.0]]],["Nursing Reference Center Plus (Ebscohost)",[["pn722","3 Months",25.0],["pn723","6 Months",27.5],["pn724","1 Year",30.0]]],["OMMBID",[["pn116","1 Year",30.0]]],["OnePetro",[["pn830","1 Year",45.0]]],["OverDrive eBooks Account (164k)",[["pn325","1 Year",30.0]],["grp:overdrive","OverDrive eBooks Account","164k e-books"]],["OverDrive eBooks Account (266k)",[["pn330","1 Year",32.5]],["grp:overdrive","OverDrive eBooks Account","266k e-books"]],["OverDrive eBooks Account (276k)",[["pn329","1 Year",32.5]],["grp:overdrive","OverDrive eBooks Account","276k e-books"]],["OverDrive eBooks Account (300k)",[["pn331","1 Year",35.0]],["grp:overdrive","OverDrive eBooks Account","300k e-books"]],["OverDrive eBooks Account (434k)",[["pn332","1 Year",40.0]],["grp:overdrive","OverDrive eBooks Account","434k e-books"]],["Ovid Journals Type 1 (Webproxy)",[["pn693","1 Month",25.0],["pn694","6 Months",30.0],["pn695","1 Year",35.0]],["grp:ovid","Ovid Journals","Type 1 (Webproxy)"]],["Ovid Journals Type 2 (Webproxy)",[["pn696","1 Month",30.0],["pn697","6 Months",35.0],["pn698","1 Year",45.0]],["grp:ovid","Ovid Journals","Type 2 (Webproxy)"]],["Ovid Journals Type 3 (Webproxy)",[["pn701","1 Month",35.0],["pn700","6 Months",50.0],["pn699","1 Year",60.0]],["grp:ovid","Ovid Journals","Type 3 (Webproxy)"]],["Oxford Journals (WebProxy)",[["pn189","2 Months",27.5],["pn881","6 Months",35.0],["pn882","1 Year",45.0]]],["Oxford Journals and ebooks (WebProxy)",[["pn177","2 Months",35.0],["pn880","1 Year",70.0]]],["Pediatric Patient Education",[["pn364","1 Year",30.0]]],["Pediatric Surgery Library",[["pn371","1 Year",27.5]]],["PEP - Psychoanalytic Electronic Publishing",[["pn721","1 Year",32.5]]],["pepid (WebProxy)",[["pn660","1 Month",24.0],["pn661","3 Months",26.0],["pn662","1 Year",32.5]]],["Pharmacotherapy Principles & Practice-Access",[["pn119","1 Year",30.0]]],["ProQuest Central (WebProxy)",[["pn181","1 Month",24.0],["pn187","3 Months",26.0],["pn185","1 Year",32.5]]],["ProQuest Dissertations and Theses (WebProxy)",[["pn665","1 Month",24.0],["pn663","3 Months",26.0],["pn664","1 Year",32.5]]],["Reaxys",[["pn49","6 Months",30.0],["pn48","1 Year",32.5]]],["Red Book 2024–2027 (AAP)",[["pn342","1 Year",30.0]]],["Rehabilitation & Sports Medicine (ebscohost)",[["pn229","3 Months",24.0],["pn228","6 Months",25.0],["pn227","1 Year",30.0]]],["Rockefeller University Press",[["pn676","1 Year",32.5]]],["Sage Journals",[["pn866","6 Months",35.0],["pn862","1 Year",35.0]]],["ScienceDirect (Type 3)",[["pn633","1 Year",40.0]]],["Sciencedirect, scival, ClinicalKey",[["pn51","6 Months",30.0],["pn50","1 Year",35.0]]],["Sciencedirect, Scopus, Embase, ClinicalKey, Reaxys, EngVillage",[["pn41","1 Year",50.0]]],["Sciencedirect, Scopus, Embase, Scival, Reaxys, EngVillage",[["pn45","6 Months",32.5],["pn44","1 Year",40.0]]],["Scopus AI",[["pn879","6 Months",35.0],["pn878","1 Year",40.0]]],["SPANISH-Clinicalkey Student",[["pn801","1 Year",30.0]],["grp:spanish","Spanish editions","Clinicalkey Student"]],["SPANISH-Clinicalkey.es + Clinicalkey Student",[["pn356","1 Year",35.0]],["grp:spanish","Spanish editions","Clinicalkey.es + Clinicalkey Student"]],["SPANISH-Lwwhealthlibrary Ciencias Básicas",[["pn363","1 Year",30.0]],["grp:spanish","Spanish editions","Lwwhealthlibrary Ciencias Básicas"]],["SPORTDiscus with Full Text ( Ebscohost )",[["pn235","3 Months",24.0],["pn234","6 Months",25.0],["pn233","1 Year",30.0]]],["Springer Journals + ebooks",[["pn34","3 Months",30.0],["pn208","1 Year",60.0]]],["Statdx, ClinicalKey, Sciencedirect, Scopus, scival",[["pn53","6 Months",30.0],["pn52","1 Year",35.0]]],["Statdx, Expertpath, Immunoquery, ClinicalKey, Sciencedirect, Scopus, Scival",[["pn684","6 Months",35.0],["pn409","1 Year",45.0]]],["Statista",[["pn21","6 Months",45.0],["pn179","1 Year",65.0]]],["StatRef-Type 1",[["pn313","3 Months",24.0],["pn312","6 Months",26.0],["pn311","1 Year",30.0]]],["StatRef-Type 2",[["pn645","3 Months",24.0],["pn647","6 Months",27.5],["pn646","1 Year",30.0]]],["TandF ejournals (Taylor & Francis) webproxy",[["pn836","2 Months",24.0]]],["TandF ejournals (webproxy)",[["pn904","2 Months",24.0],["pn903","6 Months",27.5],["pn902","1 Year",35.0]]],["Total Patents",[["pn58","1 Year",30.0]]],["Turnitin- Dec 2025",[["pn266","2 Months",25.0]]],["Turnitin- DEC 2026",[["pn232","1 Year",35.0]]],["Ucentral",[["pn328","1 Year",30.0]]],["uWISE (APGO )",[["pn352","6 Months",30.0]]],["VisualDx + AI",[["pn373","1 Year",35.0]]],["Wiley eBooks",[["pn666","2 Months",30.0],["pn823","1 Year",50.0]]],["Wiley ejournals",[["pn30","2 Months",24.0],["pn29","6 Months",27.5],["pn28","1 Year",35.0]]],["WOS (Full databases)",[["pn54","1 Year",30.0]],["grp:wos","Web of Science (WOS)","Full databases"]],["WOS (Full databases) + AI",[["pn689","1 Year",40.0]],["grp:wos","Web of Science (WOS)","Full databases + AI"]],["WOS (Full databases) + ESI + JCR + Incites",[["pn411","1 Year",40.0]],["grp:wos","Web of Science (WOS)","Full databases + ESI + JCR + Incites"]],["WOS (Full databases) + ESI + JCR + Incites + AI",[["pn374","1 Year",45.0]],["grp:wos","Web of Science (WOS)","Full databases + ESI + JCR + Incites + AI"]],["WOS (partial databases) + AI",[["pn674","1 Year",35.0]],["grp:wos","Web of Science (WOS)","Partial databases + AI"]]];
 /* PANEL-CATALOG:END */
 const CATALOG = [
   {id:'imd',name:'iMD',emoji:'🎓',groups:[
@@ -660,7 +676,8 @@ const CATALOG = [
 // list of durations to pick from.
 CATALOG.push({
   id:'panel', name:'All Subscriptions', emoji:'🗂', row2:true,
-  panel: PANEL_CATALOG.map(([name, vs]) => ({name, variants: vs.map(([id,label,price]) => ({id,label,price}))})),
+  panel: PANEL_CATALOG.map(([name, vs, g]) => ({name, key: vs[0][0], group: g ? {key:g[0], name:g[1], short:g[2]} : null,
+    variants: vs.map(([id,label,price]) => ({id,label,price}))})),
 });
 
 // Admin edits from 📦 Manage Stock in the bot (bot.py's _shop_url): edited
@@ -690,6 +707,21 @@ const REMOVED_IDS = new Set((SUBS_DATA && SUBS_DATA.rm) || []);
   }
 })();
 
+// Titles the admin changed with the ✏️ (key = item id, a panel product's first
+// duration id, or "grp:<family>"). Display only: orders keep the bot's names.
+const TITLE_OVERRIDES = (SUBS_DATA && SUBS_DATA.nm) || {};
+const groupTitle = g => TITLE_OVERRIDES[g.key] || g.name;
+CATALOG.forEach(c=>{
+  const rename = i => { i.origName = i.name; if (TITLE_OVERRIDES[i.id]) i.name = TITLE_OVERRIDES[i.id]; };
+  if (c.groups) c.groups.forEach(g=>g.items.forEach(rename));
+  if (c.single) c.single.forEach(rename);
+  if (c.panel) c.panel.forEach(p=>{
+    p.origTitle = p.group ? p.group.short : p.name;
+    p.title = TITLE_OVERRIDES[p.key] || p.origTitle;
+    p.fullTitle = TITLE_OVERRIDES[p.key] || p.name;
+  });
+});
+
 // Tabs switched off in the Mini App Editor: still defined above, just not shown.
 const HIDDEN_TABS = new Set(['ai_bots']);
 for (let c = CATALOG.length - 1; c >= 0; c--) if (HIDDEN_TABS.has(CATALOG[c].id)) CATALOG.splice(c, 1);
@@ -704,13 +736,13 @@ CATALOG.forEach(c=>{
     const fullname=leadsWithCat(c.name,i.name)
       ? i.name+(i.sub?' ('+i.sub+')':'')
       : c.name+' — '+i.name+(i.sub?' ('+i.sub+')':'');
-    IMAP[i.id]={...i, catId:c.id, catName:c.name, fullname};
+    IMAP[i.id]={...i, catId:c.id, catName:c.name, fullname, tkey:i.id, title:i.name, origTitle:i.origName};
   }));
   if(c.single) c.single.forEach(i=>{
-    IMAP[i.id]={...i, catId:c.id, catName:c.name, sub:'1 Year', fullname: i.name+' — 1 Year'};
+    IMAP[i.id]={...i, catId:c.id, catName:c.name, sub:'1 Year', fullname: i.name+' — 1 Year', tkey:i.id, title:i.name, origTitle:i.origName};
   });
   if(c.panel) c.panel.forEach(p=>p.variants.forEach(v=>{
-    IMAP[v.id]={id:v.id, name:p.name, price:v.price, sub:v.label, catId:c.id, catName:c.name, fullname:p.name+' — '+v.label};
+    IMAP[v.id]={id:v.id, name:p.fullTitle, price:v.price, sub:v.label, catId:c.id, catName:c.name, fullname:p.fullTitle+' — '+v.label, tkey:p.key, title:p.title, origTitle:p.origTitle};
   }));
 });
 
@@ -1276,14 +1308,40 @@ function buildCatalog(){
     }
     if(cat.panel){
       const lbl=document.createElement('div'); lbl.className='sl'; lbl.textContent='Tap Durations to choose how long'; sec.appendChild(lbl);
-      [...cat.panel].sort((a,b)=>a.name.localeCompare(b.name)).forEach(p=>{
-        sec.appendChild(p.variants.length>1 ? makePanelRow(p) : makeRow({id:p.variants[0].id,name:p.name,price:p.variants[0].price,sub:p.variants[0].label,e:'🗂'},true));
+      const seen=new Set(), entries=[];
+      cat.panel.forEach(p=>{
+        if(p.group){ if(seen.has(p.group.key)) return; seen.add(p.group.key); entries.push({sort:groupTitle(p.group), g:p.group}); }
+        else entries.push({sort:p.title, p});
       });
+      entries.sort((a,b)=>a.sort.localeCompare(b.sort));
+      entries.forEach(e=>sec.appendChild(e.g
+        ? makeGroupRow(e.g, cat.panel.filter(x=>x.group&&x.group.key===e.g.key))
+        : panelNode(e.p)));
     }
     secEl.appendChild(sec);
   });
 }
 
+// A single product row: with several durations a button that opens their
+// list, with one a plain row.
+function panelNode(p){
+  return p.variants.length>1 ? makePanelRow(p) : makeRow({id:p.variants[0].id,name:p.title,price:p.variants[0].price,sub:p.variants[0].label,e:'🗂'},true);
+}
+// A family of products (Access MhMedical, LWW Health Library ...): one row
+// that opens to the products inside it.
+function makeGroupRow(g, members){
+  const wrap=document.createElement('div'); wrap.className='pgroup'; wrap.dataset.groupKey=g.key;
+  const head=document.createElement('div'); head.className='solo pgroup-head';
+  head.innerHTML=`<div style="font-size:21px">🗂</div>
+    <div class="ri"><div class="rn">${escHtml(groupTitle(g))}</div><div class="rs">${members.length} subscriptions</div></div>
+    ${ADMIN_EDIT?`<button class="cw-edit" title="Rename this group" onclick="event.stopPropagation();openGroupEdit('${g.key}')">✏️</button>`:''}
+    <span class="chev">›</span>`;
+  head.onclick=()=>wrap.classList.toggle('open');
+  const body=document.createElement('div'); body.className='pgroup-body';
+  [...members].sort((a,b)=>a.title.localeCompare(b.title)).forEach(p=>body.appendChild(panelNode(p)));
+  wrap.appendChild(head); wrap.appendChild(body);
+  return wrap;
+}
 // A product with several durations: one row, and a button that opens the
 // list of durations (each with its own price and + button).
 function panelFromPrice(p){
@@ -1305,7 +1363,7 @@ function panelOf(row){
 function makePanelRow(p){
   const d=document.createElement('div'); d.className='solo'; d.dataset.panelName=p.name; d.dataset.selected='';
   d.innerHTML=`<div style="font-size:21px">🗂</div>
-    <div class="ri"><div class="rn">${escHtml(p.name)}</div><div class="rs">${panelSubHtml(d,p)}</div></div>
+    <div class="ri"><div class="rn">${escHtml(p.title)}</div><div class="rs">${panelSubHtml(d,p)}</div></div>
     <div class="dur-anchor"><button class="dur-btn" onclick="toggleDurations(this)">⏱ Durations ▾</button><div class="dur-menu"></div></div>
     <button class="add-btn" onclick="addPanelSelected(this)">+</button>`;
   return d;
@@ -1340,7 +1398,7 @@ function toggleDurations(btn){
     const p=panelOf(row); if(!p) return;
     p.variants.forEach(v=>{
       const o=document.createElement('div'); o.className='dur-opt';
-      o.dataset.itemId=v.id; o.dataset.base=v.price; o.dataset.name=p.name;
+      o.dataset.itemId=v.id; o.dataset.base=v.price; o.dataset.name=p.title;
       o.onclick=()=>pickDuration(o,v.id);
       o.innerHTML=`<span class="lbl">${escHtml(v.label)}</span><span class="rp">${rowPriceHtml(v.id,v.price,true)}</span>`;
       menu.appendChild(o);
@@ -1391,7 +1449,7 @@ function makeRow(itm,solo){
   const oos=OOS_IDS.has(itm.id);
   const priceHtml = rowPriceHtml(itm.id, itm.price);
   d.innerHTML=`${solo?`<div style="font-size:21px">${itm.e||'📦'}</div>`:''}
-    <div class="ri"><div class="rn">${itm.name}</div><div class="rs">${itm.sub||''}</div></div>
+    <div class="ri"><div class="rn">${escHtml(itm.name)}</div><div class="rs">${itm.sub||''}</div></div>
     <div class="rp">${priceHtml}</div>
     <button class="add-btn${oos?' oos':''}" id="ab-${itm.id}" ${oos?'disabled':''} onclick="${oos?"event.stopPropagation();showToast('Out of stock')":`addItem('${itm.id}')`}">${oos?'✕':'+'}</button>`;
   return d;
@@ -1550,19 +1608,23 @@ function closeOrderDetail(){document.getElementById('orderDetailOverlay').classL
 // Only ever reachable from the admin's "Preview Shop as This Coworker" link
 // (PREVIEW_CW set); the server accepts it from the admin's own verified
 // account only, so the pencil does nothing for anyone else.
-let cwEditId=null;
+let cwEditId=null, cwEditKey=null, cwEditGroup=false;
 // Two modes share this popup: in the admin's coworker preview it sets what
 // THAT coworker pays; on the admin's own Shop link it changes the regular
-// price for everyone.
+// price (and the title) for everyone.
 function openCwPriceEdit(id){
   const row=document.querySelector('[data-item-id="'+id+'"]');
   if(!row) return;
-  cwEditId=id;
+  cwEditId=id; cwEditGroup=false; cwEditKey=null;
   const base=parseFloat(row.dataset.base);
   const info=document.getElementById('cwPriceInfo');
   const input=document.getElementById('cwPriceInput');
   document.getElementById('cwPriceTitle').textContent=(IMAP[id]&&IMAP[id].fullname)||row.dataset.name;
+  document.getElementById('cwPriceBox').style.display='';
+  document.getElementById('cwPriceReset').style.display='';
+  const tbox=document.getElementById('cwTitleBox');
   if(PREVIEW_CW){
+    tbox.style.display='none';
     const shown=hasCoworkerDiscount(id)?coworkerPrice(base,id):base;
     info.textContent=CW_NAME+' currently sees $'+shown+(COWORKER_ITEM_PRICES[id]!=null?' (custom price)':' (their default)')+'. Regular price: $'+base+'.';
     input.value=COWORKER_ITEM_PRICES[id]!=null?COWORKER_ITEM_PRICES[id]:'';
@@ -1571,23 +1633,116 @@ function openCwPriceEdit(id){
     info.textContent='Regular price: $'+base+(PRICE_OVERRIDES[id]!=null?' (edited)':'')+'. Changing it changes the price for every customer.';
     input.value=base;
     document.getElementById('cwPriceReset').textContent='↩️ Back to the original price';
+    const it=IMAP[id];
+    if(it&&it.tkey){
+      cwEditKey=it.tkey;
+      tbox.style.display='';
+      document.getElementById('cwTitleInput').value=it.title;
+      document.getElementById('cwTitleReset').style.display=TITLE_OVERRIDES[it.tkey]?'':'none';
+    }else tbox.style.display='none';
   }
   document.getElementById('cwPriceMsg').textContent='';
   document.getElementById('cwPriceOverlay').classList.add('on');
   setTimeout(()=>input.focus(),150);
 }
-function closeCwPriceEdit(){document.getElementById('cwPriceOverlay').classList.remove('on'); cwEditId=null;}
+// ✏️ on a group row (admin only): rename the group itself.
+function openGroupEdit(key){
+  let g=null;
+  CATALOG.forEach(c=>{ if(c.panel) c.panel.forEach(p=>{ if(p.group&&p.group.key===key) g=p.group; }); });
+  if(!g) return;
+  cwEditId=null; cwEditGroup=true; cwEditKey=key;
+  document.getElementById('cwPriceTitle').textContent='Rename this group';
+  document.getElementById('cwPriceBox').style.display='none';
+  document.getElementById('cwPriceReset').style.display='none';
+  document.getElementById('cwTitleBox').style.display='';
+  document.getElementById('cwTitleInput').value=groupTitle(g);
+  document.getElementById('cwTitleReset').style.display=TITLE_OVERRIDES[key]?'':'none';
+  document.getElementById('cwPriceMsg').textContent='';
+  document.getElementById('cwPriceOverlay').classList.add('on');
+  setTimeout(()=>document.getElementById('cwTitleInput').focus(),150);
+}
+function closeCwPriceEdit(){document.getElementById('cwPriceOverlay').classList.remove('on'); cwEditId=null; cwEditKey=null; cwEditGroup=false;}
+async function postTitle(key,title){
+  const resp=await fetch(withAuth('/api/set_item_title'),{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({item_id:key,title:title}),
+  });
+  return resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
+}
+// Shows a new (or restored) title everywhere it appears, without reloading.
+function applyTitleLocal(key,title){
+  if(title) TITLE_OVERRIDES[key]=title; else delete TITLE_OVERRIDES[key];
+  if(key.indexOf('grp:')===0){
+    document.querySelectorAll('.pgroup[data-group-key="'+key+'"] > .pgroup-head .rn').forEach(el=>{
+      let g=null; CATALOG.forEach(c=>{ if(c.panel) c.panel.forEach(p=>{ if(p.group&&p.group.key===key) g=p.group; }); });
+      el.textContent=g?groupTitle(g):title;
+    });
+    return;
+  }
+  CATALOG.forEach(c=>{
+    const setItem=i=>{ if(i.id!==key) return; i.name=TITLE_OVERRIDES[key]||i.origName; };
+    if(c.groups) c.groups.forEach(g=>g.items.forEach(setItem));
+    if(c.single) c.single.forEach(setItem);
+    if(c.panel) c.panel.forEach(p=>{
+      if(p.key!==key) return;
+      p.title=TITLE_OVERRIDES[key]||p.origTitle; p.fullTitle=TITLE_OVERRIDES[key]||p.name;
+    });
+  });
+  Object.values(IMAP).forEach(it=>{
+    if(it.tkey!==key) return;
+    const cat=CATALOG.find(c=>c.id===it.catId); let p=null, i=null;
+    if(cat&&cat.panel) p=cat.panel.find(x=>x.key===key);
+    if(p){ it.title=p.title; it.name=p.fullTitle; it.fullname=p.fullTitle+' — '+it.sub; }
+    else{
+      it.title=TITLE_OVERRIDES[key]||it.origTitle; it.name=it.title;
+      it.fullname=it.catId==='other'||(cat&&cat.single)?it.title+' — 1 Year':(leadsWithCat(it.catName,it.title)?it.title+(it.sub?' ('+it.sub+')':''):it.catName+' — '+it.title+(it.sub?' ('+it.sub+')':''));
+    }
+    if(cart[it.id]) cart[it.id].name=it.fullname;
+    document.querySelectorAll('[data-item-id="'+it.id+'"] .rn').forEach(el=>{ el.textContent=it.title; });
+    document.querySelectorAll('[data-item-id="'+it.id+'"]').forEach(r=>{ r.dataset.name=it.title; });
+  });
+  document.querySelectorAll('[data-panel-name]').forEach(row=>{
+    const p=panelOf(row); if(p&&p.key===key){ const el=row.querySelector('.rn'); if(el) el.textContent=p.title; }
+  });
+  try{ syncBasket(); renderBasket(); }catch(e){}
+}
+async function resetCwTitle(){
+  const msg=document.getElementById('cwPriceMsg'), key=cwEditKey; if(!key) return;
+  msg.style.color='var(--hint)'; msg.textContent='Saving…';
+  try{
+    const data=await postTitle(key,null);
+    if(!data.ok){ msg.style.color='#dc2626'; msg.textContent=data.error||'Could not save the title.'; return; }
+    applyTitleLocal(key,null); closeCwPriceEdit(); showToast('Back to the original title');
+  }catch(e){ msg.style.color='#dc2626'; msg.textContent='Network error — please try again.'; }
+}
 async function saveCwPrice(useDefault){
   const msg=document.getElementById('cwPriceMsg');
+  const titleShown=document.getElementById('cwTitleBox').style.display!=='none';
+  const priceShown=document.getElementById('cwPriceBox').style.display!=='none';
   let price=null;
-  if(!useDefault){
+  if(priceShown&&!useDefault){
     price=parseFloat(document.getElementById('cwPriceInput').value);
     if(!(price>0)){ msg.style.color='#dc2626'; msg.textContent='Enter a price above 0.'; return; }
   }
-  const id=cwEditId; if(!id) return;
+  const id=cwEditId, key=cwEditKey;
+  if(priceShown&&!id) return;
   const btn=document.getElementById('cwPriceSave'); btn.disabled=true;
   msg.style.color='var(--hint)'; msg.textContent='Saving…';
   try{
+    let titleToast=null;
+    if(titleShown&&key){
+      const typed=document.getElementById('cwTitleInput').value.replace(/\s+/g,' ').trim();
+      const cur=cwEditGroup
+        ? (()=>{ let g=null; CATALOG.forEach(c=>{ if(c.panel) c.panel.forEach(p=>{ if(p.group&&p.group.key===key) g=p.group; }); }); return g?groupTitle(g):''; })()
+        : ((IMAP[id]&&IMAP[id].title)||'');
+      if(!typed){ msg.style.color='#dc2626'; msg.textContent='The title can\'t be empty.'; return; }
+      if(typed!==cur){
+        const td=await postTitle(key,typed);
+        if(!td.ok){ msg.style.color='#dc2626'; msg.textContent=td.error||'Could not save the title.'; return; }
+        applyTitleLocal(key,td.title); titleToast='Title saved';
+      }
+    }
+    if(!priceShown){ closeCwPriceEdit(); showToast(titleToast||'Nothing changed'); return; }
     const resp=await fetch(withAuth(PREVIEW_CW?'/api/set_coworker_price':'/api/set_item_price'),{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({item_id:id,price:price}),
@@ -1618,7 +1773,7 @@ async function saveCwPrice(useDefault){
     refreshPanelFromPrices();
     try{ syncBasket(); renderBasket(); }catch(e){}
     closeCwPriceEdit();
-    showToast(toast);
+    showToast(titleToast?titleToast+' · '+toast:toast);
   }catch(e){
     msg.style.color='#dc2626'; msg.textContent='Network error — please try again.';
   }finally{ btn.disabled=false; }

@@ -24,7 +24,12 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:aap",
+    "name": "AAP (American Academy of Pediatrics)",
+    "short": "Pediatric Care"
+   }
   },
   {
    "name": "AAP- 5 journals All",
@@ -36,7 +41,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:aap",
+    "name": "AAP (American Academy of Pediatrics)",
+    "short": "5 journals All"
+   }
   },
   {
    "name": "AAP-Pediatrics + Pediatrics In Review",
@@ -48,7 +58,12 @@
      "panel_price": 7.5,
      "price": 27.5
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:aap",
+    "name": "AAP (American Academy of Pediatrics)",
+    "short": "Pediatrics + Pediatrics In Review"
+   }
   },
   {
    "name": "Academic Search Ultimate ( Ebscohost )",
@@ -86,7 +101,12 @@
      "panel_price": 100.0,
      "price": 120.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:access",
+    "name": "Access MhMedical",
+    "short": "All Products"
+   }
   },
   {
    "name": "Access Anesthesiology",
@@ -98,7 +118,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:access",
+    "name": "Access MhMedical",
+    "short": "Anesthesiology"
+   }
   },
   {
    "name": "Access Cardiology",
@@ -110,7 +135,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:access",
+    "name": "Access MhMedical",
+    "short": "Cardiology"
+   }
   },
   {
    "name": "Access DermatologyDxRx",
@@ -122,7 +152,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:access",
+    "name": "Access MhMedical",
+    "short": "DermatologyDxRx"
+   }
   },
   {
    "name": "Access Emergency Medicine",
@@ -134,7 +169,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:access",
+    "name": "Access MhMedical",
+    "short": "Emergency Medicine"
+   }
   },
   {
    "name": "Access Hematology Oncology",
@@ -146,7 +186,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:access",
+    "name": "Access MhMedical",
+    "short": "Hematology Oncology"
+   }
   },
   {
    "name": "Access Medicina",
@@ -158,7 +203,12 @@
      "panel_price": 7.5,
      "price": 27.5
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:access",
+    "name": "Access MhMedical",
+    "short": "Medicina"
+   }
   },
   {
    "name": "Access Neurology",
@@ -170,7 +220,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:access",
+    "name": "Access MhMedical",
+    "short": "Neurology"
+   }
   },
   {
    "name": "Access ObGyn",
@@ -182,7 +237,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:access",
+    "name": "Access MhMedical",
+    "short": "ObGyn"
+   }
   },
   {
    "name": "Access Pediatrics",
@@ -194,7 +254,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:access",
+    "name": "Access MhMedical",
+    "short": "Pediatrics"
+   }
   },
   {
    "name": "Access Pharmacy",
@@ -206,7 +271,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:access",
+    "name": "Access MhMedical",
+    "short": "Pharmacy"
+   }
   },
   {
    "name": "Access Physiotherapy",
@@ -218,7 +288,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:access",
+    "name": "Access MhMedical",
+    "short": "Physiotherapy"
+   }
   },
   {
    "name": "Access Surgery",
@@ -230,7 +305,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:access",
+    "name": "Access MhMedical",
+    "short": "Surgery"
+   }
   },
   {
    "name": "AccessWorldmed",
@@ -316,7 +396,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:apa",
+    "name": "APA PsycNet (EBSCOhost)",
+    "short": "PsycArticles"
+   }
   },
   {
    "name": "APA PsycBooks ( Ebscohost )",
@@ -342,7 +427,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:apa",
+    "name": "APA PsycNet (EBSCOhost)",
+    "short": "PsycBooks"
+   }
   },
   {
    "name": "APA PsycExtra ( Ebscohost )",
@@ -361,7 +451,12 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:apa",
+    "name": "APA PsycNet (EBSCOhost)",
+    "short": "PsycExtra"
+   }
   },
   {
    "name": "APA PsycInfo ( Ebscohost )",
@@ -387,7 +482,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:apa",
+    "name": "APA PsycNet (EBSCOhost)",
+    "short": "PsycInfo"
+   }
   },
   {
    "name": "APA PsycTests ( Ebscohost )",
@@ -413,7 +513,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:apa",
+    "name": "APA PsycNet (EBSCOhost)",
+    "short": "PsycTests"
+   }
   },
   {
    "name": "APA PsycTherapy ( Ebscohost )",
@@ -439,7 +544,12 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:apa",
+    "name": "APA PsycNet (EBSCOhost)",
+    "short": "PsycTherapy"
+   }
   },
   {
    "name": "ASME Digital Collection",
@@ -596,7 +706,12 @@
      "panel_price": 7.5,
      "price": 27.5
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:clinicalkey",
+    "name": "ClinicalKey",
+    "short": "Nursing (WebProxy)"
+   }
   },
   {
    "name": "ClinicalKey Student (Direct)",
@@ -608,10 +723,15 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:clinicalkey",
+    "name": "ClinicalKey",
+    "short": "Student (Direct)"
+   }
   },
   {
-   "name": "ClinicalKey,Clinicalkey student",
+   "name": "ClinicalKey, Clinicalkey student",
    "variants": [
     {
      "id": "pn42",
@@ -620,7 +740,12 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:clinicalkey",
+    "name": "ClinicalKey",
+    "short": "ClinicalKey + ClinicalKey Student"
+   }
   },
   {
    "name": "Cochrane Library",
@@ -709,7 +834,7 @@
    ]
   },
   {
-   "name": "Dynamed+ Dynamed Decision",
+   "name": "Dynamed + Dynamed Decision",
    "variants": [
     {
      "id": "pn650",
@@ -728,7 +853,7 @@
    ]
   },
   {
-   "name": "Dynamedex+DynaAI",
+   "name": "Dynamedex + DynaAI",
    "variants": [
     {
      "id": "pn690",
@@ -782,7 +907,12 @@
      "panel_price": 20.0,
      "price": 40.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:ebsco_ebook",
+    "name": "eBook EBSCOhost",
+    "short": "400K e-books"
+   }
   },
   {
    "name": "eBook EBSCOhost (462K)",
@@ -808,7 +938,12 @@
      "panel_price": 20.0,
      "price": 40.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:ebsco_ebook",
+    "name": "eBook EBSCOhost",
+    "short": "462K e-books"
+   }
   },
   {
    "name": "eBook EBSCOhost (600K)",
@@ -834,7 +969,12 @@
      "panel_price": 25.0,
      "price": 45.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:ebsco_ebook",
+    "name": "eBook EBSCOhost",
+    "short": "600K e-books"
+   }
   },
   {
    "name": "EBSCO eBooks Business (23,000 e-books)",
@@ -846,7 +986,12 @@
      "panel_price": 25.0,
      "price": 45.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:ebsco_ebooks",
+    "name": "EBSCO eBooks",
+    "short": "Business (23,000 e-books)"
+   }
   },
   {
    "name": "EBSCO eBooks Community College (62,000 e-books)",
@@ -858,7 +1003,12 @@
      "panel_price": 7.5,
      "price": 27.5
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:ebsco_ebooks",
+    "name": "EBSCO eBooks",
+    "short": "Community College (62,000 e-books)"
+   }
   },
   {
    "name": "EBSCO eBooks University Press(37,000 e-books)",
@@ -870,7 +1020,12 @@
      "panel_price": 25.0,
      "price": 45.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:ebsco_ebooks",
+    "name": "EBSCO eBooks",
+    "short": "University Press (37,000 e-books)"
+   }
   },
   {
    "name": "Education Source Ultimate( Ebscohost )",
@@ -899,7 +1054,7 @@
    ]
   },
   {
-   "name": "Embase,ClinicalKey,Sciencedirect",
+   "name": "Embase, ClinicalKey, Sciencedirect",
    "variants": [
     {
      "id": "pn40",
@@ -949,7 +1104,7 @@
    ]
   },
   {
-   "name": "ESI - Essential Science Indicators +JCR",
+   "name": "ESI - Essential Science Indicators + JCR",
    "variants": [
     {
      "id": "pn55",
@@ -1166,7 +1321,7 @@
    ]
   },
   {
-   "name": "JCR-Journal Citation Reports+ ESI",
+   "name": "JCR-Journal Citation Reports + ESI",
    "variants": [
     {
      "id": "pn408",
@@ -1258,7 +1413,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Advanced Practice Nursing"
+   }
   },
   {
    "name": "Lwwhealthlibrary Anesthesiology",
@@ -1270,7 +1430,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Anesthesiology"
+   }
   },
   {
    "name": "Lwwhealthlibrary Board Review Series",
@@ -1282,7 +1447,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Board Review Series"
+   }
   },
   {
    "name": "Lwwhealthlibrary Clerkship",
@@ -1294,7 +1464,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Clerkship"
+   }
   },
   {
    "name": "Lwwhealthlibrary Emergency Medicine",
@@ -1306,7 +1481,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Emergency Medicine"
+   }
   },
   {
    "name": "Lwwhealthlibrary Exercise Science",
@@ -1318,7 +1498,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Exercise Science"
+   }
   },
   {
    "name": "Lwwhealthlibrary Internal Medicine",
@@ -1330,7 +1515,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Internal Medicine"
+   }
   },
   {
    "name": "Lwwhealthlibrary International Anatomical Sciences",
@@ -1342,7 +1532,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "International Anatomical Sciences"
+   }
   },
   {
    "name": "Lwwhealthlibrary International Premium Basic Sciences",
@@ -1354,7 +1549,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "International Premium Basic Sciences"
+   }
   },
   {
    "name": "Lwwhealthlibrary Lippincott Advisor",
@@ -1366,7 +1566,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Lippincott Advisor"
+   }
   },
   {
    "name": "Lwwhealthlibrary Made Incredibly Easy!",
@@ -1378,7 +1583,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Made Incredibly Easy!"
+   }
   },
   {
    "name": "Lwwhealthlibrary Neurology",
@@ -1390,7 +1600,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Neurology"
+   }
   },
   {
    "name": "Lwwhealthlibrary ObGyn",
@@ -1402,7 +1617,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "ObGyn"
+   }
   },
   {
    "name": "Lwwhealthlibrary Occupational Therapy",
@@ -1414,7 +1634,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Occupational Therapy"
+   }
   },
   {
    "name": "Lwwhealthlibrary Oncology",
@@ -1426,7 +1651,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Oncology"
+   }
   },
   {
    "name": "Lwwhealthlibrary Ophthalmology",
@@ -1438,7 +1668,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Ophthalmology"
+   }
   },
   {
    "name": "Lwwhealthlibrary Orthopaedic Surgery",
@@ -1450,7 +1685,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Orthopaedic Surgery"
+   }
   },
   {
    "name": "Lwwhealthlibrary Osteopathic Medicine",
@@ -1462,7 +1702,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Osteopathic Medicine"
+   }
   },
   {
    "name": "Lwwhealthlibrary Pathology",
@@ -1474,7 +1719,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Pathology"
+   }
   },
   {
    "name": "Lwwhealthlibrary Physical Therapy",
@@ -1486,7 +1736,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Physical Therapy"
+   }
   },
   {
    "name": "Lwwhealthlibrary Premium Pharmacy",
@@ -1498,7 +1753,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Premium Pharmacy"
+   }
   },
   {
    "name": "Lwwhealthlibrary Psychiatry",
@@ -1510,7 +1770,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Psychiatry"
+   }
   },
   {
    "name": "Lwwhealthlibrary Surgery",
@@ -1522,7 +1787,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:lww",
+    "name": "LWW Health Library",
+    "short": "Surgery"
+   }
   },
   {
    "name": "Mathscinet ( Ebscohost )",
@@ -1612,7 +1882,12 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:medone",
+    "name": "MedOne",
+    "short": "ComSci"
+   }
   },
   {
    "name": "MedOne Education",
@@ -1624,10 +1899,15 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:medone",
+    "name": "MedOne",
+    "short": "Education"
+   }
   },
   {
-   "name": "Medone Education+Neurosurgery+Plastic Surgery+Otolaryngology",
+   "name": "Medone Education + Neurosurgery + Plastic Surgery + Otolaryngology",
    "variants": [
     {
      "id": "pn627",
@@ -1636,7 +1916,12 @@
      "panel_price": 20.0,
      "price": 40.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:medone",
+    "name": "MedOne",
+    "short": "Education + Neurosurgery + Plastic Surgery + Otolaryngology"
+   }
   },
   {
    "name": "MedOne Neurosurgery",
@@ -1648,10 +1933,15 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:medone",
+    "name": "MedOne",
+    "short": "Neurosurgery"
+   }
   },
   {
-   "name": "Medone Neurosurgery+Plastic Surgery",
+   "name": "Medone Neurosurgery + Plastic Surgery",
    "variants": [
     {
      "id": "pn612",
@@ -1660,10 +1950,15 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:medone",
+    "name": "MedOne",
+    "short": "Neurosurgery + Plastic Surgery"
+   }
   },
   {
-   "name": "Medone Neurosurgery+Plastic Surgery+Otolaryngology",
+   "name": "Medone Neurosurgery + Plastic Surgery + Otolaryngology",
    "variants": [
     {
      "id": "pn614",
@@ -1672,10 +1967,15 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:medone",
+    "name": "MedOne",
+    "short": "Neurosurgery + Plastic Surgery + Otolaryngology"
+   }
   },
   {
-   "name": "Medone Neurosurgery+Plastic Surgery+Radiology",
+   "name": "Medone Neurosurgery + Plastic Surgery + Radiology",
    "variants": [
     {
      "id": "pn613",
@@ -1684,7 +1984,12 @@
      "panel_price": 20.0,
      "price": 40.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:medone",
+    "name": "MedOne",
+    "short": "Neurosurgery + Plastic Surgery + Radiology"
+   }
   },
   {
    "name": "MedOne Ophthalmology",
@@ -1696,7 +2001,12 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:medone",
+    "name": "MedOne",
+    "short": "Ophthalmology"
+   }
   },
   {
    "name": "MedOne Plastic Surgery",
@@ -1708,7 +2018,12 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:medone",
+    "name": "MedOne",
+    "short": "Plastic Surgery"
+   }
   },
   {
    "name": "MedOne Radiology",
@@ -1720,7 +2035,12 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:medone",
+    "name": "MedOne",
+    "short": "Radiology"
+   }
   },
   {
    "name": "Natural Medicines -NatMed Pro",
@@ -1820,7 +2140,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:overdrive",
+    "name": "OverDrive eBooks Account",
+    "short": "164k e-books"
+   }
   },
   {
    "name": "OverDrive eBooks Account (266k)",
@@ -1832,7 +2157,12 @@
      "panel_price": 12.5,
      "price": 32.5
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:overdrive",
+    "name": "OverDrive eBooks Account",
+    "short": "266k e-books"
+   }
   },
   {
    "name": "OverDrive eBooks Account (276k)",
@@ -1844,7 +2174,12 @@
      "panel_price": 12.5,
      "price": 32.5
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:overdrive",
+    "name": "OverDrive eBooks Account",
+    "short": "276k e-books"
+   }
   },
   {
    "name": "OverDrive eBooks Account (300k)",
@@ -1856,7 +2191,12 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:overdrive",
+    "name": "OverDrive eBooks Account",
+    "short": "300k e-books"
+   }
   },
   {
    "name": "OverDrive eBooks Account (434k)",
@@ -1868,7 +2208,12 @@
      "panel_price": 20.0,
      "price": 40.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:overdrive",
+    "name": "OverDrive eBooks Account",
+    "short": "434k e-books"
+   }
   },
   {
    "name": "Ovid Journals Type 1 (Webproxy)",
@@ -1894,7 +2239,12 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:ovid",
+    "name": "Ovid Journals",
+    "short": "Type 1 (Webproxy)"
+   }
   },
   {
    "name": "Ovid Journals Type 2 (Webproxy)",
@@ -1920,7 +2270,12 @@
      "panel_price": 25.0,
      "price": 45.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:ovid",
+    "name": "Ovid Journals",
+    "short": "Type 2 (Webproxy)"
+   }
   },
   {
    "name": "Ovid Journals Type 3 (Webproxy)",
@@ -1946,7 +2301,12 @@
      "panel_price": 40.0,
      "price": 60.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:ovid",
+    "name": "Ovid Journals",
+    "short": "Type 3 (Webproxy)"
+   }
   },
   {
    "name": "Oxford Journals (WebProxy)",
@@ -2220,7 +2580,7 @@
    ]
   },
   {
-   "name": "Sciencedirect,scival,ClinicalKey",
+   "name": "Sciencedirect, scival, ClinicalKey",
    "variants": [
     {
      "id": "pn51",
@@ -2239,7 +2599,7 @@
    ]
   },
   {
-   "name": "Sciencedirect,Scopus,Embase,ClinicalKey,Reaxys,EngVillage",
+   "name": "Sciencedirect, Scopus, Embase, ClinicalKey, Reaxys, EngVillage",
    "variants": [
     {
      "id": "pn41",
@@ -2251,7 +2611,7 @@
    ]
   },
   {
-   "name": "Sciencedirect,Scopus,Embase,Scival,Reaxys,EngVillage",
+   "name": "Sciencedirect, Scopus, Embase, Scival, Reaxys, EngVillage",
    "variants": [
     {
      "id": "pn45",
@@ -2298,7 +2658,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:spanish",
+    "name": "Spanish editions",
+    "short": "Clinicalkey Student"
+   }
   },
   {
    "name": "SPANISH-Clinicalkey.es + Clinicalkey Student",
@@ -2310,7 +2675,12 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:spanish",
+    "name": "Spanish editions",
+    "short": "Clinicalkey.es + Clinicalkey Student"
+   }
   },
   {
    "name": "SPANISH-Lwwhealthlibrary Ciencias Básicas",
@@ -2322,7 +2692,12 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:spanish",
+    "name": "Spanish editions",
+    "short": "Lwwhealthlibrary Ciencias Básicas"
+   }
   },
   {
    "name": "SPORTDiscus with Full Text ( Ebscohost )",
@@ -2351,7 +2726,7 @@
    ]
   },
   {
-   "name": "Springer Journals+ebooks",
+   "name": "Springer Journals + ebooks",
    "variants": [
     {
      "id": "pn34",
@@ -2370,7 +2745,7 @@
    ]
   },
   {
-   "name": "Statdx,ClinicalKey,Sciencedirect,Scopus,scival",
+   "name": "Statdx, ClinicalKey, Sciencedirect, Scopus, scival",
    "variants": [
     {
      "id": "pn53",
@@ -2389,7 +2764,7 @@
    ]
   },
   {
-   "name": "Statdx,Expertpath,Immunoquery,ClinicalKey,Sciencedirect,Scopus,Scival",
+   "name": "Statdx, Expertpath, Immunoquery, ClinicalKey, Sciencedirect, Scopus, Scival",
    "variants": [
     {
      "id": "pn684",
@@ -2577,7 +2952,7 @@
    ]
   },
   {
-   "name": "VisualDx+AI",
+   "name": "VisualDx + AI",
    "variants": [
     {
      "id": "pn373",
@@ -2643,10 +3018,15 @@
      "panel_price": 10.0,
      "price": 30.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:wos",
+    "name": "Web of Science (WOS)",
+    "short": "Full databases"
+   }
   },
   {
-   "name": "WOS (Full databases)+AI",
+   "name": "WOS (Full databases) + AI",
    "variants": [
     {
      "id": "pn689",
@@ -2655,10 +3035,15 @@
      "panel_price": 20.0,
      "price": 40.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:wos",
+    "name": "Web of Science (WOS)",
+    "short": "Full databases + AI"
+   }
   },
   {
-   "name": "WOS (Full databases)+ESI+JCR+Incites",
+   "name": "WOS (Full databases) + ESI + JCR + Incites",
    "variants": [
     {
      "id": "pn411",
@@ -2667,10 +3052,15 @@
      "panel_price": 20.0,
      "price": 40.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:wos",
+    "name": "Web of Science (WOS)",
+    "short": "Full databases + ESI + JCR + Incites"
+   }
   },
   {
-   "name": "WOS (Full databases)+ESI+JCR+Incites+AI",
+   "name": "WOS (Full databases) + ESI + JCR + Incites + AI",
    "variants": [
     {
      "id": "pn374",
@@ -2679,10 +3069,15 @@
      "panel_price": 25.0,
      "price": 45.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:wos",
+    "name": "Web of Science (WOS)",
+    "short": "Full databases + ESI + JCR + Incites + AI"
+   }
   },
   {
-   "name": "WOS (partial databases)+AI",
+   "name": "WOS (partial databases) + AI",
    "variants": [
     {
      "id": "pn674",
@@ -2691,7 +3086,12 @@
      "panel_price": 15.0,
      "price": 35.0
     }
-   ]
+   ],
+   "group": {
+    "key": "grp:wos",
+    "name": "Web of Science (WOS)",
+    "short": "Partial databases + AI"
+   }
   }
  ],
  "excluded": {

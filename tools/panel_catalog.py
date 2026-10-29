@@ -45,6 +45,62 @@ SKIPPED = {
 }
 
 
+def tidy(name: str) -> str:
+    """Spaces after commas and around '+', so long combined names can wrap."""
+    name = re.sub(r"(?<!\d),(?=\S)", ", ", name)
+    name = re.sub(r"\s*\+\s*", " + ", name)
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def _paren_count(name: str) -> str:
+    m = re.search(r"\((\d[\d,]*\s*[kK]?)\s*(e-?books)?\)", name)
+    return (m.group(1).strip() + " e-books") if m else name
+
+
+def _after(prefix: str):
+    return lambda n: re.sub(r"^" + prefix + r"[\s,\-]*", "", n, flags=re.I).strip()
+
+
+def _wos(n: str) -> str:
+    n = re.sub(r"^WOS\s*", "", n)
+    n = re.sub(r"^\(([^)]*)\)", r"\1", n)
+    n = tidy(n)
+    return n[:1].upper() + n[1:]
+
+
+def _ebsco_ebooks(n: str) -> str:
+    return re.sub(r"(?<=\S)\(", " (", re.sub(r"^EBSCO eBooks\s*", "", n))
+
+
+# Families of three or more products that share a title, shown in the Shop as
+# one row that opens to the individual products. (key, shop title, matcher, short name)
+GROUPS = [
+    ("access", "Access MhMedical", re.compile(r"^Access ", re.I), _after("Access")),
+    ("lww", "LWW Health Library", re.compile(r"^Lwwhealthlibrary ", re.I), _after("Lwwhealthlibrary")),
+    ("medone", "MedOne", re.compile(r"^MedOne ", re.I), lambda n: tidy(_after("MedOne")(n))),
+    ("apa", "APA PsycNet (EBSCOhost)", re.compile(r"^APA ", re.I),
+     lambda n: re.sub(r"\s*\(\s*Ebscohost\s*\)\s*$", "", _after("APA")(n), flags=re.I)),
+    ("overdrive", "OverDrive eBooks Account", re.compile(r"^OverDrive eBooks Account", re.I), _paren_count),
+    ("wos", "Web of Science (WOS)", re.compile(r"^WOS \(", re.I), _wos),
+    ("aap", "AAP (American Academy of Pediatrics)", re.compile(r"^AAP\b", re.I), lambda n: tidy(_after("AAP")(n))),
+    ("clinicalkey", "ClinicalKey", re.compile(r"^ClinicalKey", re.I), lambda n: _after("ClinicalKey")(n)),
+    ("ebsco_ebook", "eBook EBSCOhost", re.compile(r"^eBook EBSCOhost", re.I), _paren_count),
+    ("ebsco_ebooks", "EBSCO eBooks", re.compile(r"^EBSCO eBooks", re.I), _ebsco_ebooks),
+    ("ovid", "Ovid Journals", re.compile(r"^Ovid Journals", re.I), _after("Ovid Journals")),
+    ("spanish", "Spanish editions", re.compile(r"^SPANISH-", re.I), _after("SPANISH-")),
+]
+SHORT_OVERRIDES = {"ClinicalKey, Clinicalkey student": "ClinicalKey + ClinicalKey Student"}
+
+
+def group_of(name: str):
+    for key, title, rx, short_fn in GROUPS:
+        if rx.search(name):
+            short = SHORT_OVERRIDES.get(name) or short_fn(name)
+            short = short[:1].upper() + short[1:]
+            return key, title, short or name
+    return None
+
+
 def duration_label(months: int) -> str:
     if months == 12:
         return "1 Year"
@@ -76,7 +132,17 @@ def build(scrape_path: str):
                 "id": f"pn{r['id']}", "months": r["months"], "label": duration_label(r["months"]),
                 "panel_price": r["price"], "price": round(r["price"] + MARKUP, 2),
             })
-        products.append({"name": name, "variants": variants})
+        products.append({"name": tidy(name), "variants": variants})
+    # a family needs three members to be worth a row of its own
+    members = defaultdict(list)
+    for p in products:
+        g = group_of(p["name"])
+        if g:
+            members[g[0]].append((p, g))
+    for key, lst in members.items():
+        if len(lst) >= 3:
+            for p, (k, title, short) in lst:
+                p["group"] = {"key": "grp:" + k, "name": title, "short": short}
     CATALOG_PATH.write_text(json.dumps({
         "markup": MARKUP,
         "source": "supplier panel Products list",
@@ -90,7 +156,12 @@ def build(scrape_path: str):
 
 def _block() -> str:
     data = json.loads(CATALOG_PATH.read_text())
-    compact = [[p["name"], [[v["id"], v["label"], v["price"]] for v in p["variants"]]] for p in data["products"]]
+    compact = []
+    for p in data["products"]:
+        row = [p["name"], [[v["id"], v["label"], v["price"]] for v in p["variants"]]]
+        if p.get("group"):
+            row.append([p["group"]["key"], p["group"]["name"], p["group"]["short"]])
+        compact.append(row)
     return f"{START}\nconst PANEL_CATALOG = {json.dumps(compact, ensure_ascii=False, separators=(',', ':'))};\n{END}"
 
 
