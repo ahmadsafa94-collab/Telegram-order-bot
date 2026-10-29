@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "39"
+MINI_APP_VERSION = "42"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -266,6 +266,8 @@ SINGLE_MAIN_ITEMS = [
 # those feed one-button-per-item admin keyboards that Telegram cannot send
 # with 280 more buttons. Their price is edited from the Shop itself.
 PANEL_ITEM_IDS = set()
+PANEL_GROUP_KEYS = set()
+PANEL_COSTS = {}  # what the supplier panel charges us per duration: the starting cost for sales/profit
 PANEL_CATALOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel_catalog.json")
 
 
@@ -276,9 +278,13 @@ def _load_panel_catalog():
     except (OSError, ValueError):
         return
     for product in data.get("products", []):
+        if product.get("group"):
+            PANEL_GROUP_KEYS.add(product["group"]["key"])
         for v in product.get("variants", []):
             MENU[v["id"]] = (f"{product['name']} - {v['label']}", float(v["price"]))
             PANEL_ITEM_IDS.add(v["id"])
+            if v.get("panel_price") is not None:
+                PANEL_COSTS[v["id"]] = float(v["panel_price"])
 
 
 _load_panel_catalog()
@@ -1033,6 +1039,14 @@ def db_init():
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS shop_titles (
+            item_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS custom_items (
             item_id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -1298,7 +1312,7 @@ def db_init():
     now = datetime.utcnow().isoformat()
     conn.executemany(
         "INSERT OR IGNORE INTO item_costs (item_id, cost, updated_at) VALUES (?, ?, ?)",
-        [(item_id, cost, now) for item_id, cost in DEFAULT_ITEM_COSTS.items()],
+        [(item_id, cost, now) for item_id, cost in {**PANEL_COSTS, **DEFAULT_ITEM_COSTS}.items()],
     )
 
     conn.commit()
@@ -2406,6 +2420,38 @@ def apply_item_price(item_id: str, price):
         MENU[item_id] = (name, price)
 
 
+# What the admin renamed in the Shop (✏️ beside a price or a group): the
+# title shown there only. Orders, invoices and the bot's own menus keep using
+# the names in MENU. {key: title}; key is an item id, a panel product's first
+# duration id, or "grp:<family>".
+SHOP_TITLES = {}
+
+
+def db_load_shop_titles() -> dict:
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT item_id, title FROM shop_titles").fetchall()
+    conn.close()
+    return {r[0]: r[1] for r in rows}
+
+
+def apply_shop_title(key: str, title):
+    """Sets (or with title=None, restores the original of) a Shop title for
+    good: stored in shop_titles and used by the very next Shop link."""
+    conn = sqlite3.connect(DB_PATH)
+    if title is None:
+        conn.execute("DELETE FROM shop_titles WHERE item_id = ?", (key,))
+        SHOP_TITLES.pop(key, None)
+    else:
+        conn.execute(
+            "INSERT INTO shop_titles (item_id, title) VALUES (?, ?) "
+            "ON CONFLICT(item_id) DO UPDATE SET title=excluded.title",
+            (key, title),
+        )
+        SHOP_TITLES[key] = title
+    conn.commit()
+    conn.close()
+
+
 def db_set_item_removed(item_id: str, removed: bool):
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
@@ -3290,6 +3336,7 @@ A_ADD_SUBSCRIPTION = "➕ Add New Subscription"
 A_BOOK_REQUESTS = "📚 Book Requests"
 A_IMD_CATALOG = "🔬 Update iMD Catalog"
 A_CUSTOMER_VIEW = "🛍 Customer Menu"
+A_SHOP_LABEL = "🛠 SHOP (edit mode)"
 A_BACKUP = "🗄 Backup"
 A_DISCOUNT_CODES = "🏷 Discount Codes"
 A_COWORKERS = "👥 Coworkers"
@@ -3377,7 +3424,7 @@ def _mini_app_admin_edits() -> tuple:
     return prices, removed
 
 
-def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
+def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: bool = False) -> str:
     """Builds the Mini App URL. When user_id is known, subscription data and
     custom admin-added items are encoded as a base64 query param (?subs=...)
     so the Mini App can display them without any HTTP API call.
@@ -3431,9 +3478,11 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
     price_overrides, removed_ids = _mini_app_admin_edits()
 
     if not user_id:
-        if custom or price_overrides or removed_ids:
+        if custom or price_overrides or removed_ids or SHOP_TITLES:
             try:
                 data = {'d': [], 'p': [], 'c': custom, 'po': price_overrides, 'rm': removed_ids}
+                if SHOP_TITLES:
+                    data['nm'] = dict(SHOP_TITLES)
                 return f"{MINI_APP_URL}?v={MINI_APP_VERSION}&subs={_encode(data)}"
             except Exception:
                 pass
@@ -3547,6 +3596,7 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
             "c": custom_filtered,
             "oos": oos_ids,
             "po": price_overrides,
+            **({"nm": dict(SHOP_TITLES)} if SHOP_TITLES else {}),
             "rm": removed_ids,
             "cr": credits_balance,
             "cw": coworker_pct,
@@ -3558,8 +3608,11 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
         }
         if preview_coworker_id and coworker_login:
             data["cwn"] = coworker_login[1]
-        elif user_id == ADMIN_CHAT_ID:
-            data["adm"] = 1  # shows the ✏️ price editor; the server re-checks who is asking
+        elif admin_edit and user_id == ADMIN_CHAT_ID:
+            # Only the admin keyboard's own Shop button asks for this: it shows the
+            # ✏️ editors. The Customer Menu's Shop stays exactly what a customer
+            # sees. The server re-checks who is asking on every edit anyway.
+            data["adm"] = 1
         return f"{MINI_APP_URL}?v={MINI_APP_VERSION}{auth_params}&subs={_encode(data)}"
     except Exception:
         logger.exception("_shop_url: failed to encode subscription data for user %s", user_id)
@@ -3611,8 +3664,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
     pending = db_pending_order_count()
     inbox   = db_unread_inbox_count()
     tickets = db_unresolved_ticket_count()
-    return ReplyKeyboardMarkup(
-        [
+    rows = [
             [A_SERIALS, _badge(A_ORDERS, pending)],
             [A_INPUT, _badge(A_INBOX, inbox)],
             [A_BROADCAST, A_FIND_CUSTOMER],
@@ -3622,9 +3674,12 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [A_IMD_CATALOG],
             [A_CUSTOMER_VIEW, A_BACKUP],
             [A_DISCOUNT_CODES, A_COWORKERS],
-        ],
-        resize_keyboard=True,
-    )
+    ]
+    # The Shop with its ✏️ editors (prices, titles, group names) switched on.
+    shop_url = _shop_url(ADMIN_CHAT_ID, admin_edit=True)
+    if shop_url:
+        rows.insert(0, [KeyboardButton(A_SHOP_LABEL, web_app=WebAppInfo(url=shop_url))])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 def cart_keyboard(cart: dict = None) -> InlineKeyboardMarkup:
@@ -6933,7 +6988,8 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == A_CUSTOMER_VIEW:
         await update.message.reply_text(
-            "Switched to the customer menu. Send /start to return to the admin panel.",
+            "Switched to the customer menu — the Shop here looks exactly as it does for customers. "
+            "Send /start to return to the admin panel (its 🛠 SHOP button is the one you edit in).",
             # The admin's own id, not 0: a link built for user 0 has no login
             # token, so the Shop could not tell it is the admin (no price
             # pencil) and I've Paid had nowhere to post.
@@ -10572,6 +10628,81 @@ async def http_set_item_price(request):
     )
 
 
+async def http_shop_edits(request):
+    """The admin's current price edits, removed items and renamed titles. The
+    🛠 SHOP button on the admin keyboard is a fixed link built when that keyboard
+    was sent, so the Shop asks for these when it opens — otherwise something
+    edited a minute ago would look unedited again. Admin's own account only."""
+    from aiohttp import web
+    headers = _imd_search_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    if user_id != ADMIN_CHAT_ID:
+        return web.json_response({"ok": False, "error": "Admin only"}, status=403, headers=headers)
+    price_overrides, removed_ids = _mini_app_admin_edits()
+    # "co": what each subscription costs the owner (sales and profit). Admin-only:
+    # it is never part of a customer's Shop link.
+    costs = {i: c for i, c in db_get_item_costs().items() if i in MENU}
+    return web.json_response(
+        {"ok": True, "po": price_overrides, "rm": removed_ids, "nm": dict(SHOP_TITLES), "co": costs}, headers=headers)
+
+
+async def http_set_item_cost(request):
+    """The cost box in the Shop's ✏️ editor: what one account of this subscription
+    costs the owner, used by the daily sales and profit. Same as 📦 Manage Stock →
+    💲 Edit Cost. Applies to sales from now on. Admin's own verified account only."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    if user_id != ADMIN_CHAT_ID:
+        return web.json_response({"ok": False, "error": "Admin only"}, status=403, headers=headers)
+    try:
+        data = await request.json()
+        item_id = data["item_id"]
+        cost = data["cost"]
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if not isinstance(item_id, str) or item_id not in MENU:
+        return web.json_response({"ok": False, "error": "Unknown subscription."}, status=400, headers=headers)
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0 or cost > 10000:
+        return web.json_response({"ok": False, "error": "Enter a cost of 0 or more."}, status=400, headers=headers)
+    cost = round(float(cost), 2)
+    db_set_item_cost(item_id, cost)
+    return web.json_response({"ok": True, "item_id": item_id, "cost": cost}, headers=headers)
+
+
+async def http_set_item_title(request):
+    """The ✏️ in the Shop on the admin's own link: renames a subscription (or a
+    group such as "Access MhMedical") for everyone. Admin's own verified account
+    only. title=null puts the original back."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    if user_id != ADMIN_CHAT_ID:
+        return web.json_response({"ok": False, "error": "Admin only"}, status=403, headers=headers)
+    try:
+        data = await request.json()
+        key = data["item_id"]
+        title = data.get("title")
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if not isinstance(key, str) or not (key in MENU or key in PANEL_GROUP_KEYS):
+        return web.json_response({"ok": False, "error": "Unknown subscription."}, status=400, headers=headers)
+    if title is not None:
+        if not isinstance(title, str):
+            return web.json_response({"ok": False, "error": "Invalid title."}, status=400, headers=headers)
+        title = re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f<>]", " ", title)).strip()
+        if not title or len(title) > 80:
+            return web.json_response({"ok": False, "error": "Enter a title of 1 to 80 characters."}, status=400, headers=headers)
+    apply_shop_title(key, title)
+    return web.json_response({"ok": True, "item_id": key, "title": title}, headers=headers)
+
+
 async def http_set_coworker_price(request):
     """Lets the admin edit a coworker's price for one subscription from the
     Shop preview (the ✏️ beside each price). Strictly the admin's own
@@ -10914,6 +11045,11 @@ async def start_api_server(application):
     api_app.router.add_get("/api/sales_export", http_sales_export)
     api_app.router.add_post("/api/set_item_price", http_set_item_price)
     api_app.router.add_options("/api/set_item_price", http_set_coworker_price_options)
+    api_app.router.add_get("/api/shop_edits", http_shop_edits)
+    api_app.router.add_post("/api/set_item_cost", http_set_item_cost)
+    api_app.router.add_options("/api/set_item_cost", http_set_coworker_price_options)
+    api_app.router.add_post("/api/set_item_title", http_set_item_title)
+    api_app.router.add_options("/api/set_item_title", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_coworker_price", http_set_coworker_price)
     api_app.router.add_options("/api/set_coworker_price", http_set_coworker_price_options)
     api_app.router.add_post("/api/submit_order", http_submit_order)
@@ -16633,6 +16769,7 @@ def main():
     # of the built-in catalog and custom items above, so edited titles/
     # prices survive restarts without touching the hardcoded CATALOG tree.
     ITEM_OVERRIDES.update(db_load_item_overrides())
+    SHOP_TITLES.update(db_load_shop_titles())
     for item_id, (ov_name, ov_price, ov_duration, ov_removed) in ITEM_OVERRIDES.items():
         if item_id in MENU and (ov_name is not None or ov_price is not None):
             base_name, base_price = MENU[item_id]
