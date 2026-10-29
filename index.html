@@ -143,6 +143,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .dur-anchor{position:relative;flex-shrink:0;margin-left:8px}
 .dur-anchor .dur-btn{margin-left:0;min-width:112px;text-align:center}
 .dur-btn.one{cursor:default}
+.cw-input{width:100%;background:transparent;border:1.5px solid var(--field-border);border-radius:10px;padding:11px 12px;color:var(--text);font-size:15px}
+.cw-danger{color:#ef4444!important;border-color:rgba(239,68,68,.45)!important}
+.admin-add{display:none;width:100%;margin:10px 0 2px;padding:10px;border:1.5px dashed var(--teal2);border-radius:12px;background:transparent;color:var(--teal2);font-size:13px;font-weight:700;cursor:pointer}
+.undo-bar{display:none;position:fixed;left:12px;right:12px;bottom:84px;z-index:400;align-items:center;gap:10px;
+  background:#111827;color:#fff;border:1px solid rgba(255,255,255,.15);border-radius:12px;padding:10px 12px;font-size:13px;box-shadow:0 8px 22px rgba(0,0,0,.45)}
+.undo-bar.on{display:flex}
+.undo-bar span{flex:1;min-width:0;overflow-wrap:anywhere}
+.undo-bar button{background:none;border:none;color:var(--teal2);font-weight:700;font-size:13px;cursor:pointer;padding:4px 6px}
 /* A supplier-panel product is two lines: the title, then the duration button and +. */
 .solo.panel-row{flex-direction:column;align-items:stretch;gap:9px}
 .panel-row .pr-top{display:flex;align-items:center;gap:10px;min-width:0}
@@ -349,6 +357,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     <input id="searchInput" type="text" placeholder="Search subscriptions..." oninput="performSearch(this.value)">
     <button class="search-clear" id="searchClearBtn" onclick="clearSearch()">✕</button>
   </div>
+  <button class="admin-add" id="addSubBtn" onclick="openAddSub()">➕ Add a new subscription</button>
   <div class="tabs" id="tabs"></div>
   <div class="tabs" id="tabsMore"></div>
   <div id="catLanding">
@@ -501,10 +510,38 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
       <div id="cwPriceMsg" style="font-size:12px;margin-top:6px;min-height:16px"></div>
       <button class="btn" id="cwPriceSave" onclick="saveCwPrice(false)">Save</button>
       <button class="btn sec" id="cwPriceReset" style="margin-top:8px" onclick="saveCwPrice(true)">↩️ Use their default price</button>
+      <div id="cwDeleteBox" style="display:none;margin-top:14px;padding-top:12px;border-top:1px solid rgba(255,255,255,.08)">
+        <button class="btn sec cw-danger" id="cwDelDur" type="button" onclick="deleteItems(false)">🗑 Delete this subscription</button>
+        <button class="btn sec cw-danger" id="cwDelAll" type="button" style="margin-top:8px;display:none" onclick="deleteItems(true)">🗑 Delete all its durations</button>
+      </div>
       <button class="btn sec" style="margin-top:8px" onclick="closeCwPriceEdit()">Cancel</button>
     </div>
   </div>
 </div>
+
+<!-- Admin-only: add a subscription to the list -->
+<div class="overlay" id="addSubOverlay" onclick="if(event.target===this)closeAddSub()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Add a new subscription</div>
+    <div style="padding:0 15px 15px">
+      <div style="font-size:12px;color:var(--hint);margin:4px 0">Name</div>
+      <input id="asName" class="cw-input" type="text" maxlength="80" placeholder="e.g. Lecturio" aria-label="Subscription name">
+      <div style="font-size:12px;color:var(--hint);margin:10px 0 4px">Duration</div>
+      <input id="asDur" class="cw-input" type="text" maxlength="30" value="1 Year" aria-label="Duration">
+      <div style="font-size:12px;color:var(--hint);margin:10px 0 4px">Price for customers ($)</div>
+      <input id="asPrice" class="cw-input" type="number" inputmode="decimal" min="0" step="0.01" placeholder="e.g. 45" aria-label="Price in dollars">
+      <div id="asCostBox" style="display:none">
+        <div style="font-size:12px;color:var(--hint);margin:10px 0 4px">Your cost per account ($) — optional, for sales and profit</div>
+        <input id="asCost" class="cw-input" type="number" inputmode="decimal" min="0" step="0.01" placeholder="e.g. 30" aria-label="Your cost in dollars">
+      </div>
+      <div id="asMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>
+      <button class="btn" id="asSave" onclick="saveAddSub()">Add subscription</button>
+      <button class="btn sec" style="margin-top:8px" onclick="closeAddSub()">Cancel</button>
+    </div>
+  </div>
+</div>
+<div class="undo-bar" id="undoBar" role="status"><span id="undoMsg"></span><button id="undoBtn" type="button">Undo</button></div>
 
 <!-- Purchase history sheet (Orders tab) -->
 <div class="overlay" id="historyOverlay" onclick="if(event.target===this)closePurchaseHistory()">
@@ -593,7 +630,7 @@ if (ADMIN_EDIT && API_BASE && AUTH_UID && AUTH_TOK) {
     x.send();
     if (x.status === 200) {
       const d = JSON.parse(x.responseText);
-      if (d && d.ok) { SUBS_DATA.po = d.po || {}; SUBS_DATA.rm = d.rm || []; SUBS_DATA.nm = d.nm || {}; ITEM_COSTS = d.co || {}; }
+      if (d && d.ok) { SUBS_DATA.po = d.po || {}; SUBS_DATA.rm = d.rm || []; SUBS_DATA.nm = d.nm || {}; ITEM_COSTS = d.co || {}; if (d.c) SUBS_DATA.c = d.c; }
     }
   } catch(e) { /* keep what the link carried */ }
 }
@@ -1683,6 +1720,7 @@ function openCwPriceEdit(id){
   document.getElementById('cwPriceBox').style.display='';
   document.getElementById('cwPriceReset').style.display='';
   const cbox=document.getElementById('cwCostBox'); cbox.style.display='none';
+  const dbox=document.getElementById('cwDeleteBox'); dbox.style.display='none'; resetDelButtons();
   const tbox=document.getElementById('cwTitleBox');
   if(PREVIEW_CW){
     tbox.style.display='none';
@@ -1694,6 +1732,13 @@ function openCwPriceEdit(id){
     info.textContent='Regular price: $'+base+(PRICE_OVERRIDES[id]!=null?' (edited)':'')+'. Changing it changes the price for every customer.';
     input.value=base;
     document.getElementById('cwPriceReset').textContent='↩️ Back to the original price';
+    {
+      const several=panelProductOf(id)&&panelProductOf(id).variants.length>1;
+      dbox.style.display='';
+      const dd=document.getElementById('cwDelDur'), da=document.getElementById('cwDelAll');
+      dd.textContent=several?'🗑 Delete this duration':'🗑 Delete this subscription'; dd.dataset.label=dd.textContent;
+      da.style.display=several?'':'none'; da.textContent='🗑 Delete all '+(several?panelProductOf(id).variants.length:'')+' durations'; da.dataset.label=da.textContent;
+    }
     if(ITEM_COSTS){
       cbox.style.display='';
       document.getElementById('cwCostInput').value=ITEM_COSTS[id]!=null?ITEM_COSTS[id]:0;
@@ -1719,6 +1764,7 @@ function openGroupEdit(key){
   document.getElementById('cwPriceTitle').textContent='Rename this group';
   document.getElementById('cwPriceBox').style.display='none';
   document.getElementById('cwPriceReset').style.display='none';
+  document.getElementById('cwDeleteBox').style.display='none';
   document.getElementById('cwTitleBox').style.display='';
   document.getElementById('cwTitleInput').value=groupTitle(g);
   document.getElementById('cwTitleReset').style.display=TITLE_OVERRIDES[key]?'':'none';
@@ -1760,7 +1806,7 @@ function applyTitleLocal(key,title){
     if(p){ it.title=p.title; it.name=p.fullTitle; it.fullname=p.fullTitle+' — '+it.sub; }
     else{
       it.title=TITLE_OVERRIDES[key]||it.origTitle; it.name=it.title;
-      it.fullname=it.catId==='other'||(cat&&cat.single)?it.title+' — 1 Year':(leadsWithCat(it.catName,it.title)?it.title+(it.sub?' ('+it.sub+')':''):it.catName+' — '+it.title+(it.sub?' ('+it.sub+')':''));
+      it.fullname=it.custom?it.title:it.catId==='other'||(cat&&cat.single)?it.title+' — 1 Year':(leadsWithCat(it.catName,it.title)?it.title+(it.sub?' ('+it.sub+')':''):it.catName+' — '+it.title+(it.sub?' ('+it.sub+')':''));
     }
     if(cart[it.id]) cart[it.id].name=it.fullname;
     document.querySelectorAll('[data-item-id="'+it.id+'"] .rn').forEach(el=>{ el.textContent=it.title; });
@@ -2481,22 +2527,143 @@ if (SUBS_DATA && SUBS_DATA.oos && SUBS_DATA.oos.length) {
   });
 }
 
-// Inject any custom admin-added subscriptions into the "More" section
-if (SUBS_DATA && SUBS_DATA.c && SUBS_DATA.c.length) {
-  const moreSec = document.getElementById('cat-other');
-  if (moreSec) {
+// Custom admin-added subscriptions go into the "More" section.
+function registerCustom(itemId, name, price){
+  const shown = TITLE_OVERRIDES[itemId] || name;
+  IMAP[itemId] = {id: itemId, name: shown, price, sub: '', catId: 'other', catName: 'More Subscriptions', fullname: shown,
+    tkey: itemId, title: shown, origTitle: name, custom: true};
+  return IMAP[itemId];
+}
+function addCustomRow(itemId){
+  const moreSec = document.getElementById('cat-other'); if (!moreSec) return null;
+  if (!document.getElementById('customLbl')) {
     const lbl = document.createElement('div');
-    lbl.className = 'sl'; lbl.textContent = 'Additional Subscriptions';
+    lbl.id = 'customLbl'; lbl.className = 'sl'; lbl.textContent = 'Additional Subscriptions';
     moreSec.appendChild(lbl);
-    SUBS_DATA.c.forEach(([itemId, name, price]) => {
-      // Register in IMAP with the actual bot item_id so orders work correctly
-      IMAP[itemId] = {id: itemId, name, price, sub: '', catId: 'other', catName: 'More Subscriptions', fullname: name};
-    });
-    [...SUBS_DATA.c].sort((a, b) => a[1].localeCompare(b[1])).forEach(([itemId, name, price]) => {
-      const row = makeRow({id: itemId, name, price, sub: '', e: '📦'}, true);
-      moreSec.appendChild(row);
-    });
   }
+  const it = IMAP[itemId];
+  const row = makeRow({id: itemId, name: it.title, price: it.price, sub: '', e: '📦'}, true);
+  moreSec.appendChild(row);
+  return row;
+}
+if (SUBS_DATA && SUBS_DATA.c && SUBS_DATA.c.length) {
+  SUBS_DATA.c.forEach(([itemId, name, price]) => registerCustom(itemId, name, price));
+  [...SUBS_DATA.c].sort((a, b) => (IMAP[a[0]].title).localeCompare(IMAP[b[0]].title)).forEach(([itemId]) => addCustomRow(itemId));
+}
+if (ADMIN_EDIT) document.getElementById('addSubBtn').style.display = 'block';
+
+// ── Admin: add a subscription to the list ─────────────────────────────
+function openAddSub(){
+  ['asName','asPrice','asCost'].forEach(i=>document.getElementById(i).value='');
+  document.getElementById('asDur').value='1 Year';
+  document.getElementById('asCostBox').style.display=ITEM_COSTS?'':'none';
+  document.getElementById('asMsg').textContent='';
+  document.getElementById('addSubOverlay').classList.add('on');
+  setTimeout(()=>document.getElementById('asName').focus(),150);
+}
+function closeAddSub(){document.getElementById('addSubOverlay').classList.remove('on');}
+async function saveAddSub(){
+  const msg=document.getElementById('asMsg'), btn=document.getElementById('asSave');
+  const name=document.getElementById('asName').value.replace(/\s+/g,' ').trim();
+  const duration=document.getElementById('asDur').value.replace(/\s+/g,' ').trim();
+  const price=parseFloat(document.getElementById('asPrice').value);
+  const costRaw=document.getElementById('asCost').value.trim();
+  const bad=t=>{ msg.style.color='#dc2626'; msg.textContent=t; };
+  if(!name) return bad('Give it a name.');
+  if(!duration) return bad('Give it a duration, like 1 Year.');
+  if(!(price>0)) return bad('Enter a price above 0.');
+  let cost=null;
+  if(ITEM_COSTS&&costRaw!==''){ cost=parseFloat(costRaw); if(!(cost>=0)) return bad('Enter a cost of 0 or more.'); }
+  btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Adding…';
+  try{
+    const resp=await fetch(withAuth('/api/add_item'),{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(cost==null?{name,duration,price}:{name,duration,price,cost})});
+    const data=await resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
+    if(!data.ok) return bad(data.error||'Could not add it.');
+    const [itemId,fullName,p]=data.item;
+    registerCustom(itemId,fullName,p);
+    if(ITEM_COSTS&&data.cost!=null) ITEM_COSTS[itemId]=data.cost;
+    const row=addCustomRow(itemId);
+    closeAddSub(); switchCat('other');
+    if(row){ row.scrollIntoView({block:'center'}); row.style.outline='2px solid var(--teal2)'; setTimeout(()=>row.style.outline='',2500); }
+    showToast('Added · '+fullName+' · $'+p);
+  }catch(e){ bad('Network error — please try again.'); }
+  finally{ btn.disabled=false; }
+}
+
+// ── Admin: delete a subscription (with Undo) ──────────────────────────
+let delArmed=null, delTimer=null, undoTimer=null;
+function resetDelButtons(){
+  clearTimeout(delTimer); delArmed=null;
+  const d=document.getElementById('cwDelDur'), a=document.getElementById('cwDelAll');
+  d.textContent=d.dataset.label||d.textContent; a.textContent=a.dataset.label||a.textContent;
+}
+function panelProductOf(id){
+  const cat=CATALOG.find(c=>c.id==='panel');
+  return cat&&cat.panel.find(p=>p.variants.some(v=>v.id===id));
+}
+function deleteItems(all){
+  const btn=document.getElementById(all?'cwDelAll':'cwDelDur');
+  if(delArmed!==btn){
+    resetDelButtons(); delArmed=btn; btn.dataset.label=btn.textContent; btn.textContent='Tap again to delete';
+    delTimer=setTimeout(resetDelButtons,3500); return;
+  }
+  resetDelButtons();
+  const id=cwEditId; if(!id) return;
+  const p=panelProductOf(id);
+  const ids=(all&&p)?p.variants.map(v=>v.id):[id];
+  const label=(IMAP[id]&&IMAP[id].title)||'Subscription';
+  postRemoved(ids,true).then(data=>{
+    if(!data.ok){ const m=document.getElementById('cwPriceMsg'); m.style.color='#dc2626'; m.textContent=data.error||'Could not delete it.'; return; }
+    closeCwPriceEdit(); applyRemovedLocal(ids); showUndo(label+(ids.length>1?' (all durations)':'')+' deleted', ids);
+  }).catch(()=>{ const m=document.getElementById('cwPriceMsg'); m.style.color='#dc2626'; m.textContent='Network error — please try again.'; });
+}
+async function postRemoved(ids,removed){
+  const resp=await fetch(withAuth('/api/set_items_removed'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({item_ids:ids,removed})});
+  return resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
+}
+function showUndo(text,ids){
+  const bar=document.getElementById('undoBar'); document.getElementById('undoMsg').textContent=text;
+  bar.classList.add('on'); clearTimeout(undoTimer);
+  const btn=document.getElementById('undoBtn');
+  btn.onclick=async()=>{
+    btn.disabled=true;
+    try{ const d=await postRemoved(ids,false); if(d.ok){ location.reload(); return; } showToast(d.error||'Could not undo'); }
+    catch(e){ showToast('Network error — please try again.'); }
+    btn.disabled=false;
+  };
+  undoTimer=setTimeout(()=>bar.classList.remove('on'),9000);
+}
+function applyRemovedLocal(ids){
+  const gone=new Set(ids);
+  gone.forEach(id=>{ REMOVED_IDS.add(id); if(cart[id]) removeItem(id); });
+  const touched=new Set();
+  const cat=CATALOG.find(c=>c.id==='panel');
+  if(cat) cat.panel.forEach(p=>{ if(p.variants.some(v=>gone.has(v.id))) touched.add(p.name); });
+  CATALOG.forEach(c=>{
+    if(c.groups) c.groups.forEach(g=>{ g.items=g.items.filter(i=>!gone.has(i.id)); });
+    if(c.single) c.single=c.single.filter(i=>!gone.has(i.id));
+    if(c.panel){ c.panel.forEach(p=>{ p.variants=p.variants.filter(v=>!gone.has(v.id)); }); c.panel=c.panel.filter(p=>p.variants.length); }
+  });
+  gone.forEach(id=>{ delete IMAP[id]; });
+  // plain rows (built-in, custom) just go
+  gone.forEach(id=>document.querySelectorAll('[data-item-id="'+id+'"]').forEach(r=>{ if(!r.classList.contains('dur-opt')) r.remove(); }));
+  // panel rows: drop the product, or rebuild it without the removed durations
+  touched.forEach(name=>{
+    const p=cat&&cat.panel.find(x=>x.name===name);
+    document.querySelectorAll('[data-panel-name]').forEach(row=>{
+      if(row.dataset.panelName!==name) return;
+      if(!p) row.remove(); else row.replaceWith(makePanelRow(p));
+    });
+  });
+  document.querySelectorAll('.pgroup').forEach(g=>{
+    const n=g.querySelectorAll('.pgroup-body [data-panel-name]').length;
+    if(!n) g.remove(); else { const rs=g.querySelector('.pgroup-head .rs'); if(rs) rs.textContent=n+' subscription'+(n===1?'':'s'); }
+  });
+  document.querySelectorAll('#catSec .card').forEach(card=>{
+    if(!card.children.length){ const prev=card.previousElementSibling; if(prev&&prev.classList.contains('sl')) prev.remove(); card.remove(); }
+  });
+  closeAllDurations();
 }
 
 </script>
