@@ -102,7 +102,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "57"
+MINI_APP_VERSION = "58"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -11435,6 +11435,73 @@ async def http_admin_coworkers(request):
     return web.json_response({"ok": True, "items": _coworker_rows()}, headers=_imd_search_cors_headers())
 
 
+def db_coworker_period_stats(coworker_id: int, since_iso: str) -> dict:
+    """What one coworker bought since a timestamp: paid orders, revenue, accounts per product and
+    the owner's cost/profit (the cost frozen when the order was paid, else the product's current cost)."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT items_json, total, costs_json, created_at FROM orders WHERE coworker_id = ? AND created_at >= ? "
+        "AND status NOT IN ('awaiting_payment', 'awaiting_receipt', 'awaiting_confirmation', 'cancelled', 'rejected') "
+        "ORDER BY id", (coworker_id, since_iso)).fetchall()
+    conn.close()
+    current_costs = db_get_item_costs()
+    products, revenue, costs, accounts = {}, 0.0, 0.0, 0
+    first = last = ""
+    for items_json, total, costs_json, created in rows:
+        try:
+            items = json.loads(items_json)
+            frozen = json.loads(costs_json) if costs_json else {}
+        except (TypeError, ValueError):
+            continue
+        revenue += float(total or 0)
+        for item_id, qty in items.items():
+            qty = int(qty)
+            products[item_id] = products.get(item_id, 0) + qty
+            accounts += qty
+            costs += qty * float(frozen.get(item_id, current_costs.get(item_id, 0.0)))
+        first, last = first or (created or "")[:10], (created or "")[:10]
+    return {"orders": len(rows), "revenue": round(revenue, 2), "accounts": accounts, "costs": round(costs, 2),
+            "profit": round(revenue - costs, 2), "first": first, "last": last,
+            "products": [{"name": MENU.get(i, (i,))[0], "qty": q} for i, q in sorted(products.items(), key=lambda kv: -kv[1])]}
+
+
+async def http_admin_coworker_stats(request):
+    """?id=<coworker>&period=today|week|month|overall — one coworker's statistics."""
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        cid = int(request.query.get("id", ""))
+    except ValueError:
+        cid = None
+    coworker = db_get_coworker(cid) if cid is not None else None
+    if not coworker:
+        return _admin_bad("That coworker no longer exists.", 404)
+    period = request.query.get("period", "overall")
+    if period not in ("today", "week", "month", "overall"):
+        return _admin_bad("Unknown period.")
+    label, since_iso = _sales_period(period)
+    stats = db_coworker_period_stats(cid, since_iso)
+    lifetime_orders, lifetime_revenue, pending = db_coworker_stats(cid)
+    names = {"awaiting_payment": "unpaid", "awaiting_receipt": "unpaid", "awaiting_confirmation": "checking payment",
+             "cancelled": "cancelled", "rejected": "rejected"}
+    recent = []
+    for oid, uname, uid, items_json, total, status, created in db_coworker_orders(cid, 12):
+        try:
+            items = json.loads(items_json)
+        except (TypeError, ValueError):
+            items = {}
+        recent.append({"id": oid, "date": (created or "")[:10], "total": round(float(total or 0), 2),
+                       "status": names.get(status, "paid" if status == "paid" else status),
+                       "items": ", ".join(f"{q} × {MENU.get(i, (i,))[0]}" for i, q in items.items())[:160]})
+    return web.json_response({
+        "ok": True, "period": period, "label": label, "name": coworker[1], "username": coworker[2], "pct": coworker[3],
+        "since": (coworker[4] or "")[:10], "pending": pending, "lifetime_orders": lifetime_orders,
+        "lifetime_revenue": round(lifetime_revenue, 2), "avg_order": round(stats["revenue"] / stats["orders"], 2) if stats["orders"] else 0,
+        **stats, "recent": recent}, headers=_imd_search_cors_headers())
+
+
 async def http_admin_coworker_action(request):
     """Add a coworker, change their percentage / username / password, or delete them."""
     from aiohttp import web
@@ -12132,6 +12199,7 @@ async def start_api_server(application):
     api_app.router.add_get("/api/admin_serials", http_admin_serials)
     api_app.router.add_post("/api/admin_serials_action", http_admin_serials_action)
     api_app.router.add_get("/api/admin_coworkers", http_admin_coworkers)
+    api_app.router.add_get("/api/admin_coworker_stats", http_admin_coworker_stats)
     api_app.router.add_post("/api/admin_coworker_action", http_admin_coworker_action)
     api_app.router.add_options("/api/admin_chat_action", http_set_coworker_price_options)
     api_app.router.add_options("/api/admin_ticket_answer", http_set_coworker_price_options)

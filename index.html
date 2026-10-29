@@ -2101,6 +2101,7 @@ function drawEditCoworker(id){
     '<button class="btn" style="margin:0;width:auto;padding:11px 16px" onclick="'+fn+'">Save</button></div>';
   document.getElementById('cwmContent').innerHTML=
     '<div class="t-meta" style="margin:0 0 6px">'+c.orders+' order'+(c.orders===1?'':'s')+(c.pending?' · '+c.pending+' pending':'')+' · $'+Number(c.revenue).toFixed(2)+' · since '+escHtml(c.date)+'</div>'+
+    '<button class="btn" style="margin:0 0 4px" onclick="drawCoworkerStats('+id+')">📊 Statistics</button>'+
     row('Percentage discount','pct',fieldBox('cwPct','Percentage (1–100)',c.pct,'number'),'saveCoworker('+id+',\'pct\')')+
     row('Login username','username',fieldBox('cwUser','Username',c.username),'saveCoworker('+id+',\'username\')')+
     row('Login password','password',fieldBox('cwPass','New password'),'saveCoworker('+id+',\'password\')')+
@@ -2108,6 +2109,25 @@ function drawEditCoworker(id){
     '<button class="tk-btn" style="color:#f87171;margin-bottom:8px" onclick="deleteCoworker('+id+')">🗑 Delete this coworker</button>'+
     '<button class="btn sec" onclick="drawAdminCoworkers()">← Back</button>';
 }
+let cwStatsPeriod='overall';
+async function drawCoworkerStats(id,period){
+  if(period) cwStatsPeriod=period;
+  const el=document.getElementById('cwmContent'); el.innerHTML=loadingHtml;
+  try{
+    const d=await apiGet('/api/admin_coworker_stats?id='+id+'&period='+cwStatsPeriod);
+    document.getElementById('cwmTitle').textContent='📊 '+d.name;
+    const seg=[['today','Today'],['week','Week'],['month','Month'],['overall','Overall']].map(x=>'<button class="'+(cwStatsPeriod===x[0]?'on':'')+'" onclick="drawCoworkerStats('+id+',\''+x[0]+'\')">'+x[1]+'</button>').join('');
+    const stat=(label,val)=>'<div style="flex:1;min-width:0;padding:10px;border-radius:12px;background:rgba(255,255,255,.05);text-align:center"><div style="font-size:11px;color:var(--hint)">'+label+'</div><div style="font-size:16px;font-weight:800;margin-top:2px">'+val+'</div></div>';
+    el.innerHTML='<div class="seg">'+seg+'</div>'+
+      '<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">Bought · '+escHtml(d.label)+'</div><div class="n">'+money(d.revenue)+'</div><div style="font-size:12px;color:var(--hint);margin-top:2px">'+d.accounts+' account'+(d.accounts===1?'':'s')+' · '+d.orders+' order'+(d.orders===1?'':'s')+(d.orders?' · avg '+money(d.avg_order):'')+'</div></div>'+
+      '<div style="display:flex;gap:8px;margin-bottom:10px">'+stat('Costs',money(d.costs))+stat('Profit',money(d.profit))+stat('Pending',d.pending)+'</div>'+
+      '<div class="t-meta" style="margin:0 0 8px">@'+escHtml(d.username)+' · '+Number(d.pct)+'% off · since '+escHtml(d.since)+' · lifetime '+d.lifetime_orders+' order'+(d.lifetime_orders===1?'':'s')+' · '+money(d.lifetime_revenue)+(d.last?' · last order '+escHtml(d.last):'')+'</div>'+
+      (d.products.length?'<div class="sub-section-lbl">Accounts bought</div>'+d.products.map(p=>'<div class="t-card" style="padding:9px 13px;margin-bottom:6px"><div class="t-top"><div class="t-title">'+escHtml(p.name)+'</div><span class="t-pill ok">× '+p.qty+'</span></div></div>').join(''):'<div class="search-empty">No paid orders in this period.</div>')+
+      (d.recent.length?'<div class="sub-section-lbl" style="margin-top:10px">Latest orders</div>'+d.recent.map(o=>'<div class="t-card" style="padding:9px 13px;margin-bottom:6px"><div class="t-top"><div class="t-title">Order #'+o.id+'<div class="t-meta">'+escHtml(o.date)+' · '+escHtml(o.items)+'</div></div><span style="text-align:right"><div style="font-weight:700;font-size:13px">'+money(o.total)+'</div><div class="t-meta" style="margin:0">'+escHtml(o.status)+'</div></span></div></div>').join(''):'')+
+      '<button class="btn sec" style="margin-top:8px" onclick="drawEditCoworker('+id+')">← Back</button>';
+  }catch(e){ el.innerHTML=failHtml(e)+'<button class="btn sec" onclick="drawEditCoworker('+id+')">← Back</button>'; }
+}
+
 async function saveCoworker(id,field){
   const val=document.getElementById({pct:'cwPct',username:'cwUser',password:'cwPass'}[field]).value.trim();
   if(!val) return cwMsg(field==='password'?'Type the new password.':'Fill this in first.');
