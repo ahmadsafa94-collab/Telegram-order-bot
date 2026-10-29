@@ -11325,6 +11325,9 @@ async def http_admin_book_action(request):
             return _admin_bad("Could not deliver it (the customer may have blocked the bot).", 502)
         return web.json_response({"ok": True, "note": "Message sent to the customer."}, headers=headers)
     db_set_book_status(request_id, "cancelled")
+    for key in ("awaiting_book_price_for", "awaiting_book_message_for"):     # as the chat's cancel does
+        if context.user_data.get(key) == request_id:
+            context.user_data.pop(key, None)
     note = f"Book request #{request_id} cancelled."
     if data.get("notify"):
         note += " " + await _notify_book_cancelled(context, book)
