@@ -52,6 +52,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 }
 .ico-badge.vis{opacity:1}
 .ico-btn.acc{background:var(--acc)}
+.credits-btn{height:40px;padding:0 11px;border-radius:12px;border:1.5px solid rgba(45,212,191,.5);background:rgba(13,148,136,.12);
+  color:var(--teal2);font-size:12px;font-weight:700;white-space:nowrap;cursor:pointer;flex-shrink:0}
+.hdr-title h1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media (max-width:370px){.hdr-title p{display:none}.credits-btn{padding:0 8px;font-size:11px}}
 
 /* ── Pages ──────────────────── */
 .page{display:none;padding:13px}
@@ -331,6 +335,23 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .tabbar .tb .tb-badge{position:absolute;top:5px;left:calc(50% + 7px);min-width:16px;height:16px;border-radius:99px;
   background:var(--red);color:#fff;font-size:9px;font-weight:700;display:none;align-items:center;justify-content:center;padding:0 4px}
 .tabbar .tb .tb-badge.vis{display:flex}
+.tabbar .tb .tb-dot{position:absolute;top:8px;left:calc(50% + 7px);width:9px;height:9px;border-radius:50%;background:var(--red);display:none;border:1.5px solid var(--bg2)}
+.tabbar .tb .tb-dot.vis{display:block}
+.contact-row .ci-dot{width:10px;height:10px;border-radius:50%;background:var(--red);flex-shrink:0;display:none}
+.contact-row .ci-dot.vis{display:block}
+.t-card{background:var(--bg2);border:1px solid rgba(255,255,255,.08);border-radius:var(--r);padding:12px 13px;margin-bottom:9px}
+.t-top{display:flex;align-items:flex-start;gap:10px}
+.t-title{flex:1;min-width:0;font-size:13px;font-weight:600;overflow-wrap:anywhere}
+.t-pill{font-size:11px;font-weight:700;padding:3px 9px;border-radius:99px;white-space:nowrap;flex-shrink:0}
+.t-pill.ok{background:rgba(34,197,94,.15);color:#4ade80}
+.t-pill.open{background:rgba(245,158,11,.15);color:#fbbf24}
+.t-pill.new{background:rgba(239,68,68,.16);color:#f87171}
+.t-meta{font-size:11px;color:var(--hint);margin-top:3px}
+.t-body{font-size:12.5px;line-height:1.55;margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere}
+.t-answer{margin-top:8px;padding:9px 11px;border-radius:10px;background:rgba(13,148,136,.12);border:1px solid rgba(13,148,136,.3);font-size:12.5px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.ref-balance{text-align:center;padding:14px;border-radius:var(--r);background:rgba(13,148,136,.12);border:1px solid rgba(13,148,136,.3);margin-bottom:12px}
+.ref-balance .n{font-size:30px;font-weight:800;color:var(--teal2);line-height:1.1}
+.ref-link{display:block;width:100%;padding:11px 12px;border-radius:10px;border:1.5px solid var(--field-border);background:transparent;color:var(--text);font-size:12.5px;overflow-wrap:anywhere;text-align:left;user-select:all}
 body.in-checkout .tabbar{display:none}
 body.in-checkout{padding-bottom:100px}
 /* Request a book */
@@ -367,8 +388,9 @@ body.in-checkout{padding-bottom:100px}
     </div>
     <div class="hdr-icons">
       <button class="ico-btn" title="My Orders" id="myOrdersBtn" onclick="openMyOrders()" style="display:none">📦</button>
+      <button class="credits-btn" title="My credits" onclick="openReferral('credits')">💳 My credits</button>
       <button class="ico-btn acc" title="Basket" onclick="openBasket()">
-        🧺<div class="ico-badge" id="bc">0</div>
+        🛒<div class="ico-badge" id="bc">0</div>
       </button>
     </div>
   </div>
@@ -416,11 +438,21 @@ body.in-checkout{padding-bottom:100px}
   <div id="pendingContent"></div>
 </div>
 
-<!-- Tab: Contact us -->
+<!-- Tab: Support -->
 <div class="page" id="pContact">
-  <div class="sl">How can we help?</div>
+  <div class="sl">Help</div>
   <button class="contact-row" onclick="openTg('https://t.me/uptodate_admin')">
     <span class="ci-i">🆘</span><span class="ci-t"><div class="ci-n">Support</div><div class="ci-s">Chat with our team</div></span><span class="ci-c">›</span>
+  </button>
+  <button class="contact-row" onclick="openTickets()">
+    <span class="ci-i">🎫</span><span class="ci-t"><div class="ci-n">My tickets</div><div class="ci-s">Your open and resolved tickets</div></span><span class="ci-c">›</span>
+  </button>
+  <div class="sl" style="margin-top:14px">More</div>
+  <button class="contact-row" onclick="openReferral('free')">
+    <span class="ci-i">🎁</span><span class="ci-t"><div class="ci-n">How to get accounts for free</div><div class="ci-s">Share your link and earn credits</div></span><span class="ci-c">›</span>
+  </button>
+  <button class="contact-row" onclick="openAnnouncements()">
+    <span class="ci-i">📢</span><span class="ci-t"><div class="ci-n">Announcements</div><div class="ci-s">News from us</div></span><span class="ci-dot" id="annDot"></span><span class="ci-c">›</span>
   </button>
   <button class="contact-row" onclick="openTg('https://t.me/uptodate_accounts')">
     <span class="ci-i">📡</span><span class="ci-t"><div class="ci-n">Join our channel</div><div class="ci-s">@uptodate_accounts · news and offers</div></span><span class="ci-c">›</span>
@@ -608,11 +640,39 @@ body.in-checkout{padding-bottom:100px}
   </div>
 </div>
 
+<!-- My tickets -->
+<div class="overlay" id="ticketsOverlay" onclick="if(event.target===this)closeTickets()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">🎫 My tickets</div>
+    <div id="ticketsContent" style="padding:12px 15px 6px"></div>
+    <div style="padding:0 15px"><button class="btn sec" onclick="closeTickets()">Close</button></div>
+  </div>
+</div>
+<!-- Announcements -->
+<div class="overlay" id="annOverlay" onclick="if(event.target===this)closeAnnouncements()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">📢 Announcements</div>
+    <div id="annContent" style="padding:12px 15px 6px"></div>
+    <div style="padding:0 15px"><button class="btn sec" onclick="closeAnnouncements()">Close</button></div>
+  </div>
+</div>
+<!-- Credits / how to get accounts for free -->
+<div class="overlay" id="refOverlay" onclick="if(event.target===this)closeReferral()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="refTitle">💳 My credits</div>
+    <div id="refContent" style="padding:12px 15px 6px"></div>
+    <div style="padding:0 15px"><button class="btn sec" onclick="closeReferral()">Close</button></div>
+  </div>
+</div>
+
 <nav class="tabbar" id="tabbar" aria-label="Main">
   <button class="tb on" data-tab="catalog" onclick="switchTab('catalog')"><span class="tb-i">🛍</span><span>Catalogue</span></button>
   <button class="tb" data-tab="subs" onclick="switchTab('subs')"><span class="tb-i">📋</span><span>My Subscriptions</span><span class="tb-badge" id="tbSubs"></span></button>
   <button class="tb" data-tab="pending" onclick="switchTab('pending')"><span class="tb-i">⏳</span><span>Pending Orders</span><span class="tb-badge" id="tbPending"></span></button>
-  <button class="tb" data-tab="contact" onclick="switchTab('contact')"><span class="tb-i">💬</span><span>Contact us</span></button>
+  <button class="tb" data-tab="contact" onclick="switchTab('contact')"><span class="tb-i">🆘</span><span>Support</span><span class="tb-dot" id="tbSupportDot"></span></button>
 </nav>
 
 <div class="toast" id="toast"></div>
@@ -670,9 +730,24 @@ try {
 // the 404 HTML page that comes back isn't JSON either — "Unexpected
 // response from server." all over again, forever, for exactly that
 // customer, with no fresh link ever fixing it on its own). ─────────────
-const AUTH_UID = _qs.get('uid') || (SUBS_DATA && SUBS_DATA.uid) || '';
-const AUTH_TOK = _qs.get('tok') || (SUBS_DATA && SUBS_DATA.tok) || '';
-const API_BASE = _qs.get('api') || (SUBS_DATA && SUBS_DATA.api) || '';
+// ── Opened from the bot's menu button (BotFather): there is no personal link, so
+// sign in with Telegram's own signed data and get this customer's shop data
+// and token from the bot. A keyboard/inline button's personal link still works. ──
+const BOT_API_DEFAULT = 'https://telegram-order-bot-production-447b.up.railway.app';
+let BOOT = null;
+if (!_qs.get('subs') && !_qs.get('uid') && tg.initData) {
+  try {
+    const x = new XMLHttpRequest();
+    x.open('POST', (_qs.get('api') || BOT_API_DEFAULT) + '/api/bootstrap', false);
+    x.setRequestHeader('Content-Type', 'application/json');
+    x.send(JSON.stringify({initData: tg.initData}));
+    if (x.status === 200) { const d = JSON.parse(x.responseText); if (d && d.ok) BOOT = d; }
+  } catch(e) { /* the page still opens, without personal data */ }
+}
+if (BOOT) SUBS_DATA = BOOT.subs || null;
+const AUTH_UID = _qs.get('uid') || (BOOT && String(BOOT.uid)) || (SUBS_DATA && SUBS_DATA.uid) || '';
+const AUTH_TOK = _qs.get('tok') || (BOOT && BOOT.tok) || (SUBS_DATA && SUBS_DATA.tok) || '';
+const API_BASE = _qs.get('api') || (BOOT && BOOT.api) || (SUBS_DATA && SUBS_DATA.api) || '';
 // Admin-only: set when this is a '👁 Preview Shop as This Coworker' link,
 // so My Orders/purchase history can show THAT coworker's data too, not
 // just the catalog's preview pricing — see withAuth() below.
@@ -1361,12 +1436,33 @@ function copyOrderCredentials(){
   const text=document.getElementById('orderDetailCredText')?.textContent||'';
   copyToClipboard(document.getElementById('orderDetailCopyHint'), text);
 }
+// Things the bot continues in the chat (a ticket, finishing a registration, a receipt).
+// A Shop opened from the menu button cannot use sendData, so they go over HTTP, and
+// the app closes so the customer sees the bot's message.
+async function botAction(payload){
+  if(ordersUnavailableReason()){ try{ tg.sendData(JSON.stringify(payload)); }catch(e){ showToast('Please reopen the Shop and try again.'); } return; }
+  try{
+    const resp=await fetch(withAuth('/api/bot_action'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const data=await resp.json().catch(()=>({ok:false}));
+    if(!data.ok){ showToast(data.error||'Could not do that — please try again.'); return; }
+    showToast('Continue in the chat…');
+    setTimeout(()=>{ try{ tg.close(); }catch(e){} },700);
+  }catch(e){ showToast('Network error — please try again.'); }
+}
 function pendAction(action, fid, oid){
-  tg.sendData(JSON.stringify({action, fulfilment_id: fid, order_id: oid}));
+  botAction({action, fulfilment_id: fid, order_id: oid});
 }
 
-function clearUnpaidOrders(){
-  tg.sendData(JSON.stringify({action:'clear_unpaid'}));
+async function clearUnpaidOrders(){
+  if(ordersUnavailableReason()){ try{ tg.sendData(JSON.stringify({action:'clear_unpaid'})); }catch(e){} return; }
+  try{
+    const resp=await fetch(withAuth('/api/clear_unpaid'),{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const data=await resp.json().catch(()=>({ok:false}));
+    if(!data.ok){ showToast(data.error||'Could not clear them.'); return; }
+    if(SUBS_DATA&&SUBS_DATA.p) SUBS_DATA.p=SUBS_DATA.p.filter(r=>!r[4]);
+    renderPending(); setTabBadges();
+    showToast(data.count?('Cleared '+data.count+' unpaid order'+(data.count===1?'':'s')):'No unpaid orders to clear');
+  }catch(e){ showToast('Network error — please try again.'); }
 }
 
 function escHtml(str){
@@ -1374,7 +1470,7 @@ function escHtml(str){
 }
 
 function loadSubsInChat(){
-  tg.sendData(JSON.stringify({action:'view_subscriptions'}));
+  botAction({action:'view_subscriptions'});
 }
 
 // Counts on the My Subscriptions and Pending Orders tabs
@@ -1382,6 +1478,9 @@ function setTabBadges(){
   const set=(id,n)=>{ const el=document.getElementById(id); el.textContent=n; el.classList.toggle('vis',n>0); };
   set('tbSubs',(SUBS_DATA&&SUBS_DATA.d?SUBS_DATA.d.length:0));
   set('tbPending',(SUBS_DATA&&SUBS_DATA.p?SUBS_DATA.p.length:0));
+  const unread=(SUBS_DATA&&SUBS_DATA.an)||0;
+  document.getElementById('tbSupportDot').classList.toggle('vis',unread>0);
+  document.getElementById('annDot').classList.toggle('vis',unread>0);
 }
 setTabBadges();
 
@@ -1416,7 +1515,7 @@ function showPage(id){
 }
 // ── Bottom tabs ───────────────────────────────────────────────────────
 const TAB_PAGES={catalog:'p1',subs:'pSubs',pending:'pPending',contact:'pContact'};
-const TAB_TITLES={catalog:'Medic SalesBot',subs:'My Subscriptions',pending:'Pending Orders',contact:'Contact us'};
+const TAB_TITLES={catalog:'Medic SalesBot',subs:'My Subscriptions',pending:'Pending Orders',contact:'Support'};
 function switchTab(name){
   if(!TAB_PAGES[name]) name='catalog';
   showPage(TAB_PAGES[name]);
@@ -1435,6 +1534,87 @@ function openTg(url){
   window.open(url,'_blank');
 }
 function goCatalog(){switchTab('catalog');tg.MainButton.hide()}
+
+// ── Support tab: tickets, announcements, credits and the free-accounts link ──
+async function apiGet(path){
+  const reason=ordersUnavailableReason(); if(reason) throw new Error(reason);
+  const resp=await fetch(withAuth(path));
+  const data=await resp.json().catch(()=>({}));
+  if(!resp.ok||data.ok===false) throw new Error(data.error||('HTTP '+resp.status));
+  return data;
+}
+const loadingHtml='<div class="search-empty">Loading…</div>';
+const failHtml=e=>'<div class="search-empty">Could not load this: '+escHtml(e.message||String(e))+'</div>';
+
+async function openTickets(){
+  document.getElementById('ticketsOverlay').classList.add('on');
+  const el=document.getElementById('ticketsContent'); el.innerHTML=loadingHtml;
+  try{
+    const data=await apiGet('/api/my_tickets');
+    const list=data.tickets||[];
+    if(!list.length){ el.innerHTML='<div class="empty-sheet"><div class="eico">🎫</div>You have no tickets.<div style="font-size:12px;margin-top:6px">To open one, use the 🎫 button on a subscription or on an order in Pending Orders.</div></div>'; return; }
+    const open=list.filter(t=>!t.resolved).length;
+    el.innerHTML='<div class="t-meta" style="margin:0 0 10px">'+open+' open · '+(list.length-open)+' resolved</div>'+list.map(t=>
+      '<div class="t-card"><div class="t-top"><div class="t-title">'+escHtml(t.title)+' <span style="color:var(--hint);font-weight:400">#'+t.id+'</span></div>'+
+      '<span class="t-pill '+(t.resolved?'ok':'open')+'">'+(t.resolved?'✅ Resolved':'🟡 Open')+'</span></div>'+
+      '<div class="t-meta">Opened '+escHtml(t.date)+(t.resolved&&t.resolved_date?' · Resolved '+escHtml(t.resolved_date):'')+'</div>'+
+      (t.message?'<div class="t-body">'+escHtml(t.message)+'</div>':'')+
+      (t.resolved&&t.answer?'<div class="t-answer"><b>Our answer</b><br>'+escHtml(t.answer)+'</div>':'')+
+      '</div>').join('');
+  }catch(e){ el.innerHTML=failHtml(e); }
+}
+function closeTickets(){document.getElementById('ticketsOverlay').classList.remove('on')}
+
+async function openAnnouncements(){
+  document.getElementById('annOverlay').classList.add('on');
+  const el=document.getElementById('annContent'); el.innerHTML=loadingHtml;
+  try{
+    const data=await apiGet('/api/announcements?mark=1');
+    const items=data.items||[];
+    if(SUBS_DATA) SUBS_DATA.an=0;
+    setTabBadges();
+    if(!items.length){ el.innerHTML='<div class="empty-sheet"><div class="eico">📢</div>No announcements yet.</div>'; return; }
+    el.innerHTML=items.map(a=>
+      '<div class="t-card"><div class="t-top"><div class="t-meta" style="margin:0;flex:1">'+escHtml(a.date)+'</div>'+(a.new?'<span class="t-pill new">NEW</span>':'')+'</div>'+
+      '<div class="t-body" style="margin-top:6px">'+escHtml(a.body)+'</div></div>').join('');
+  }catch(e){ el.innerHTML=failHtml(e); }
+}
+function closeAnnouncements(){document.getElementById('annOverlay').classList.remove('on')}
+
+// 'credits' (the 💳 My credits button) and 'free' (How to get accounts for free) show the
+// same facts, with the one the customer asked for first.
+async function openReferral(mode){
+  document.getElementById('refOverlay').classList.add('on');
+  document.getElementById('refTitle').textContent=mode==='free'?'🎁 How to get accounts for free':'💳 My credits';
+  const el=document.getElementById('refContent');
+  el.innerHTML=loadingHtml;
+  try{
+    const d=await apiGet('/api/referral');
+    const balance='<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">Your credits</div><div class="n">'+d.credits+'</div>'+
+      '<div style="font-size:12px;color:var(--hint);margin-top:2px">= $'+d.usd+' · 1 credit = $'+d.credit_value+'</div></div>';
+    const how='<div class="t-body" style="margin:0 0 12px">'+escHtml(d.intro)+'</div>';
+    const link='<div class="sl" style="margin:4px 0 6px">Your personal link</div>'+
+      '<div class="ref-link" id="refLink">'+escHtml(d.link)+'</div>'+
+      '<div style="display:flex;gap:8px;margin:8px 0 6px">'+
+        '<button class="btn" style="margin:0" onclick="copyRefLink()">📋 Copy link</button>'+
+        '<button class="btn teal" style="margin:0" onclick="shareRefLink()">📤 Share</button></div>'+
+      '<div class="t-meta" style="margin-bottom:8px">You earn 1 credit each time someone who started the bot with your link buys a subscription. You will be notified when it happens.</div>';
+    el.innerHTML=mode==='free'?(how+link+balance):(balance+link+how);
+    el.dataset.link=d.link;
+  }catch(e){ el.innerHTML=failHtml(e); }
+}
+function closeReferral(){document.getElementById('refOverlay').classList.remove('on')}
+function copyRefLink(){
+  const link=document.getElementById('refContent').dataset.link||'';
+  navigator.clipboard.writeText(link).then(()=>showToast('Link copied')).catch(()=>{
+    const r=document.createRange(); r.selectNodeContents(document.getElementById('refLink'));
+    const sel=window.getSelection(); sel.removeAllRanges(); sel.addRange(r); showToast('Select and copy the link');
+  });
+}
+function shareRefLink(){
+  const link=document.getElementById('refContent').dataset.link||'';
+  openTg('https://t.me/share/url?url='+encodeURIComponent(link)+'&text='+encodeURIComponent('Get medical subscriptions at a great price:'));
+}
 
 // ── Request a book ────────────────────────────────────────────────────
 function openBookRequest(){
@@ -2029,9 +2209,8 @@ async function saveCwPrice(useDefault){
 }
 
 function orderTicket(fulfilmentId){
-  tg.sendData(JSON.stringify({action:'order_ticket', fulfilment_id: fulfilmentId}));
   closeOrderDetail();
-  showToast('Opening a ticket in chat…');
+  botAction({action:'order_ticket', fulfilment_id: fulfilmentId});
 }
 
 async function openPurchaseHistory(){
@@ -2205,7 +2384,7 @@ function setErr(inp,msg){inp.classList.add('err');const el=document.getElementBy
 
 // ── Payment page ──────────────────────────────────────────────────────
 function goGetFreeAccounts(){
-  tg.sendData(JSON.stringify({action:'goto_getfree'}));
+  openReferral('free');
 }
 // iMD's resource catalog runs into the thousands of entries — too many to
 // embed client-side, so this searches live against the bot's own HTTP API
@@ -2216,7 +2395,7 @@ function imdWhatsIncluded(){
   if(API_BASE){
     openImdSearch();
   } else {
-    tg.sendData(JSON.stringify({action:'imd_catalog_search'}));
+    botAction({action:'imd_catalog_search'});
   }
 }
 function openImdSearch(){
