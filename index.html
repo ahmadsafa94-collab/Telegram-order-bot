@@ -352,6 +352,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .t-meta{font-size:11px;color:var(--hint);margin-top:3px}
 .t-body{font-size:12.5px;line-height:1.55;margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere}
 .t-answer{margin-top:8px;padding:9px 11px;border-radius:10px;background:rgba(13,148,136,.12);border:1px solid rgba(13,148,136,.3);font-size:12.5px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.seg{display:flex;gap:4px;padding:3px;margin:0 0 10px;border-radius:12px;background:rgba(255,255,255,.06)}
+.seg button{flex:1;padding:8px 6px;border:0;border-radius:9px;background:transparent;color:var(--hint);font-size:12.5px;font-weight:700;cursor:pointer}
+.seg button.on{background:var(--teal);color:#fff}
+.pool-hd{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:14px 0 6px;font-size:13px;font-weight:700}
+.code-chip{display:flex;align-items:center;gap:8px;padding:7px 8px 7px 11px;margin-bottom:5px;border-radius:9px;border:1px solid rgba(255,255,255,.1);font-size:12.5px;font-family:ui-monospace,Menlo,monospace}
+.code-chip span{flex:1;min-width:0;overflow-wrap:anywhere}
+.code-chip button{border:0;background:transparent;color:#f87171;font-size:16px;padding:2px 6px;cursor:pointer}
+.code-chip.bad span{color:#f87171}
 .ref-balance{text-align:center;padding:14px;border-radius:var(--r);background:rgba(13,148,136,.12);border:1px solid rgba(13,148,136,.3);margin-bottom:12px}
 .ref-balance .n{font-size:30px;font-weight:800;color:var(--teal2);line-height:1.1}
 .ref-link{display:block;width:100%;padding:11px 12px;border-radius:10px;border:1.5px solid var(--field-border);background:transparent;color:var(--text);font-size:12.5px;overflow-wrap:anywhere;text-align:left;user-select:all}
@@ -438,6 +446,7 @@ body.in-checkout{padding-bottom:100px}
 
 <!-- Tab: Pending Orders -->
 <div class="page" id="pPending">
+  <div id="apSeg" style="display:none"></div>
   <div id="pendingContent"></div>
 </div>
 
@@ -448,8 +457,29 @@ body.in-checkout{padding-bottom:100px}
     <span class="ci-i">🆘</span><span class="ci-t"><div class="ci-n">Support</div><div class="ci-s">Chat with our team</div></span><span class="ci-c">›</span>
   </button>
   <button class="contact-row" onclick="openTickets()">
-    <span class="ci-i">🎫</span><span class="ci-t"><div class="ci-n">My tickets</div><div class="ci-s">Your open and resolved tickets</div></span><span class="ci-c">›</span>
+    <span class="ci-i">🎫</span><span class="ci-t"><div class="ci-n">My tickets</div><div class="ci-s" id="tkSub">Your open and resolved tickets</div></span><span class="ci-dot" id="tkDot"></span><span class="ci-c">›</span>
   </button>
+  <div id="adminRows" style="display:none">
+    <div class="sl" style="margin-top:14px">Manage</div>
+    <button class="contact-row" onclick="openAdminCustomers()">
+      <span class="ci-i">🔎</span><span class="ci-t"><div class="ci-n">Customers</div><div class="ci-s">Search by Telegram ID or @username</div></span><span class="ci-c">›</span>
+    </button>
+    <button class="contact-row" onclick="openAdminSales()">
+      <span class="ci-i">📈</span><span class="ci-t"><div class="ci-n">Sales &amp; revenue</div><div class="ci-s">Today, this week, this month, overall</div></span><span class="ci-c">›</span>
+    </button>
+    <button class="contact-row" onclick="openAdminCredits()">
+      <span class="ci-i">💳</span><span class="ci-t"><div class="ci-n">Customer credits</div><div class="ci-s">Who holds credits and how many</div></span><span class="ci-c">›</span>
+    </button>
+    <button class="contact-row" onclick="openAdminDiscounts()">
+      <span class="ci-i">🏷</span><span class="ci-t"><div class="ci-n">Discount codes</div><div class="ci-s">Issue and manage codes</div></span><span class="ci-c">›</span>
+    </button>
+    <button class="contact-row" onclick="openAdminSerials()">
+      <span class="ci-i">🔑</span><span class="ci-t"><div class="ci-n">Serials</div><div class="ci-s">Add, view and remove serial codes</div></span><span class="ci-c">›</span>
+    </button>
+    <button class="contact-row" onclick="openAdminCoworkers()">
+      <span class="ci-i">🤝</span><span class="ci-t"><div class="ci-n">Coworkers</div><div class="ci-s">Add, edit percentages, logins, delete</div></span><span class="ci-c">›</span>
+    </button>
+  </div>
   <div class="sl" style="margin-top:14px">More</div>
   <button class="contact-row" id="freeRow" onclick="openReferral('free')">
     <span class="ci-i">🎁</span><span class="ci-t"><div class="ci-n">How to get accounts for free</div><div class="ci-s">Share your link and earn credits</div></span><span class="ci-c">›</span>
@@ -628,6 +658,22 @@ body.in-checkout{padding-bottom:100px}
   </div>
 </div>
 
+<!-- Admin: deliver a pending unit -->
+<div class="overlay" id="delOverlay" onclick="if(event.target===this)closeDeliver()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="delTitle">Deliver</div>
+    <div style="padding:0 15px 15px">
+      <div id="delInfo" class="t-meta" style="margin:6px 0 10px;white-space:pre-wrap;overflow-wrap:anywhere"></div>
+      <div style="font-size:12px;color:var(--hint);margin:4px 0">Account details to send to the customer</div>
+      <textarea id="delText" class="cw-input" rows="5" maxlength="3500" placeholder="Username, password, link …" aria-label="Account details"></textarea>
+      <div id="delMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>
+      <button class="btn" id="delSend" onclick="sendDeliver()">📤 Send to customer</button>
+      <button class="btn sec" style="margin-top:8px" onclick="closeDeliver()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- Request a book -->
 <div class="overlay" id="bookOverlay" onclick="if(event.target===this)closeBookRequest()">
   <div class="sheet">
@@ -650,6 +696,58 @@ body.in-checkout{padding-bottom:100px}
     <div class="sheet-title">🎫 My tickets</div>
     <div id="ticketsContent" style="padding:12px 15px 6px"></div>
     <div style="padding:0 15px"><button class="btn sec" onclick="closeTickets()">Close</button></div>
+  </div>
+</div>
+<!-- Admin: customer tickets -->
+<div class="overlay" id="atkOverlay" onclick="if(event.target===this)closeAdminTickets()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">🎫 Customer tickets</div>
+    <div style="padding:12px 15px 6px"><div id="atkSeg"></div><div id="atkContent"></div></div>
+    <div style="padding:0 15px"><button class="btn sec" onclick="closeAdminTickets()">Close</button></div>
+  </div>
+</div>
+<!-- Admin: book request action -->
+<div class="overlay" id="bkOverlay" onclick="if(event.target===this)closeBookAction()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="bkTitle">Book request</div>
+    <div style="padding:0 15px 15px">
+      <div id="bkInfo" class="t-meta" style="margin:6px 0 10px;white-space:pre-wrap;overflow-wrap:anywhere"></div>
+      <input id="bkPrice" class="cw-input" type="number" inputmode="decimal" min="0" step="0.01" placeholder="Price in USD" aria-label="Price" style="display:none">
+      <textarea id="bkText" class="cw-input" rows="4" maxlength="3500" placeholder="Message to the customer" aria-label="Message" style="display:none"></textarea>
+      <label id="bkNotifyRow" style="display:none;align-items:center;gap:8px;font-size:13px;margin:6px 0"><input type="checkbox" id="bkNotify" checked> Tell the customer it was cancelled</label>
+      <div id="bkMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>
+      <button class="btn" id="bkSend" onclick="sendBookAction()">Send</button>
+      <button class="btn sec" style="margin-top:8px" onclick="closeBookAction()">Cancel</button>
+    </div>
+  </div>
+</div>
+<!-- Admin: customers, sales, credits, discount codes -->
+<div class="overlay" id="admOverlay" onclick="if(event.target===this)closeAdm()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="admTitle"></div>
+    <div id="admContent" style="padding:12px 15px 6px"></div>
+    <div style="padding:0 15px"><button class="btn sec" onclick="closeAdm()">Close</button></div>
+  </div>
+</div>
+<!-- Admin: serials -->
+<div class="overlay" id="serOverlay" onclick="if(event.target===this)closeAdminSerials()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">🔑 Serials</div>
+    <div id="serContent" style="padding:12px 15px 6px"></div>
+    <div style="padding:0 15px"><button class="btn sec" onclick="closeAdminSerials()">Close</button></div>
+  </div>
+</div>
+<!-- Admin: coworkers -->
+<div class="overlay" id="cwmOverlay" onclick="if(event.target===this)closeAdminCoworkers()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="cwmTitle">🤝 Coworkers</div>
+    <div id="cwmContent" style="padding:12px 15px 6px"></div>
+    <div style="padding:0 15px"><button class="btn sec" onclick="closeAdminCoworkers()">Close</button></div>
   </div>
 </div>
 <!-- Announcements -->
@@ -1198,6 +1296,7 @@ let subsSearchDebounce=null, subsSearchSeq=0;
 function subsSearchInput(v){
   document.getElementById('subsSearchClearBtn').style.display=v?'flex':'none';
   clearTimeout(subsSearchDebounce);
+  if(ADMIN_EDIT){ subsSearchDebounce=setTimeout(()=>loadAdminDelivered(true),300); return; }
   const q=v.trim();
   if(!q){ subsSearchSeq++; renderOrders(); return; }
   subsSearchDebounce=setTimeout(()=>runSubsSearch(q),300);
@@ -1485,15 +1584,29 @@ function loadSubsInChat(){
 }
 
 // Counts on the My Subscriptions and Pending Orders tabs
+let adminPending=[], adminCounts={tickets:0,books:0,books_open:0};
 function setTabBadges(){
+  if(ADMIN_EDIT){ setAdminBadges(); return; }
   const set=(id,n)=>{ const el=document.getElementById(id); el.textContent=n; el.classList.toggle('vis',n>0); };
-  set('tbSubs',(SUBS_DATA&&SUBS_DATA.d?SUBS_DATA.d.length:0));
-  set('tbPending',(SUBS_DATA&&SUBS_DATA.p?SUBS_DATA.p.length:0));
+  // the admin's tabs count every customer's orders, not their own
+  set('tbSubs',ADMIN_EDIT?0:(SUBS_DATA&&SUBS_DATA.d?SUBS_DATA.d.length:0));
+  set('tbPending',ADMIN_EDIT?adminPending.length:(SUBS_DATA&&SUBS_DATA.p?SUBS_DATA.p.length:0));
   const unread=(SUBS_DATA&&SUBS_DATA.an)||0;
   document.getElementById('tbSupportDot').classList.toggle('vis',unread>0);
   document.getElementById('annDot').classList.toggle('vis',unread>0);
 }
 setTabBadges();
+if(ADMIN_EDIT){
+  document.querySelector('.tb[data-tab=subs] span:nth-child(2)').textContent='Delivered';
+  document.querySelector('.credits-btn').style.display='none';   // the admin's own credits are not what this Shop is for
+  document.getElementById('subsSearchInput').placeholder='Search order #, subscription, customer, username, password';
+  document.getElementById('tbSubs').classList.remove('vis'); document.getElementById('tbSubs').textContent='';
+  // the number on Pending Orders is every customer's, fetched once the page is up
+  setTimeout(()=>{ apiGet('/api/admin_pending').then(d=>{ adminPending=d.items||[]; setAdminBadges(); }).catch(()=>{}); refreshAdminCounts(); },0);
+  // the Support tab becomes the admin's: customers' tickets, serials and coworkers
+  document.getElementById('tkSub').textContent='Tickets raised by customers';
+  document.getElementById('adminRows').style.display='block';
+}
 if(IS_COWORKER){
   document.querySelector('.credits-btn').style.display='none';
   document.getElementById('freeRow').style.display='none';
@@ -1530,7 +1643,7 @@ function showPage(id){
 }
 // ── Bottom tabs ───────────────────────────────────────────────────────
 const TAB_PAGES={catalog:'p1',subs:'pSubs',pending:'pPending',contact:'pContact'};
-const TAB_TITLES={catalog:'Medic SalesBot',subs:'My Subscriptions',pending:'Pending Orders',contact:'Support'};
+const TAB_TITLES={catalog:'Medic SalesBot',subs:ADMIN_EDIT?'Delivered Subscriptions':'My Subscriptions',pending:'Pending Orders',contact:'Support'};
 function switchTab(name){
   if(!TAB_PAGES[name]) name='catalog';
   showPage(TAB_PAGES[name]);
@@ -1539,9 +1652,10 @@ function switchTab(name){
   if(name==='subs'){
     document.getElementById('subsSearchInput').value='';
     document.getElementById('subsSearchClearBtn').style.display='none';
-    subsSearchSeq++; renderOrders();
+    subsSearchSeq++;
+    if(ADMIN_EDIT) loadAdminDelivered(true); else renderOrders();
   }
-  if(name==='pending') renderPending();
+  if(name==='pending'){ if(ADMIN_EDIT) renderAdminPending(); else renderPending(); }
   window.scrollTo(0,0);
 }
 function openTg(url){
@@ -1549,6 +1663,120 @@ function openTg(url){
   window.open(url,'_blank');
 }
 function goCatalog(){switchTab('catalog');tg.MainButton.hide()}
+
+// ── Admin Shop: Delivered Subscriptions and Pending Orders tabs ──────────────
+// In the admin's own (🛠 edit) Shop these two tabs show every customer's orders, and
+// pending ones can be delivered from here.
+let adminDel={items:[],total:0,offset:0}, adminDelSeq=0;
+function setAdminBadges(){
+  const n=adminPending.length+adminCounts.books;
+  const el=document.getElementById('tbPending'); el.textContent=n; el.classList.toggle('vis',n>0);
+  const open=adminCounts.tickets>0;
+  document.getElementById('tbSupportDot').classList.toggle('vis',open);
+  document.getElementById('tkDot').classList.toggle('vis',open);
+}
+async function refreshAdminCounts(){
+  try{ const d=await apiGet('/api/admin_counts'); adminCounts={tickets:d.tickets||0,books:d.books||0,books_open:d.books_open||0}; setAdminBadges(); drawAdminPendTabs(); }catch(e){}
+}
+const cardMeta=i=>escHtml(i.customer)+(i.user_id?' · ID '+i.user_id:'')+' · '+escHtml(i.date||'');
+async function loadAdminDelivered(reset){
+  const el=document.getElementById('ordersContent');
+  const q=document.getElementById('subsSearchInput').value.trim();
+  if(reset){ adminDel={items:[],total:0,offset:0}; el.innerHTML=loadingHtml; }
+  const seq=++adminDelSeq;
+  try{
+    const data=await apiGet('/api/admin_delivered?q='+encodeURIComponent(q)+'&offset='+adminDel.offset);
+    if(seq!==adminDelSeq) return;
+    adminDel.items=adminDel.items.concat(data.items||[]); adminDel.total=data.total||0; adminDel.offset=adminDel.items.length;
+    if(!adminDel.items.length){ el.innerHTML='<div class="search-empty">'+(q?'No delivered subscription matches your search.':'Nothing has been delivered yet.')+'</div>'; return; }
+    el.innerHTML='<div class="t-meta" style="margin:0 0 8px">'+adminDel.total+' delivered'+(q?' match your search':'')+'</div>'+
+      adminDel.items.map((i,n)=>
+        '<div class="t-card" id="ad-'+n+'"><div class="t-top" style="cursor:pointer" onclick="toggleAdminCard('+n+')">'+
+        '<div class="t-title">'+escHtml(i.name)+' <span style="color:var(--hint);font-weight:400">#'+i.order_id+'</span><div class="t-meta">'+cardMeta(i)+'</div></div>'+
+        '<span class="t-pill ok">✅</span></div>'+
+        '<div class="ad-body" style="display:none"><div class="t-body">'+(i.text?escHtml(i.text):'<span style="color:var(--hint)">No text on file for this delivery.</span>')+'</div>'+
+        '<div style="display:flex;gap:8px;margin-top:10px">'+
+          (i.text?'<button class="tk-btn" onclick="copyAdminText('+n+')">📋 Copy</button>':'')+
+          (i.delivery_id?'<button class="tk-btn" onclick="adminChat(\'editdeliv\','+i.delivery_id+')">✏️ Edit in chat</button>':'')+
+        '</div></div></div>').join('')+
+      (adminDel.items.length<adminDel.total?'<button class="btn sec" style="margin:4px 0 8px" onclick="loadAdminDelivered(false)">Show more</button>':'');
+  }catch(e){ if(seq===adminDelSeq) el.innerHTML=failHtml(e); }
+}
+function toggleAdminCard(n){
+  const b=document.querySelector('#ad-'+n+' .ad-body'); b.style.display=b.style.display==='none'?'block':'none';
+}
+function copyAdminText(n){
+  navigator.clipboard.writeText(adminDel.items[n].text||'').then(()=>showToast('Copied')).catch(()=>showToast('Select the text and copy it'));
+}
+async function adminChat(action,id){
+  try{
+    const resp=await fetch(withAuth('/api/admin_chat_action'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,id})});
+    const data=await resp.json().catch(()=>({ok:false}));
+    if(!data.ok){ showToast(data.error||'Could not open it in the chat.'); return; }
+    showToast('Continue in the chat…'); setTimeout(()=>{ try{ tg.close(); }catch(e){} },700);
+  }catch(e){ showToast('Network error — please try again.'); }
+}
+
+let adminPendTab='deliver', adminBooks=[];
+function drawAdminPendTabs(){
+  const seg=document.getElementById('apSeg'); seg.style.display='block';
+  seg.innerHTML='<div class="seg"><button class="'+(adminPendTab==='deliver'?'on':'')+'" onclick="setAdminPendTab(\'deliver\')">To deliver ('+adminPending.length+')</button>'+
+    '<button class="'+(adminPendTab==='books'?'on':'')+'" onclick="setAdminPendTab(\'books\')">Book requests ('+adminCounts.books_open+')</button></div>';
+}
+function setAdminPendTab(t){ adminPendTab=t; renderAdminPending(); }
+async function renderAdminPending(){
+  drawAdminPendTabs(); refreshAdminCounts();
+  if(adminPendTab==='books') return renderAdminBooks();
+  const el=document.getElementById('pendingContent'); el.innerHTML=loadingHtml;
+  try{
+    const data=await apiGet('/api/admin_pending');
+    adminPending=data.items||[]; setAdminBadges(); drawAdminPendTabs();
+    drawAdminPending();
+  }catch(e){ el.innerHTML=failHtml(e); }
+}
+function drawAdminPending(){
+  if(adminPendTab!=='deliver') return;
+  const el=document.getElementById('pendingContent');
+  if(!adminPending.length){ el.innerHTML='<div class="empty-sheet"><div class="eico">✅</div><div style="font-size:14px;font-weight:600;margin-bottom:6px">Nothing waiting for delivery</div><div style="font-size:12px;color:var(--hint)">Paid orders that still need delivering show up here.</div></div>'; return; }
+  const orders=[]; adminPending.forEach(i=>{ let o=orders.find(x=>x.order_id===i.order_id); if(!o){ o={order_id:i.order_id,customer:i.customer,user_id:i.user_id,date:i.date,units:[]}; orders.push(o); } o.units.push(i); });
+  el.innerHTML='<div class="t-meta" style="margin:0 0 8px">'+adminPending.length+' to deliver · '+orders.length+' order'+(orders.length===1?'':'s')+'</div>'+
+    orders.map(o=>'<div class="sub-section-lbl" style="margin-top:6px">Order #'+o.order_id+' · '+escHtml(o.customer)+' · '+escHtml(o.date)+'</div>'+
+      o.units.map(i=>
+        '<div class="t-card" id="ap-'+i.fid+'"><div class="t-top"><div class="t-title">'+escHtml(i.name)+(i.unit>1?' #'+i.unit:'')+'</div>'+
+        '<span class="t-pill '+(i.state==='needs_info'?'open':'ok')+'">'+(i.state==='needs_info'?'⌛ Waiting for customer':'📤 Ready')+'</span></div>'+
+        (i.info?'<div class="t-body" style="font-size:12px;color:var(--hint)">'+escHtml(i.info)+'</div>':'<div class="t-meta">The customer has not sent any details.</div>')+
+        '<div style="display:flex;gap:8px;margin-top:10px">'+
+          (i.imd?'':'<button class="btn" style="margin:0;padding:10px;width:auto;flex:1.4" onclick="openDeliver('+i.fid+')">📤 Deliver</button>')+
+          '<button class="tk-btn" style="flex:1;width:auto;white-space:nowrap" onclick="adminChat(\'deliver\','+i.fid+')">'+(i.imd?'🤖 Renew / deliver in chat':'💬 Open in chat')+'</button>'+
+        '</div></div>').join('')).join('');
+}
+let deliverFid=null;
+function openDeliver(fid){
+  const i=adminPending.find(x=>x.fid===fid); if(!i) return;
+  deliverFid=fid;
+  document.getElementById('delTitle').textContent=i.name+' · Order #'+i.order_id;
+  document.getElementById('delInfo').textContent=i.customer+(i.state==='needs_info'?'\nThe customer has not sent their details yet.':'')+(i.info?'\n'+i.info:'');
+  document.getElementById('delText').value=''; document.getElementById('delMsg').textContent='';
+  document.getElementById('delOverlay').classList.add('on');
+  setTimeout(()=>document.getElementById('delText').focus(),150);
+}
+function closeDeliver(){document.getElementById('delOverlay').classList.remove('on'); deliverFid=null;}
+async function sendDeliver(){
+  const msg=document.getElementById('delMsg'), btn=document.getElementById('delSend');
+  const text=document.getElementById('delText').value.trim();
+  const bad=t=>{ msg.style.color='#dc2626'; msg.textContent=t; };
+  if(!text) return bad('Type the account details to send.');
+  const fid=deliverFid; if(!fid) return;
+  btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Sending…';
+  try{
+    const resp=await fetch(withAuth('/api/admin_deliver'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fulfilment_id:fid,text})});
+    const data=await resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
+    if(!data.ok){ bad(data.error||'Could not deliver.'); return; }
+    adminPending=adminPending.filter(x=>x.fid!==fid); setAdminBadges(); drawAdminPendTabs(); closeDeliver(); drawAdminPending();
+    showToast('Delivered · '+data.name+' · Order #'+data.order_id);
+  }catch(e){ bad('Network error — please try again.'); }
+  finally{ btn.disabled=false; }
+}
 
 // ── Support tab: tickets, announcements, credits and the free-accounts link ──
 async function apiGet(path){
@@ -1561,7 +1789,344 @@ async function apiGet(path){
 const loadingHtml='<div class="search-empty">Loading…</div>';
 const failHtml=e=>'<div class="search-empty">Could not load this: '+escHtml(e.message||String(e))+'</div>';
 
+// ── Admin Shop: Support tools — customer tickets, book requests, serials, coworkers ─────
+function askConfirm(text,yes){
+  try{ if(tg.showConfirm){ tg.showConfirm(text,ok=>{ if(ok) yes(); }); return; } }catch(e){}
+  if(window.confirm(text)) yes();
+}
+async function adminPost(path,body){
+  const resp=await fetch(withAuth(path),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const data=await resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
+  if(!data.ok) throw new Error(data.error||('HTTP '+resp.status));
+  return data;
+}
+const fieldBox=(id,ph,val,type)=>'<input id="'+id+'" class="cw-input" type="'+(type||'text')+'" placeholder="'+ph+'" aria-label="'+ph+'" value="'+escHtml(val==null?'':String(val))+'" autocomplete="off" style="margin-bottom:8px">';
+
+// Customer tickets
+let adminTkTab='unresolved', adminTk=[];
+function openAdminTickets(){ document.getElementById('atkOverlay').classList.add('on'); loadAdminTickets(); }
+function closeAdminTickets(){ document.getElementById('atkOverlay').classList.remove('on'); }
+function setAdminTkTab(t){ adminTkTab=t; loadAdminTickets(); }
+async function loadAdminTickets(){
+  const el=document.getElementById('atkContent'); el.innerHTML=loadingHtml;
+  try{
+    const data=await apiGet('/api/admin_tickets?status='+adminTkTab);
+    adminTk=data.tickets||[]; adminCounts.tickets=data.open||0; setAdminBadges();
+    document.getElementById('atkSeg').innerHTML='<div class="seg"><button class="'+(adminTkTab==='unresolved'?'on':'')+'" onclick="setAdminTkTab(\'unresolved\')">Open ('+adminCounts.tickets+')</button>'+
+      '<button class="'+(adminTkTab==='resolved'?'on':'')+'" onclick="setAdminTkTab(\'resolved\')">Resolved</button></div>';
+    if(!adminTk.length){ el.innerHTML='<div class="empty-sheet"><div class="eico">'+(adminTkTab==='unresolved'?'✅':'🎫')+'</div>'+(adminTkTab==='unresolved'?'No open tickets.':'No resolved tickets yet.')+'</div>'; return; }
+    el.innerHTML=adminTk.map((t,n)=>
+      '<div class="t-card" id="atk-'+n+'"><div class="t-top" style="cursor:pointer" onclick="toggleAdminTicket('+n+')">'+
+      '<div class="t-title">'+escHtml(t.category||'Ticket')+(t.sub?' · '+escHtml(t.sub):'')+' <span style="color:var(--hint);font-weight:400">#'+t.id+'</span>'+
+      '<div class="t-meta">'+escHtml(t.customer)+' · ID '+t.user_id+' · '+escHtml(t.date)+'</div></div>'+
+      '<span class="t-pill '+(t.resolved?'ok':'open')+'">'+(t.resolved?'✅ Resolved':'🟡 Open')+'</span></div>'+
+      (t.message?'<div class="t-body atk-snip" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">'+escHtml(t.message)+'</div>':'')+
+      '<div class="ad-body" style="display:none">'+
+        (t.message?'<div class="t-body atk-full">'+escHtml(t.message)+'</div>':'<div class="t-meta">The customer did not write a message.</div>')+
+        (t.photo?'<img class="atk-photo" data-src="'+withAuth('/api/admin_ticket_photo?id='+t.id)+'" alt="Screenshot from the customer" style="max-width:100%;border-radius:10px;margin-top:8px;display:none">':'')+
+        (t.self_help?'<details style="margin-top:8px"><summary class="t-meta" style="cursor:pointer">What the customer was shown first</summary><div class="t-body" style="font-size:12px;color:var(--hint)">'+escHtml(t.self_help)+'</div></details>':'')+
+        '<div style="font-size:12px;color:var(--hint);margin:10px 0 4px">'+(t.resolved?'Our answer (edit to correct it)':'Answer to the customer')+'</div>'+
+        '<textarea id="atk-ans-'+n+'" class="cw-input" rows="4" maxlength="3500" placeholder="Type the answer…" aria-label="Answer">'+escHtml(t.resolved?t.answer:'')+'</textarea>'+
+        '<div id="atk-msg-'+n+'" style="font-size:12px;margin:6px 0;min-height:14px"></div>'+
+        '<div style="display:flex;gap:8px">'+
+          '<button class="btn" style="margin:0;padding:10px;flex:1.6;width:auto" id="atk-send-'+n+'" onclick="answerAdminTicket('+n+',true)">'+(t.resolved?'✏️ Save corrected answer':'✅ Send answer & resolve')+'</button>'+
+          (t.resolved?'':'<button class="tk-btn" style="flex:1;width:auto" onclick="answerAdminTicket('+n+',false)">Resolve only</button>')+
+        '</div></div></div>').join('');
+  }catch(e){ el.innerHTML=failHtml(e); }
+}
+function toggleAdminTicket(n){
+  const b=document.querySelector('#atk-'+n+' .ad-body'), snip=document.querySelector('#atk-'+n+' .atk-snip');
+  const open=b.style.display==='none'; b.style.display=open?'block':'none'; if(snip) snip.style.display=open?'none':'-webkit-box';
+  const img=b.querySelector('.atk-photo'); if(open&&img&&!img.src){ img.onload=()=>{img.style.display='block'}; img.src=img.dataset.src; }
+}
+async function answerAdminTicket(n,withText){
+  const t=adminTk[n], msg=document.getElementById('atk-msg-'+n), btn=document.getElementById('atk-send-'+n);
+  const text=withText?document.getElementById('atk-ans-'+n).value.trim():'';
+  if(t.resolved&&!text){ msg.style.color='#dc2626'; msg.textContent='Type the corrected answer.'; return; }
+  btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Sending…';
+  try{
+    const d=await adminPost('/api/admin_ticket_answer',{id:t.id,message:text});
+    showToast(d.note||'Done'); loadAdminTickets();
+  }catch(e){ msg.style.color='#dc2626'; msg.textContent=e.message; btn.disabled=false; }
+}
+
+// Book requests (Pending Orders → Book requests)
+async function renderAdminBooks(){
+  const el=document.getElementById('pendingContent'); el.innerHTML=loadingHtml;
+  try{
+    const d=await apiGet('/api/admin_book_requests');
+    adminBooks=d.items||[]; adminCounts.books=adminBooks.filter(b=>b.status==='pending').length; adminCounts.books_open=adminBooks.length;
+    setAdminBadges(); drawAdminPendTabs();
+    if(adminPendTab!=='books') return;
+    if(!adminBooks.length){ el.innerHTML='<div class="empty-sheet"><div class="eico">📚</div><div style="font-size:14px;font-weight:600;margin-bottom:6px">No open book requests</div><div style="font-size:12px;color:var(--hint)">Books customers ask for show up here.</div></div>'; return; }
+    el.innerHTML=adminBooks.map(b=>
+      '<div class="t-card"><div class="t-top"><div class="t-title">📚 Request #'+b.id+'<div class="t-meta">'+escHtml(b.customer)+' · ID '+b.user_id+' · '+escHtml(b.date)+'</div></div>'+
+      '<span class="t-pill '+(b.status==='pending'?'open':'ok')+'">'+(b.status==='pending'?'💰 Needs a price':'⌛ Priced · $'+Number(b.price).toFixed(2))+'</span></div>'+
+      '<div class="t-body" style="font-size:12px">'+escHtml(b.link)+'</div>'+
+      '<div style="display:flex;gap:8px;margin-top:10px">'+
+        '<button class="btn" style="margin:0;padding:10px;flex:1.3;width:auto" onclick="openBookAction('+b.id+',\'price\')">💰 '+(b.status==='pending'?'Set price':'Change price')+'</button>'+
+        '<button class="tk-btn" style="flex:1;width:auto" onclick="openBookAction('+b.id+',\'message\')">💬 Reply</button>'+
+        '<button class="tk-btn" style="flex:1;width:auto;color:#f87171" onclick="openBookAction('+b.id+',\'cancel\')">❌ Cancel</button>'+
+      '</div></div>').join('');
+  }catch(e){ el.innerHTML=failHtml(e); }
+}
+let bookAct=null;
+function openBookAction(id,mode){
+  const b=adminBooks.find(x=>x.id===id); if(!b) return;
+  bookAct={id,mode};
+  const T={price:'💰 Price · Request #',message:'💬 Reply · Request #',cancel:'❌ Cancel · Request #'};
+  document.getElementById('bkTitle').textContent=T[mode]+id;
+  document.getElementById('bkInfo').textContent=b.customer+'\n'+b.link;
+  const price=document.getElementById('bkPrice'), text=document.getElementById('bkText');
+  price.style.display=mode==='price'?'block':'none'; price.value=mode==='price'&&b.price?b.price:'';
+  text.style.display=mode==='message'?'block':'none'; text.value='';
+  document.getElementById('bkNotifyRow').style.display=mode==='cancel'?'flex':'none';
+  document.getElementById('bkNotify').checked=true;
+  document.getElementById('bkMsg').textContent='';
+  document.getElementById('bkSend').textContent=mode==='price'?'Send price to customer':mode==='message'?'Send message':'Cancel this request';
+  document.getElementById('bkOverlay').classList.add('on');
+  setTimeout(()=>{ const f=mode==='price'?price:mode==='message'?text:null; if(f) f.focus(); },150);
+}
+function closeBookAction(){ document.getElementById('bkOverlay').classList.remove('on'); bookAct=null; }
+async function sendBookAction(){
+  if(!bookAct) return;
+  const {id,mode}=bookAct, msg=document.getElementById('bkMsg'), btn=document.getElementById('bkSend');
+  const bad=t=>{ msg.style.color='#dc2626'; msg.textContent=t; };
+  const body={id,action:mode};
+  if(mode==='price'){ const p=parseFloat(document.getElementById('bkPrice').value); if(!(p>0)) return bad('Enter a price above 0.'); body.price=p; }
+  if(mode==='message'){ body.message=document.getElementById('bkText').value.trim(); if(!body.message) return bad('Type the message to send.'); }
+  if(mode==='cancel') body.notify=document.getElementById('bkNotify').checked;
+  btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Sending…';
+  try{
+    const d=await adminPost('/api/admin_book_action',body);
+    closeBookAction(); showToast(d.note||'Done'); renderAdminBooks();
+  }catch(e){ bad(e.message); }
+  finally{ btn.disabled=false; }
+}
+
+// Customers, sales & revenue, credits, discount codes (one shared sheet)
+function openAdm(title){ document.getElementById('admTitle').textContent=title; document.getElementById('admOverlay').classList.add('on'); }
+function closeAdm(){ document.getElementById('admOverlay').classList.remove('on'); }
+const admEl=()=>document.getElementById('admContent');
+const money=n=>'$'+Number(n||0).toFixed(2);
+const admMsg=(t,ok)=>{ const m=document.getElementById('admMsg'); if(m){ m.style.color=ok?'var(--hint)':'#dc2626'; m.textContent=t; } };
+
+// Customers
+let admCust=[];
+function openAdminCustomers(){
+  openAdm('🔎 Customers');
+  admEl().innerHTML='<div style="display:flex;gap:8px"><input id="custQ" class="cw-input" type="text" placeholder="Telegram ID or @username" aria-label="Search customers" autocomplete="off" onkeydown="if(event.key===\'Enter\')searchCustomers()">'+
+    '<button class="btn" style="margin:0;width:auto;padding:11px 16px" onclick="searchCustomers()">Search</button></div>'+
+    '<div id="admMsg" style="font-size:12px;margin:8px 0;min-height:14px"></div><div id="custList"></div>';
+  setTimeout(()=>{ const f=document.getElementById('custQ'); if(f) f.focus(); },150);
+}
+async function searchCustomers(){
+  const q=document.getElementById('custQ').value.trim(); if(!q) return admMsg('Type a Telegram ID or @username.');
+  admMsg('Searching…',true);
+  try{
+    admCust=(await apiGet('/api/admin_customer?q='+encodeURIComponent(q))).customers||[];
+    admMsg('',true);
+    const el=document.getElementById('custList');
+    if(!admCust.length){ el.innerHTML='<div class="empty-sheet"><div class="eico">🔎</div>No customer matches “'+escHtml(q)+'”.<div style="font-size:12px;margin-top:6px">They may never have messaged the bot, or changed their username.</div></div>'; return; }
+    if(admCust.length===1) return showCustomer(admCust[0].user_id,true);
+    el.innerHTML=admCust.map(c=>custCard(c)).join('');
+  }catch(e){ admMsg(e.message); }
+}
+const custName=c=>c.username?'@'+escHtml(c.username):'ID '+c.user_id;
+function custCard(c){
+  return '<div class="t-card" style="cursor:pointer" onclick="showCustomer('+c.user_id+')"><div class="t-top"><div class="t-title">'+custName(c)+'<div class="t-meta">ID '+c.user_id+' · '+c.orders+' order'+(c.orders===1?'':'s')+' · '+money(c.spent)+(c.last_seen?' · last seen '+escHtml(c.last_seen):'')+'</div></div>'+
+    (c.credits?'<span class="t-pill ok">💳 '+c.credits+'</span>':'')+'</div></div>';
+}
+async function showCustomer(id,single){
+  const el=document.getElementById('custList'); el.innerHTML=loadingHtml;
+  try{
+    const c=(await apiGet('/api/admin_customer?id='+id)).customer;
+    const unit=u=>'<div class="t-card"><div class="t-title">'+escHtml(u.name)+(u.unit>1?' #'+u.unit:'')+' <span style="color:var(--hint);font-weight:400">· Order #'+u.order_id+(u.label?' · '+escHtml(u.label):'')+'</span></div>'+
+      (u.info?'<div class="t-body" style="font-size:12px;color:var(--hint)">'+escHtml(u.info)+'</div>':'')+'</div>';
+    el.innerHTML=(single?'':'<button class="tk-btn" style="margin-bottom:10px" onclick="searchCustomers()">← Results</button>')+
+      '<div class="t-card"><div class="t-title">'+custName(c)+'</div><div class="t-meta">ID '+c.user_id+'</div>'+
+      '<div class="t-body" style="font-size:12.5px">'+(c.seen?'💬 First seen '+escHtml(c.seen.first)+' · last seen '+escHtml(c.seen.last):'⚠️ Has never sent /start to this bot')+
+      '\n💳 Credits: '+c.credits+' ('+money(c.credits_usd)+')\n🧾 '+c.orders+' paid order'+(c.orders===1?'':'s')+' · '+money(c.spent)+'</div>'+
+      (c.username?'<button class="tk-btn" style="margin-top:8px" onclick="openTg(\'https://t.me/'+encodeURIComponent(c.username)+'\')">💬 Open chat with @'+escHtml(c.username)+'</button>':'')+'</div>'+
+      '<div class="sub-section-lbl">✅ Delivered ('+c.delivered.length+')</div>'+(c.delivered.map(unit).join('')||'<div class="t-meta" style="margin-bottom:8px">None.</div>')+
+      '<div class="sub-section-lbl">⏳ Pending ('+c.pending.length+')</div>'+(c.pending.map(unit).join('')||'<div class="t-meta">None.</div>');
+  }catch(e){ el.innerHTML=failHtml(e); }
+}
+
+// Customer credits
+async function openAdminCredits(){
+  openAdm('💳 Customer credits'); admEl().innerHTML=loadingHtml;
+  try{
+    const d=await apiGet('/api/admin_credits');
+    admEl().innerHTML='<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">Credits held by customers</div><div class="n">'+d.total_credits+'</div><div style="font-size:12px;color:var(--hint);margin-top:2px">= '+money(d.total_usd)+' · 1 credit = $'+d.value+'</div></div>'+
+      (d.items.length?d.items.map(i=>'<div class="t-card" style="cursor:pointer" onclick="openAdminCustomerById('+i.user_id+')"><div class="t-top"><div class="t-title">'+escHtml(i.customer)+'<div class="t-meta">ID '+i.user_id+'</div></div><span class="t-pill ok">💳 '+i.credits+' · '+money(i.usd)+'</span></div></div>').join(''):'<div class="empty-sheet"><div class="eico">💳</div>No customer has any credits yet.</div>');
+  }catch(e){ admEl().innerHTML=failHtml(e); }
+}
+function openAdminCustomerById(id){ openAdminCustomers(); showCustomer(id,true); }
+
+// Sales & revenue
+let admPeriod='today';
+function openAdminSales(){ openAdm('📈 Sales & revenue'); loadAdminSales(); }
+async function loadAdminSales(p){
+  if(p) admPeriod=p;
+  const el=admEl(); el.innerHTML=loadingHtml;
+  try{
+    const d=await apiGet('/api/admin_sales?period='+admPeriod);
+    const seg=[['today','Today'],['week','Week'],['month','Month'],['overall','Overall']].map(x=>'<button class="'+(admPeriod===x[0]?'on':'')+'" onclick="loadAdminSales(\''+x[0]+'\')">'+x[1]+'</button>').join('');
+    el.innerHTML='<div class="seg">'+seg+'</div>'+
+      '<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">Revenue · '+escHtml(d.label)+'</div><div class="n">'+money(d.revenue)+'</div><div style="font-size:12px;color:var(--hint);margin-top:2px">'+d.accounts+' account'+(d.accounts===1?'':'s')+' · '+d.orders+' order'+(d.orders===1?'':'s')+'</div></div>'+
+      (d.products.length?'<div class="sub-section-lbl">Accounts sold</div>'+d.products.map(p=>'<div class="t-card" style="padding:9px 13px;margin-bottom:6px"><div class="t-top"><div class="t-title">'+escHtml(p.name)+'</div><span class="t-pill ok">× '+p.qty+'</span></div></div>').join(''):'<div class="search-empty">No sales in this period.</div>')+
+      (d.methods.length?'<div class="sub-section-lbl" style="margin-top:10px">By payment method</div>'+d.methods.map(m=>'<div class="t-card" style="padding:9px 13px;margin-bottom:6px"><div class="t-top"><div class="t-title">'+escHtml(m.method)+'<div class="t-meta">'+m.count+' order'+(m.count===1?'':'s')+'</div></div><span class="t-pill ok">'+money(m.revenue)+'</span></div></div>').join(''):'')+
+      '<div id="admMsg" style="font-size:12px;margin:8px 0;min-height:14px"></div>'+
+      '<button class="tk-btn" onclick="sendSalesExcel()">📊 Send the daily profit Excel to my chat</button>';
+  }catch(e){ el.innerHTML=failHtml(e); }
+}
+async function sendSalesExcel(){
+  admMsg('Preparing…',true);
+  try{ await adminPost('/api/admin_sales_excel',{}); admMsg('Sent — check your chat with the bot.',true); }
+  catch(e){ admMsg(e.message); }
+}
+
+// Discount codes
+async function openAdminDiscounts(){ openAdm('🏷 Discount codes'); loadAdminDiscounts(); }
+async function loadAdminDiscounts(items,made){
+  try{ if(!items) items=(await apiGet('/api/admin_discounts')).items||[]; }catch(e){ admEl().innerHTML=failHtml(e); return; }
+  const keep={}; ['dcPct','dcUses','dcDays'].forEach(k=>{ const f=document.getElementById(k); if(f) keep[k]=f.value; });
+  admEl().innerHTML=
+    (made?'<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">New code created</div><div class="n" style="font-size:24px;letter-spacing:2px">'+escHtml(made)+'</div><button class="tk-btn" style="margin-top:8px" onclick="copyDiscount('+JSON.stringify(made).replace(/"/g,'&quot;')+')">📋 Copy code</button></div>':'')+
+    '<div class="sub-section-lbl">Issue a new code</div>'+
+    '<div style="display:flex;gap:8px">'+fieldBox('dcPct','% off',keep.dcPct,'number')+fieldBox('dcUses','Uses',keep.dcUses,'number')+fieldBox('dcDays','Days valid',keep.dcDays,'number')+'</div>'+
+    '<div id="admMsg" style="font-size:12px;margin:0 0 8px;min-height:14px"></div>'+
+    '<button class="btn" id="dcSave" style="margin-top:0" onclick="createDiscount()">➕ Create code</button>'+
+    '<div class="sub-section-lbl" style="margin-top:14px">Codes ('+items.length+')</div>'+
+    (items.length?items.map(i=>'<div class="t-card"><div class="t-top"><div class="t-title" style="font-family:ui-monospace,Menlo,monospace;letter-spacing:1px">'+escHtml(i.code)+
+      '<div class="t-meta" style="font-family:inherit;letter-spacing:0">'+Number(i.pct)+'% off · '+i.uses+' use'+(i.uses===1?'':'s')+' left · expires '+escHtml(i.expires)+'</div></div>'+
+      '<span class="t-pill '+(i.state==='active'?'ok':'open')+'">'+escHtml(i.state)+'</span></div>'+
+      '<div style="display:flex;gap:8px;margin-top:8px"><button class="tk-btn" style="flex:1;width:auto" onclick="copyDiscount('+JSON.stringify(i.code).replace(/"/g,'&quot;')+')">📋 Copy</button>'+
+      '<button class="tk-btn" style="flex:1;width:auto;color:#f87171" onclick="deleteDiscount('+JSON.stringify(i.code).replace(/"/g,'&quot;')+')">🗑 Delete</button></div></div>').join(''):'<div class="t-meta">No codes yet.</div>');
+}
+function copyDiscount(code){ navigator.clipboard.writeText(code).then(()=>showToast('Copied '+code)).catch(()=>showToast(code)); }
+async function createDiscount(){
+  const v=id=>document.getElementById(id).value.trim(), btn=document.getElementById('dcSave');
+  const percentage=parseFloat(v('dcPct')), uses=parseInt(v('dcUses'),10), days=parseInt(v('dcDays'),10);
+  if(!(percentage>0&&percentage<=100)) return admMsg('The percentage must be between 1 and 100.');
+  if(!(uses>=1)) return admMsg('Uses must be a whole number of at least 1.');
+  if(!(days>=1)) return admMsg('Days must be a whole number of at least 1.');
+  btn.disabled=true; admMsg('Creating…',true);
+  try{ const d=await adminPost('/api/admin_discount_action',{action:'create',percentage,uses,days}); ['dcPct','dcUses','dcDays'].forEach(k=>document.getElementById(k).value=''); loadAdminDiscounts(d.items,d.code); }
+  catch(e){ admMsg(e.message); btn.disabled=false; }
+}
+function deleteDiscount(code){
+  askConfirm('Delete the code '+code+'? Customers can no longer use it.',async()=>{
+    try{ const d=await adminPost('/api/admin_discount_action',{action:'delete',code}); showToast('Code deleted'); loadAdminDiscounts(d.items); }
+    catch(e){ admMsg(e.message); }
+  });
+}
+
+// Serials
+let adminPools=[];
+function openAdminSerials(){ document.getElementById('serOverlay').classList.add('on'); loadAdminSerials(); }
+function closeAdminSerials(){ document.getElementById('serOverlay').classList.remove('on'); }
+async function loadAdminSerials(){
+  const el=document.getElementById('serContent'); el.innerHTML=loadingHtml;
+  try{ adminPools=(await apiGet('/api/admin_serials')).pools||[]; drawAdminSerials(); }catch(e){ el.innerHTML=failHtml(e); }
+}
+function drawAdminSerials(){
+  const el=document.getElementById('serContent'), keep={};
+  adminPools.forEach((p,i)=>{ const f=document.getElementById('serNew-'+i); if(f) keep[i]=f.value; });
+  const nw=adminPools.reduce((a,p)=>a+p.not_working.length,0);
+  el.innerHTML=adminPools.map((p,i)=>
+    '<div class="pool-hd"><span>'+escHtml(p.label)+'</span><span class="t-pill '+(p.available.length?'ok':'open')+'">'+p.available.length+' available</span></div>'+
+    (p.available.map(c=>'<div class="code-chip"><span>'+escHtml(c)+'</span><button aria-label="Remove" onclick="removeSerial('+i+',\'a\','+p.available.indexOf(c)+')">✕</button></div>').join('')||'<div class="t-meta">None available.</div>')+
+    (p.not_working.length?'<div class="t-meta" style="margin:8px 0 4px;color:#f87171">Not working — rejected by iMD</div>'+p.not_working.map((c,k)=>'<div class="code-chip bad"><span>'+escHtml(c)+'</span><button aria-label="Remove" onclick="removeSerial('+i+',\'n\','+k+')">✕</button></div>').join(''):'')+
+    '<textarea id="serNew-'+i+'" class="cw-input" rows="2" placeholder="Paste new codes — one per line, or spaces, or a - b - c" aria-label="New codes for '+escHtml(p.label)+'" style="margin-top:8px">'+escHtml(keep[i]||'')+'</textarea>'+
+    '<button class="tk-btn" style="margin-top:6px" onclick="addSerials('+i+')">➕ Add to '+escHtml(p.label)+'</button>').join('')+
+    (nw?'<button class="tk-btn" style="margin-top:16px;color:#f87171" onclick="clearBadSerials()">🗑 Remove all '+nw+' not-working codes</button>':'')+
+    '<div id="serMsg" style="font-size:12px;margin:10px 0;min-height:14px"></div>';
+}
+async function serialsCall(body,okText){
+  const msg=document.getElementById('serMsg');
+  try{ const d=await adminPost('/api/admin_serials_action',body); adminPools=d.pools||adminPools; drawAdminSerials(); const m=document.getElementById('serMsg'); if(m){ m.style.color='var(--hint)'; m.textContent=okText(d); } return d; }
+  catch(e){ msg.style.color='#dc2626'; msg.textContent=e.message; }
+}
+function addSerials(i){
+  const codes=document.getElementById('serNew-'+i).value;
+  if(!codes.trim()){ const m=document.getElementById('serMsg'); m.style.color='#dc2626'; m.textContent='Paste at least one code.'; return; }
+  serialsCall({action:'add',duration:adminPools[i].duration,codes},d=>'Added '+d.added+(d.skipped?' · skipped '+d.skipped+' already in the pool':'')).then(d=>{ if(d){ const f=document.getElementById('serNew-'+i); if(f) f.value=''; } });
+}
+function removeSerial(i,kind,k){
+  const code=(kind==='a'?adminPools[i].available:adminPools[i].not_working)[k];
+  askConfirm('Remove '+code+' from the pool?',()=>serialsCall({action:'remove',code},()=>'Removed '+code));
+}
+function clearBadSerials(){ askConfirm('Remove every not-working code?',()=>serialsCall({action:'clear_not_working'},d=>'Removed '+d.removed+' not-working code(s)')); }
+
+// Coworkers
+let adminCw=[];
+function openAdminCoworkers(){ document.getElementById('cwmOverlay').classList.add('on'); loadAdminCoworkers(); }
+function closeAdminCoworkers(){ document.getElementById('cwmOverlay').classList.remove('on'); }
+async function loadAdminCoworkers(){
+  const el=document.getElementById('cwmContent'); el.innerHTML=loadingHtml;
+  try{ adminCw=(await apiGet('/api/admin_coworkers')).items||[]; drawAdminCoworkers(); }catch(e){ el.innerHTML=failHtml(e); }
+}
+function drawAdminCoworkers(){
+  document.getElementById('cwmTitle').textContent='🤝 Coworkers';
+  const el=document.getElementById('cwmContent');
+  el.innerHTML='<button class="btn" style="margin:0 0 12px" onclick="drawAddCoworker()">➕ Add a coworker</button>'+
+    (adminCw.length?adminCw.map(c=>
+      '<div class="t-card" style="cursor:pointer" onclick="drawEditCoworker('+c.id+')"><div class="t-top"><div class="t-title">'+escHtml(c.name)+'<div class="t-meta">@'+escHtml(c.username)+' · '+c.orders+' order'+(c.orders===1?'':'s')+(c.pending?' · '+c.pending+' pending':'')+' · $'+Number(c.revenue).toFixed(2)+'</div></div>'+
+      '<span class="t-pill ok">'+Number(c.pct)+'% off</span></div></div>').join(''):'<div class="empty-sheet"><div class="eico">🤝</div>No coworkers yet.</div>');
+}
+function cwMsg(t,ok){ const m=document.getElementById('cwmMsg'); if(m){ m.style.color=ok?'var(--hint)':'#dc2626'; m.textContent=t; } }
+function drawAddCoworker(){
+  document.getElementById('cwmTitle').textContent='➕ New coworker';
+  document.getElementById('cwmContent').innerHTML=
+    fieldBox('cwNewName','Name')+fieldBox('cwNewUser','Login username')+fieldBox('cwNewPass','Login password')+fieldBox('cwNewPct','Percentage discount (1–100)','','number')+
+    '<div id="cwmMsg" style="font-size:12px;margin:4px 0 8px;min-height:14px"></div>'+
+    '<button class="btn" id="cwNewSave" onclick="saveNewCoworker()">Create coworker</button>'+
+    '<button class="btn sec" style="margin-top:8px" onclick="drawAdminCoworkers()">← Back</button>';
+}
+async function saveNewCoworker(){
+  const v=id=>document.getElementById(id).value.trim(), btn=document.getElementById('cwNewSave');
+  const name=v('cwNewName'), username=v('cwNewUser'), password=v('cwNewPass'), pct=parseFloat(v('cwNewPct'));
+  if(!name||!username||!password) return cwMsg('Enter a name, a username and a password.');
+  if(!(pct>0&&pct<=100)) return cwMsg('The percentage must be between 1 and 100.');
+  btn.disabled=true; cwMsg('Creating…',true);
+  try{ const d=await adminPost('/api/admin_coworker_action',{action:'add',name,username,password,pct}); adminCw=d.items; showToast('Coworker added'); drawAdminCoworkers(); }
+  catch(e){ cwMsg(e.message); btn.disabled=false; }
+}
+function drawEditCoworker(id){
+  const c=adminCw.find(x=>x.id===id); if(!c) return;
+  document.getElementById('cwmTitle').textContent='🤝 '+c.name;
+  const row=(label,field,inp,fn)=>'<div style="font-size:12px;color:var(--hint);margin:8px 0 4px">'+label+'</div><div style="display:flex;gap:8px;align-items:flex-start"><div style="flex:1">'+inp+'</div>'+
+    '<button class="btn" style="margin:0;width:auto;padding:11px 16px" onclick="'+fn+'">Save</button></div>';
+  document.getElementById('cwmContent').innerHTML=
+    '<div class="t-meta" style="margin:0 0 6px">'+c.orders+' order'+(c.orders===1?'':'s')+(c.pending?' · '+c.pending+' pending':'')+' · $'+Number(c.revenue).toFixed(2)+' · since '+escHtml(c.date)+'</div>'+
+    row('Percentage discount','pct',fieldBox('cwPct','Percentage (1–100)',c.pct,'number'),'saveCoworker('+id+',\'pct\')')+
+    row('Login username','username',fieldBox('cwUser','Username',c.username),'saveCoworker('+id+',\'username\')')+
+    row('Login password','password',fieldBox('cwPass','New password'),'saveCoworker('+id+',\'password\')')+
+    '<div id="cwmMsg" style="font-size:12px;margin:4px 0 8px;min-height:14px"></div>'+
+    '<button class="tk-btn" style="color:#f87171;margin-bottom:8px" onclick="deleteCoworker('+id+')">🗑 Delete this coworker</button>'+
+    '<button class="btn sec" onclick="drawAdminCoworkers()">← Back</button>';
+}
+async function saveCoworker(id,field){
+  const val=document.getElementById({pct:'cwPct',username:'cwUser',password:'cwPass'}[field]).value.trim();
+  if(!val) return cwMsg(field==='password'?'Type the new password.':'Fill this in first.');
+  const body={action:'update',id}; body[field]=field==='pct'?parseFloat(val):val;
+  if(field==='pct'&&!(body.pct>0&&body.pct<=100)) return cwMsg('The percentage must be between 1 and 100.');
+  cwMsg('Saving…',true);
+  try{ const d=await adminPost('/api/admin_coworker_action',body); adminCw=d.items; if(field==='password') document.getElementById('cwPass').value=''; cwMsg({pct:'Percentage saved.',username:'Username saved.',password:'Password changed.'}[field],true); }
+  catch(e){ cwMsg(e.message); }
+}
+function deleteCoworker(id){
+  const c=adminCw.find(x=>x.id===id); if(!c) return;
+  askConfirm('Delete '+c.name+'? They will no longer be able to log in. Their past orders are kept.',async()=>{
+    try{ const d=await adminPost('/api/admin_coworker_action',{action:'delete',id}); adminCw=d.items; showToast('Coworker deleted'); drawAdminCoworkers(); }
+    catch(e){ cwMsg(e.message); }
+  });
+}
+
 async function openTickets(){
+  if(ADMIN_EDIT) return openAdminTickets();
   document.getElementById('ticketsOverlay').classList.add('on');
   const el=document.getElementById('ticketsContent'); el.innerHTML=loadingHtml;
   try{
