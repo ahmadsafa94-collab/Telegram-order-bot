@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "40"
+MINI_APP_VERSION = "41"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -3333,6 +3333,7 @@ A_ADD_SUBSCRIPTION = "➕ Add New Subscription"
 A_BOOK_REQUESTS = "📚 Book Requests"
 A_IMD_CATALOG = "🔬 Update iMD Catalog"
 A_CUSTOMER_VIEW = "🛍 Customer Menu"
+A_SHOP_LABEL = "🛠 SHOP (edit mode)"
 A_BACKUP = "🗄 Backup"
 A_DISCOUNT_CODES = "🏷 Discount Codes"
 A_COWORKERS = "👥 Coworkers"
@@ -3420,7 +3421,7 @@ def _mini_app_admin_edits() -> tuple:
     return prices, removed
 
 
-def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
+def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: bool = False) -> str:
     """Builds the Mini App URL. When user_id is known, subscription data and
     custom admin-added items are encoded as a base64 query param (?subs=...)
     so the Mini App can display them without any HTTP API call.
@@ -3604,8 +3605,11 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None) -> str:
         }
         if preview_coworker_id and coworker_login:
             data["cwn"] = coworker_login[1]
-        elif user_id == ADMIN_CHAT_ID:
-            data["adm"] = 1  # shows the ✏️ price editor; the server re-checks who is asking
+        elif admin_edit and user_id == ADMIN_CHAT_ID:
+            # Only the admin keyboard's own Shop button asks for this: it shows the
+            # ✏️ editors. The Customer Menu's Shop stays exactly what a customer
+            # sees. The server re-checks who is asking on every edit anyway.
+            data["adm"] = 1
         return f"{MINI_APP_URL}?v={MINI_APP_VERSION}{auth_params}&subs={_encode(data)}"
     except Exception:
         logger.exception("_shop_url: failed to encode subscription data for user %s", user_id)
@@ -3657,8 +3661,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
     pending = db_pending_order_count()
     inbox   = db_unread_inbox_count()
     tickets = db_unresolved_ticket_count()
-    return ReplyKeyboardMarkup(
-        [
+    rows = [
             [A_SERIALS, _badge(A_ORDERS, pending)],
             [A_INPUT, _badge(A_INBOX, inbox)],
             [A_BROADCAST, A_FIND_CUSTOMER],
@@ -3668,9 +3671,12 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [A_IMD_CATALOG],
             [A_CUSTOMER_VIEW, A_BACKUP],
             [A_DISCOUNT_CODES, A_COWORKERS],
-        ],
-        resize_keyboard=True,
-    )
+    ]
+    # The Shop with its ✏️ editors (prices, titles, group names) switched on.
+    shop_url = _shop_url(ADMIN_CHAT_ID, admin_edit=True)
+    if shop_url:
+        rows.insert(0, [KeyboardButton(A_SHOP_LABEL, web_app=WebAppInfo(url=shop_url))])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 def cart_keyboard(cart: dict = None) -> InlineKeyboardMarkup:
@@ -6979,7 +6985,8 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == A_CUSTOMER_VIEW:
         await update.message.reply_text(
-            "Switched to the customer menu. Send /start to return to the admin panel.",
+            "Switched to the customer menu — the Shop here looks exactly as it does for customers. "
+            "Send /start to return to the admin panel (its 🛠 SHOP button is the one you edit in).",
             # The admin's own id, not 0: a link built for user 0 has no login
             # token, so the Shop could not tell it is the admin (no price
             # pencil) and I've Paid had nowhere to post.
@@ -10618,6 +10625,22 @@ async def http_set_item_price(request):
     )
 
 
+async def http_shop_edits(request):
+    """The admin's current price edits, removed items and renamed titles. The
+    🛠 SHOP button on the admin keyboard is a fixed link built when that keyboard
+    was sent, so the Shop asks for these when it opens — otherwise something
+    edited a minute ago would look unedited again. Admin's own account only."""
+    from aiohttp import web
+    headers = _imd_search_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    if user_id != ADMIN_CHAT_ID:
+        return web.json_response({"ok": False, "error": "Admin only"}, status=403, headers=headers)
+    price_overrides, removed_ids = _mini_app_admin_edits()
+    return web.json_response({"ok": True, "po": price_overrides, "rm": removed_ids, "nm": dict(SHOP_TITLES)}, headers=headers)
+
+
 async def http_set_item_title(request):
     """The ✏️ in the Shop on the admin's own link: renames a subscription (or a
     group such as "Access MhMedical") for everyone. Admin's own verified account
@@ -10989,6 +11012,7 @@ async def start_api_server(application):
     api_app.router.add_get("/api/sales_export", http_sales_export)
     api_app.router.add_post("/api/set_item_price", http_set_item_price)
     api_app.router.add_options("/api/set_item_price", http_set_coworker_price_options)
+    api_app.router.add_get("/api/shop_edits", http_shop_edits)
     api_app.router.add_post("/api/set_item_title", http_set_item_title)
     api_app.router.add_options("/api/set_item_title", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_coworker_price", http_set_coworker_price)

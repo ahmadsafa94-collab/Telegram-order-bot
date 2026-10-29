@@ -557,6 +557,21 @@ const CW_NAME = (SUBS_DATA && SUBS_DATA.cwn) || 'this coworker';
 // Set only on the admin's own Shop link (bot.py's _shop_url): shows a ✏️ to
 // change an item's regular price for everyone. The server re-checks who asks.
 const ADMIN_EDIT = !!(SUBS_DATA && SUBS_DATA.adm) && !PREVIEW_CW;
+// The admin's 🛠 SHOP button is a fixed link, built when the keyboard was sent,
+// so its prices and titles can be older than the last edit. Ask the bot for the
+// current ones before the catalog is built (admin only, so a slow reply costs
+// no customer anything).
+if (ADMIN_EDIT && API_BASE && AUTH_UID && AUTH_TOK) {
+  try {
+    const x = new XMLHttpRequest();
+    x.open('GET', API_BASE + '/api/shop_edits?uid=' + encodeURIComponent(AUTH_UID) + '&tok=' + encodeURIComponent(AUTH_TOK), false);
+    x.send();
+    if (x.status === 200) {
+      const d = JSON.parse(x.responseText);
+      if (d && d.ok) { SUBS_DATA.po = d.po || {}; SUBS_DATA.rm = d.rm || []; SUBS_DATA.nm = d.nm || {}; }
+    }
+  } catch(e) { /* keep what the link carried */ }
+}
 
 // Credit balance and active discount codes — point-in-time snapshot from
 // page load, used only for display/estimation. The server re-verifies
