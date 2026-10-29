@@ -531,9 +531,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
       <input id="asDur" class="cw-input" type="text" maxlength="30" value="1 Year" aria-label="Duration">
       <div style="font-size:12px;color:var(--hint);margin:10px 0 4px">Price for customers ($)</div>
       <input id="asPrice" class="cw-input" type="number" inputmode="decimal" min="0" step="0.01" placeholder="e.g. 45" aria-label="Price in dollars">
-      <div id="asCostBox" style="display:none">
-        <div style="font-size:12px;color:var(--hint);margin:10px 0 4px">Your cost per account ($) — optional, for sales and profit</div>
-        <input id="asCost" class="cw-input" type="number" inputmode="decimal" min="0" step="0.01" placeholder="e.g. 30" aria-label="Your cost in dollars">
+      <div id="asCostBox">
+        <div style="font-size:12px;color:var(--hint);margin:10px 0 4px">Your cost per account ($) — used for daily sales and profit</div>
+        <input id="asCost" class="cw-input" type="number" inputmode="decimal" min="0" step="0.01" placeholder="e.g. 30 (empty = 0)" aria-label="Your cost per account in dollars">
       </div>
       <div id="asMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>
       <button class="btn" id="asSave" onclick="saveAddSub()">Add subscription</button>
@@ -2556,7 +2556,6 @@ if (ADMIN_EDIT) document.getElementById('addSubBtn').style.display = 'block';
 function openAddSub(){
   ['asName','asPrice','asCost'].forEach(i=>document.getElementById(i).value='');
   document.getElementById('asDur').value='1 Year';
-  document.getElementById('asCostBox').style.display=ITEM_COSTS?'':'none';
   document.getElementById('asMsg').textContent='';
   document.getElementById('addSubOverlay').classList.add('on');
   setTimeout(()=>document.getElementById('asName').focus(),150);
@@ -2573,7 +2572,7 @@ async function saveAddSub(){
   if(!duration) return bad('Give it a duration, like 1 Year.');
   if(!(price>0)) return bad('Enter a price above 0.');
   let cost=null;
-  if(ITEM_COSTS&&costRaw!==''){ cost=parseFloat(costRaw); if(!(cost>=0)) return bad('Enter a cost of 0 or more.'); }
+  if(costRaw!==''){ cost=parseFloat(costRaw); if(!(cost>=0)) return bad('Enter a cost of 0 or more.'); }
   btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Adding…';
   try{
     const resp=await fetch(withAuth('/api/add_item'),{method:'POST',headers:{'Content-Type':'application/json'},
