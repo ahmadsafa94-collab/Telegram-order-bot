@@ -40,6 +40,8 @@ import os
 import math
 import re
 import sys
+import time
+import types
 import unicodedata
 import sqlite3
 from datetime import datetime, timedelta, time as dt_time
@@ -57,6 +59,7 @@ from telegram import (
     KeyboardButton,
     LabeledPrice,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     Update,
     WebAppInfo,
 )
@@ -99,7 +102,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "50"
+MINI_APP_VERSION = "51"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -3607,6 +3610,7 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
             # Mini App uses this to show the My Orders button only to
             # coworkers, never regular customers.
             "cwid": coworker_login[0] if coworker_login else 0,
+            "an": db_unseen_announcement_count(user_id),
         }
         if preview_coworker_id and coworker_login:
             data["cwn"] = coworker_login[1]
@@ -3626,24 +3630,16 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
         return f"{MINI_APP_URL}?v={MINI_APP_VERSION}{auth_params}"
 
 
-def main_menu_keyboard(user_id: int = 0) -> ReplyKeyboardMarkup:
-    """Persistent customer keyboard. When the Mini App is configured the
-    🏪 Shop button is full-width and first; the catalog-only buttons
-    (Buy, Basket) are removed since they're inside the app. My Subscriptions
-    stays on its own row in both modes so it's always easy to find."""
+def main_menu_keyboard(user_id: int = 0):
+    """What a customer's chat shows under the message box. With the Mini App
+    configured there is no fixed keyboard any more: the Shop opens from the
+    bot's menu button (set in BotFather), and everything else is inside it. Sending
+    this just clears a keyboard an older version left on the customer's screen.
+    Without a Mini App the old button keyboard is used."""
     ann_count = db_unseen_announcement_count(user_id) if user_id else 0
-    shop_url  = _shop_url(user_id)
 
-    if shop_url:
-        return ReplyKeyboardMarkup(
-            [
-                [KeyboardButton("🟢 SHOP 🟢\n(Click here to buy)", web_app=WebAppInfo(url=shop_url))],
-                [_badge(ANNOUNCEMENTS_LABEL, ann_count), JOIN_CHANNEL_LABEL],
-                [GET_FREE_LABEL, MY_CREDITS_LABEL],
-                [SUPPORT_LABEL],
-            ],
-            resize_keyboard=True,
-        )
+    if MINI_APP_URL:
+        return ReplyKeyboardRemove()
     else:
         return ReplyKeyboardMarkup(
             [
@@ -3761,7 +3757,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "Welcome! Use the buttons below any time.",
+        "Welcome! Open the Shop with the button next to the message box, or tap below."
+        if MINI_APP_URL else "Welcome! Use the buttons below any time.",
         reply_markup=main_menu_keyboard(update.effective_user.id),
     )
 
@@ -6993,8 +6990,8 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == A_CUSTOMER_VIEW:
         await update.message.reply_text(
-            "Switched to the customer menu — the Shop here looks exactly as it does for customers. "
-            "Send /start to return to the admin panel (its 🛠 SHOP button is the one you edit in).",
+            "Switched to the customer view — open the Shop from the menu button (or the button below the next message) "
+            "to see it exactly as customers do. Send /start to return to the admin panel (its 🛠 SHOP button is the one you edit in).",
             # The admin's own id, not 0: a link built for user 0 has no login
             # token, so the Shop could not tell it is the admin (no price
             # pencil) and I've Paid had nowhere to post.
@@ -9764,11 +9761,11 @@ Buying a subscription:
 6. The payment is verified, the order is confirmed, and the subscription is delivered in the shop bot's chat. Telegram Stars and credits are confirmed instantly.
 
 After ordering:
-- In the shop (the 🟢 SHOP button), the bottom tabs are: Catalogue, My Subscriptions (delivered subscriptions and their login details), Pending Orders (orders not delivered yet and what each is waiting for) and Contact us (Support, channel, group).
+- In the shop (opened with the menu button next to the message box), the bottom tabs are: Catalogue, My Subscriptions (delivered subscriptions and their login details), Pending Orders (orders not delivered yet and what each is waiting for) and Support (support chat, My tickets, free accounts, announcements, channel, group). The 💳 My credits button at the top shows credits and the referral link.
 - If a customer paid but hasn't uploaded the receipt, they should go back to their "Order #<number>" message in the shop bot chat, tap "✅ I've Paid" and upload it there. Receipts sent anywhere else are not linked to the order.
 - If an order is waiting for details (needs info), the Pending Orders tab has a button to complete them.
-- Delivery normally happens after confirmation; if it takes more than 48 hours, open a ticket from that order in the Pending Orders tab (or from the subscription's page in My Subscriptions), or use the Contact us tab / "{SUPPORT_LABEL}".
-- Books: the "📚 Request a Book" button at the top of the Catalogue tab (send the book's link). Other buttons: "{GET_FREE_LABEL}" (referrals), "{MY_CREDITS_LABEL}", "{ANNOUNCEMENTS_LABEL}".
+- Delivery normally happens after confirmation; if it takes more than 48 hours, open a ticket from that order in the Pending Orders tab (or from the subscription's page in My Subscriptions), or use the Support tab.
+- Books: the "📚 Request a Book" button at the top of the Catalogue tab (send the book's link). Free accounts (referrals), announcements and credits are in the Support tab and the 💳 My credits button.
 """
 
 # What each order status means for the customer, for the reply bot.
@@ -10763,6 +10760,200 @@ async def http_set_item_cost(request):
     return web.json_response({"ok": True, "item_id": item_id, "cost": cost}, headers=headers)
 
 
+# ── Shop opened from the bot's menu button ──────────────────────────────
+# A Mini App started from the menu button gets Telegram's own signed login data
+# (initData) instead of the personal link a keyboard button carried.
+
+def _verify_init_data(init_data, max_age: int = 86400):
+    """Checks Telegram's signature on initData and returns the user dict, or None."""
+    from urllib.parse import parse_qsl
+    if not isinstance(init_data, str) or not init_data or len(init_data) > 8192:
+        return None
+    try:
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True, strict_parsing=True))
+    except ValueError:
+        return None
+    received = pairs.pop("hash", None)
+    if not received:
+        return None
+    check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+    expected = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, received):
+        return None
+    try:
+        if abs(time.time() - int(pairs.get("auth_date", "0"))) > max_age:
+            return None
+        user = json.loads(pairs.get("user", "{}"))
+    except (ValueError, TypeError):
+        return None
+    return user if isinstance(user, dict) and isinstance(user.get("id"), int) and user["id"] > 0 else None
+
+
+def _shop_data_for(user_id: int) -> dict:
+    """The same data a personal Shop link carries (subs=...), as a dict."""
+    import base64 as _b64
+    from urllib.parse import parse_qs, urlparse
+    blob = parse_qs(urlparse(_shop_url(user_id)).query).get("subs", [""])[0]
+    if not blob:
+        return {}
+    try:
+        return json.loads(_b64.urlsafe_b64decode(blob + "=" * (-len(blob) % 4)))
+    except ValueError:
+        return {}
+
+
+async def http_bootstrap(request):
+    """The Shop opened from the menu button asks who it is: returns this customer's
+    data and a token for the other /api calls. Customer view only, never the
+    admin's editing mode."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    try:
+        init_data = (await request.json()).get("initData")
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    user = _verify_init_data(init_data)
+    if not user:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    uid = user["id"]
+    if not db_user_exists(uid):   # opened the Shop before ever sending /start
+        db_upsert_user(uid, user.get("username"))
+    return web.json_response(
+        {"ok": True, "uid": uid, "tok": _mini_app_token(uid), "api": BOT_API_URL, "subs": _shop_data_for(uid)},
+        headers=headers)
+
+
+def db_user_tickets(user_id: int, limit: int = 50) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, category, subscription_label, status, message, resolution_message, created_at, resolved_at "
+        "FROM tickets WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit)).fetchall()
+    conn.close()
+    return rows
+
+
+async def http_my_tickets(request):
+    """Support tab → My tickets: this customer's tickets and whether each is resolved."""
+    from aiohttp import web
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"error": "Unauthorized"}, status=401, headers=_imd_search_cors_headers())
+    out = []
+    for tid, category, label, status, message, resolution, created, resolved in db_user_tickets(user_id):
+        out.append({
+            "id": tid,
+            "title": label or ("General question" if category in (None, "", "general") else str(category).replace("_", " ").title()),
+            "resolved": status == "resolved",
+            "date": (created or "")[:10],
+            "resolved_date": (resolved or "")[:10],
+            "message": (message or "")[:300],
+            "answer": (resolution or "")[:1000] if status == "resolved" else "",
+        })
+    return web.json_response({"ok": True, "tickets": out}, headers=_imd_search_cors_headers())
+
+
+async def http_announcements(request):
+    """Support tab → Announcements. With ?mark=1 it also marks them all as read,
+    so the red mark goes away; each item says whether it was new."""
+    from aiohttp import web
+    headers = _imd_search_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"error": "Unauthorized"}, status=401, headers=headers)
+    conn = sqlite3.connect(DB_PATH)
+    seen = {r[0] for r in conn.execute("SELECT announcement_id FROM seen_announcements WHERE user_id = ?", (user_id,))}
+    conn.close()
+    items = [{"id": i, "body": body, "date": (created or "")[:10], "new": i not in seen}
+             for i, body, created in db_list_announcements(50)]
+    unseen = sum(1 for it in items if it["new"])
+    if request.query.get("mark") == "1":
+        for it in items:
+            if it["new"]:
+                db_mark_announcement_seen(user_id, it["id"])
+    return web.json_response({"ok": True, "items": items, "unseen": unseen}, headers=headers)
+
+
+async def _bot_username_for(application) -> str:
+    cached = application.bot_data.get("bot_username")
+    if cached:
+        return cached
+    me = await application.bot.get_me()
+    application.bot_data["bot_username"] = me.username
+    return me.username
+
+
+async def http_referral(request):
+    """The credits sheet and "How to get accounts for free": the customer's credits and
+    personal link, and how both work."""
+    from aiohttp import web
+    headers = _imd_search_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"error": "Unauthorized"}, status=401, headers=headers)
+    link = referral_link(await _bot_username_for(request.app["application"]), user_id)
+    db_mark_referral_intro_shown(user_id)
+    credits = db_get_credits(user_id)
+    return web.json_response({
+        "ok": True, "link": link, "credits": credits, "credit_value": CREDIT_VALUE_USD,
+        "usd": credits * CREDIT_VALUE_USD, "intro": GET_FREE_ACCOUNTS_INTRO,
+    }, headers=headers)
+
+
+class _HttpUpdate:
+    """Just enough of an Update for handle_mini_app_action when the request came over HTTP."""
+    def __init__(self, bot, user_id: int, username):
+        self.message = _FauxMessage(bot, user_id)
+        self.effective_user = types.SimpleNamespace(id=user_id, username=username)
+        self.effective_chat = types.SimpleNamespace(id=user_id)
+        self.callback_query = None
+
+
+class _HttpContext:
+    def __init__(self, application, user_id: int):
+        self.application = application
+        self.bot = application.bot
+        self.user_data = application.user_data[user_id]
+
+
+MINI_APP_CHAT_ACTIONS = {"order_ticket", "complete_registration", "send_receipt", "imd_catalog_search",
+                         "view_subscriptions", "goto_getfree"}
+
+
+async def http_bot_action(request):
+    """The Mini App asks the bot to continue something in the chat (the same actions
+    sendData used to carry). The app closes afterwards so the customer sees it."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if not isinstance(data, dict) or data.get("action") not in MINI_APP_CHAT_ACTIONS:
+        return web.json_response({"ok": False, "error": "Unknown action"}, status=400, headers=headers)
+    application = request.app["application"]
+    try:
+        await handle_mini_app_action(_HttpUpdate(application.bot, user_id, db_get_username(user_id)),
+                                     _HttpContext(application, user_id), data)
+    except Exception:
+        logger.exception("bot_action %s failed for %s", data.get("action"), user_id)
+        return web.json_response({"ok": False, "error": "Something went wrong — please try again."}, status=500, headers=headers)
+    return web.json_response({"ok": True}, headers=headers)
+
+
+async def http_clear_unpaid(request):
+    """Pending Orders → Clear unpaid pending orders."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    return web.json_response({"ok": True, "count": db_cancel_unpaid_orders(user_id)}, headers=headers)
+
+
 BOOK_REQUESTS_PER_HOUR = 5
 
 
@@ -11188,6 +11379,15 @@ async def start_api_server(application):
     api_app.router.add_options("/api/add_item", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_item_cost", http_set_item_cost)
     api_app.router.add_options("/api/set_item_cost", http_set_coworker_price_options)
+    api_app.router.add_post("/api/bootstrap", http_bootstrap)
+    api_app.router.add_options("/api/bootstrap", http_set_coworker_price_options)
+    api_app.router.add_get("/api/my_tickets", http_my_tickets)
+    api_app.router.add_get("/api/announcements", http_announcements)
+    api_app.router.add_get("/api/referral", http_referral)
+    api_app.router.add_post("/api/bot_action", http_bot_action)
+    api_app.router.add_options("/api/bot_action", http_set_coworker_price_options)
+    api_app.router.add_post("/api/clear_unpaid", http_clear_unpaid)
+    api_app.router.add_options("/api/clear_unpaid", http_set_coworker_price_options)
     api_app.router.add_post("/api/request_book", http_request_book)
     api_app.router.add_options("/api/request_book", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_item_title", http_set_item_title)
@@ -16062,6 +16262,15 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Something went wrong reading your order — please try again.")
         return
 
+    await handle_mini_app_action(update, context, data)
+
+
+async def handle_mini_app_action(update, context, data: dict):
+    """What the Mini App asks the bot to do in the chat (open a ticket, finish a
+    registration, ask for a receipt ...). `update` only needs .message.reply_text,
+    .effective_user and .effective_chat, so the HTTP endpoint /api/bot_action can
+    call this too, for a Shop opened from the menu button, where sendData
+    does not exist."""
     action = data.get("action")
     user_id = update.effective_user.id
     if action == "view_subscriptions":
@@ -16919,14 +17128,8 @@ def main():
                               ov_price if ov_price is not None else base_price)
 
     async def post_init(application):
-        """Resets the bottom-left menu button so customers use the
-        🏪 Shop keyboard button (the only one that supports sendData)."""
-        try:
-            from telegram import MenuButtonDefault
-            await application.bot.set_chat_menu_button(menu_button=MenuButtonDefault())
-        except Exception:
-            logger.exception("Failed to reset menu button")
-
+        """The Shop opens from the menu button configured in BotFather, so the bot
+        must not touch the menu button here (it used to reset it)."""
         await start_api_server(application)
 
     async def post_shutdown(application):
