@@ -461,6 +461,18 @@ body.in-checkout{padding-bottom:100px}
   </button>
   <div id="adminRows" style="display:none">
     <div class="sl" style="margin-top:14px">Manage</div>
+    <button class="contact-row" onclick="openAdminCustomers()">
+      <span class="ci-i">🔎</span><span class="ci-t"><div class="ci-n">Customers</div><div class="ci-s">Search by Telegram ID or @username</div></span><span class="ci-c">›</span>
+    </button>
+    <button class="contact-row" onclick="openAdminSales()">
+      <span class="ci-i">📈</span><span class="ci-t"><div class="ci-n">Sales &amp; revenue</div><div class="ci-s">Today, this week, this month, overall</div></span><span class="ci-c">›</span>
+    </button>
+    <button class="contact-row" onclick="openAdminCredits()">
+      <span class="ci-i">💳</span><span class="ci-t"><div class="ci-n">Customer credits</div><div class="ci-s">Who holds credits and how many</div></span><span class="ci-c">›</span>
+    </button>
+    <button class="contact-row" onclick="openAdminDiscounts()">
+      <span class="ci-i">🏷</span><span class="ci-t"><div class="ci-n">Discount codes</div><div class="ci-s">Issue and manage codes</div></span><span class="ci-c">›</span>
+    </button>
     <button class="contact-row" onclick="openAdminSerials()">
       <span class="ci-i">🔑</span><span class="ci-t"><div class="ci-n">Serials</div><div class="ci-s">Add, view and remove serial codes</div></span><span class="ci-c">›</span>
     </button>
@@ -709,6 +721,15 @@ body.in-checkout{padding-bottom:100px}
       <button class="btn" id="bkSend" onclick="sendBookAction()">Send</button>
       <button class="btn sec" style="margin-top:8px" onclick="closeBookAction()">Cancel</button>
     </div>
+  </div>
+</div>
+<!-- Admin: customers, sales, credits, discount codes -->
+<div class="overlay" id="admOverlay" onclick="if(event.target===this)closeAdm()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="admTitle"></div>
+    <div id="admContent" style="padding:12px 15px 6px"></div>
+    <div style="padding:0 15px"><button class="btn sec" onclick="closeAdm()">Close</button></div>
   </div>
 </div>
 <!-- Admin: serials -->
@@ -1881,6 +1902,125 @@ async function sendBookAction(){
     closeBookAction(); showToast(d.note||'Done'); renderAdminBooks();
   }catch(e){ bad(e.message); }
   finally{ btn.disabled=false; }
+}
+
+// Customers, sales & revenue, credits, discount codes (one shared sheet)
+function openAdm(title){ document.getElementById('admTitle').textContent=title; document.getElementById('admOverlay').classList.add('on'); }
+function closeAdm(){ document.getElementById('admOverlay').classList.remove('on'); }
+const admEl=()=>document.getElementById('admContent');
+const money=n=>'$'+Number(n||0).toFixed(2);
+const admMsg=(t,ok)=>{ const m=document.getElementById('admMsg'); if(m){ m.style.color=ok?'var(--hint)':'#dc2626'; m.textContent=t; } };
+
+// Customers
+let admCust=[];
+function openAdminCustomers(){
+  openAdm('🔎 Customers');
+  admEl().innerHTML='<div style="display:flex;gap:8px"><input id="custQ" class="cw-input" type="text" placeholder="Telegram ID or @username" aria-label="Search customers" autocomplete="off" onkeydown="if(event.key===\'Enter\')searchCustomers()">'+
+    '<button class="btn" style="margin:0;width:auto;padding:11px 16px" onclick="searchCustomers()">Search</button></div>'+
+    '<div id="admMsg" style="font-size:12px;margin:8px 0;min-height:14px"></div><div id="custList"></div>';
+  setTimeout(()=>{ const f=document.getElementById('custQ'); if(f) f.focus(); },150);
+}
+async function searchCustomers(){
+  const q=document.getElementById('custQ').value.trim(); if(!q) return admMsg('Type a Telegram ID or @username.');
+  admMsg('Searching…',true);
+  try{
+    admCust=(await apiGet('/api/admin_customer?q='+encodeURIComponent(q))).customers||[];
+    admMsg('',true);
+    const el=document.getElementById('custList');
+    if(!admCust.length){ el.innerHTML='<div class="empty-sheet"><div class="eico">🔎</div>No customer matches “'+escHtml(q)+'”.<div style="font-size:12px;margin-top:6px">They may never have messaged the bot, or changed their username.</div></div>'; return; }
+    if(admCust.length===1) return showCustomer(admCust[0].user_id,true);
+    el.innerHTML=admCust.map(c=>custCard(c)).join('');
+  }catch(e){ admMsg(e.message); }
+}
+const custName=c=>c.username?'@'+escHtml(c.username):'ID '+c.user_id;
+function custCard(c){
+  return '<div class="t-card" style="cursor:pointer" onclick="showCustomer('+c.user_id+')"><div class="t-top"><div class="t-title">'+custName(c)+'<div class="t-meta">ID '+c.user_id+' · '+c.orders+' order'+(c.orders===1?'':'s')+' · '+money(c.spent)+(c.last_seen?' · last seen '+escHtml(c.last_seen):'')+'</div></div>'+
+    (c.credits?'<span class="t-pill ok">💳 '+c.credits+'</span>':'')+'</div></div>';
+}
+async function showCustomer(id,single){
+  const el=document.getElementById('custList'); el.innerHTML=loadingHtml;
+  try{
+    const c=(await apiGet('/api/admin_customer?id='+id)).customer;
+    const unit=u=>'<div class="t-card"><div class="t-title">'+escHtml(u.name)+(u.unit>1?' #'+u.unit:'')+' <span style="color:var(--hint);font-weight:400">· Order #'+u.order_id+(u.label?' · '+escHtml(u.label):'')+'</span></div>'+
+      (u.info?'<div class="t-body" style="font-size:12px;color:var(--hint)">'+escHtml(u.info)+'</div>':'')+'</div>';
+    el.innerHTML=(single?'':'<button class="tk-btn" style="margin-bottom:10px" onclick="searchCustomers()">← Results</button>')+
+      '<div class="t-card"><div class="t-title">'+custName(c)+'</div><div class="t-meta">ID '+c.user_id+'</div>'+
+      '<div class="t-body" style="font-size:12.5px">'+(c.seen?'💬 First seen '+escHtml(c.seen.first)+' · last seen '+escHtml(c.seen.last):'⚠️ Has never sent /start to this bot')+
+      '\n💳 Credits: '+c.credits+' ('+money(c.credits_usd)+')\n🧾 '+c.orders+' paid order'+(c.orders===1?'':'s')+' · '+money(c.spent)+'</div>'+
+      (c.username?'<button class="tk-btn" style="margin-top:8px" onclick="openTg(\'https://t.me/'+encodeURIComponent(c.username)+'\')">💬 Open chat with @'+escHtml(c.username)+'</button>':'')+'</div>'+
+      '<div class="sub-section-lbl">✅ Delivered ('+c.delivered.length+')</div>'+(c.delivered.map(unit).join('')||'<div class="t-meta" style="margin-bottom:8px">None.</div>')+
+      '<div class="sub-section-lbl">⏳ Pending ('+c.pending.length+')</div>'+(c.pending.map(unit).join('')||'<div class="t-meta">None.</div>');
+  }catch(e){ el.innerHTML=failHtml(e); }
+}
+
+// Customer credits
+async function openAdminCredits(){
+  openAdm('💳 Customer credits'); admEl().innerHTML=loadingHtml;
+  try{
+    const d=await apiGet('/api/admin_credits');
+    admEl().innerHTML='<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">Credits held by customers</div><div class="n">'+d.total_credits+'</div><div style="font-size:12px;color:var(--hint);margin-top:2px">= '+money(d.total_usd)+' · 1 credit = $'+d.value+'</div></div>'+
+      (d.items.length?d.items.map(i=>'<div class="t-card" style="cursor:pointer" onclick="openAdminCustomerById('+i.user_id+')"><div class="t-top"><div class="t-title">'+escHtml(i.customer)+'<div class="t-meta">ID '+i.user_id+'</div></div><span class="t-pill ok">💳 '+i.credits+' · '+money(i.usd)+'</span></div></div>').join(''):'<div class="empty-sheet"><div class="eico">💳</div>No customer has any credits yet.</div>');
+  }catch(e){ admEl().innerHTML=failHtml(e); }
+}
+function openAdminCustomerById(id){ openAdminCustomers(); showCustomer(id,true); }
+
+// Sales & revenue
+let admPeriod='today';
+function openAdminSales(){ openAdm('📈 Sales & revenue'); loadAdminSales(); }
+async function loadAdminSales(p){
+  if(p) admPeriod=p;
+  const el=admEl(); el.innerHTML=loadingHtml;
+  try{
+    const d=await apiGet('/api/admin_sales?period='+admPeriod);
+    const seg=[['today','Today'],['week','Week'],['month','Month'],['overall','Overall']].map(x=>'<button class="'+(admPeriod===x[0]?'on':'')+'" onclick="loadAdminSales(\''+x[0]+'\')">'+x[1]+'</button>').join('');
+    el.innerHTML='<div class="seg">'+seg+'</div>'+
+      '<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">Revenue · '+escHtml(d.label)+'</div><div class="n">'+money(d.revenue)+'</div><div style="font-size:12px;color:var(--hint);margin-top:2px">'+d.accounts+' account'+(d.accounts===1?'':'s')+' · '+d.orders+' order'+(d.orders===1?'':'s')+'</div></div>'+
+      (d.products.length?'<div class="sub-section-lbl">Accounts sold</div>'+d.products.map(p=>'<div class="t-card" style="padding:9px 13px;margin-bottom:6px"><div class="t-top"><div class="t-title">'+escHtml(p.name)+'</div><span class="t-pill ok">× '+p.qty+'</span></div></div>').join(''):'<div class="search-empty">No sales in this period.</div>')+
+      (d.methods.length?'<div class="sub-section-lbl" style="margin-top:10px">By payment method</div>'+d.methods.map(m=>'<div class="t-card" style="padding:9px 13px;margin-bottom:6px"><div class="t-top"><div class="t-title">'+escHtml(m.method)+'<div class="t-meta">'+m.count+' order'+(m.count===1?'':'s')+'</div></div><span class="t-pill ok">'+money(m.revenue)+'</span></div></div>').join(''):'')+
+      '<div id="admMsg" style="font-size:12px;margin:8px 0;min-height:14px"></div>'+
+      '<button class="tk-btn" onclick="sendSalesExcel()">📊 Send the daily profit Excel to my chat</button>';
+  }catch(e){ el.innerHTML=failHtml(e); }
+}
+async function sendSalesExcel(){
+  admMsg('Preparing…',true);
+  try{ await adminPost('/api/admin_sales_excel',{}); admMsg('Sent — check your chat with the bot.',true); }
+  catch(e){ admMsg(e.message); }
+}
+
+// Discount codes
+async function openAdminDiscounts(){ openAdm('🏷 Discount codes'); loadAdminDiscounts(); }
+async function loadAdminDiscounts(items,made){
+  try{ if(!items) items=(await apiGet('/api/admin_discounts')).items||[]; }catch(e){ admEl().innerHTML=failHtml(e); return; }
+  const keep={}; ['dcPct','dcUses','dcDays'].forEach(k=>{ const f=document.getElementById(k); if(f) keep[k]=f.value; });
+  admEl().innerHTML=
+    (made?'<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">New code created</div><div class="n" style="font-size:24px;letter-spacing:2px">'+escHtml(made)+'</div><button class="tk-btn" style="margin-top:8px" onclick="copyDiscount('+JSON.stringify(made).replace(/"/g,'&quot;')+')">📋 Copy code</button></div>':'')+
+    '<div class="sub-section-lbl">Issue a new code</div>'+
+    '<div style="display:flex;gap:8px">'+fieldBox('dcPct','% off',keep.dcPct,'number')+fieldBox('dcUses','Uses',keep.dcUses,'number')+fieldBox('dcDays','Days valid',keep.dcDays,'number')+'</div>'+
+    '<div id="admMsg" style="font-size:12px;margin:0 0 8px;min-height:14px"></div>'+
+    '<button class="btn" id="dcSave" style="margin-top:0" onclick="createDiscount()">➕ Create code</button>'+
+    '<div class="sub-section-lbl" style="margin-top:14px">Codes ('+items.length+')</div>'+
+    (items.length?items.map(i=>'<div class="t-card"><div class="t-top"><div class="t-title" style="font-family:ui-monospace,Menlo,monospace;letter-spacing:1px">'+escHtml(i.code)+
+      '<div class="t-meta" style="font-family:inherit;letter-spacing:0">'+Number(i.pct)+'% off · '+i.uses+' use'+(i.uses===1?'':'s')+' left · expires '+escHtml(i.expires)+'</div></div>'+
+      '<span class="t-pill '+(i.state==='active'?'ok':'open')+'">'+escHtml(i.state)+'</span></div>'+
+      '<div style="display:flex;gap:8px;margin-top:8px"><button class="tk-btn" style="flex:1;width:auto" onclick="copyDiscount('+JSON.stringify(i.code).replace(/"/g,'&quot;')+')">📋 Copy</button>'+
+      '<button class="tk-btn" style="flex:1;width:auto;color:#f87171" onclick="deleteDiscount('+JSON.stringify(i.code).replace(/"/g,'&quot;')+')">🗑 Delete</button></div></div>').join(''):'<div class="t-meta">No codes yet.</div>');
+}
+function copyDiscount(code){ navigator.clipboard.writeText(code).then(()=>showToast('Copied '+code)).catch(()=>showToast(code)); }
+async function createDiscount(){
+  const v=id=>document.getElementById(id).value.trim(), btn=document.getElementById('dcSave');
+  const percentage=parseFloat(v('dcPct')), uses=parseInt(v('dcUses'),10), days=parseInt(v('dcDays'),10);
+  if(!(percentage>0&&percentage<=100)) return admMsg('The percentage must be between 1 and 100.');
+  if(!(uses>=1)) return admMsg('Uses must be a whole number of at least 1.');
+  if(!(days>=1)) return admMsg('Days must be a whole number of at least 1.');
+  btn.disabled=true; admMsg('Creating…',true);
+  try{ const d=await adminPost('/api/admin_discount_action',{action:'create',percentage,uses,days}); ['dcPct','dcUses','dcDays'].forEach(k=>document.getElementById(k).value=''); loadAdminDiscounts(d.items,d.code); }
+  catch(e){ admMsg(e.message); btn.disabled=false; }
+}
+function deleteDiscount(code){
+  askConfirm('Delete the code '+code+'? Customers can no longer use it.',async()=>{
+    try{ const d=await adminPost('/api/admin_discount_action',{action:'delete',code}); showToast('Code deleted'); loadAdminDiscounts(d.items); }
+    catch(e){ admMsg(e.message); }
+  });
 }
 
 // Serials
