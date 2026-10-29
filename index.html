@@ -448,7 +448,7 @@ body.in-checkout{padding-bottom:100px}
     <span class="ci-i">🎫</span><span class="ci-t"><div class="ci-n">My tickets</div><div class="ci-s">Your open and resolved tickets</div></span><span class="ci-c">›</span>
   </button>
   <div class="sl" style="margin-top:14px">More</div>
-  <button class="contact-row" onclick="openReferral('free')">
+  <button class="contact-row" id="freeRow" onclick="openReferral('free')">
     <span class="ci-i">🎁</span><span class="ci-t"><div class="ci-n">How to get accounts for free</div><div class="ci-s">Share your link and earn credits</div></span><span class="ci-c">›</span>
   </button>
   <button class="contact-row" onclick="openAnnouncements()">
@@ -778,6 +778,8 @@ if (ADMIN_EDIT && API_BASE && AUTH_UID && AUTH_TOK) {
 // everything for real at checkout, so a stale value here never lets
 // anyone actually get more discount than they should.
 const CREDITS_BALANCE = (SUBS_DATA && SUBS_DATA.cr) || 0;
+// A coworker account (or the admin previewing one) has no credits or free-accounts program.
+const IS_COWORKER = !!(SUBS_DATA && SUBS_DATA.cwid);
 const DISCOUNT_CODES = (SUBS_DATA && SUBS_DATA.dc) || {};
 const CREDIT_VALUE_USD = 4;
 // Coworker discount — set when this Telegram account is logged in via
@@ -1292,6 +1294,9 @@ function renderOrders(){
     });
   }
 
+  if(html&&SUBS_DATA.dx){
+    html+=`<div class="t-meta" style="text-align:center;padding:8px 15px">Showing the latest ${d.length}. ${SUBS_DATA.dx} older ones are in 📦 My Orders${PREVIEW_CW?'':' or found by the search above'}.</div>`;
+  }
   if(!html){
     html=`<div class="empty-sheet">
       <div class="eico">📭</div>
@@ -1324,7 +1329,8 @@ function renderPending(){
     awaiting_delivery:    {icon:'🔄', label:'Approved — being prepared by our team', btn:null},
     awaiting_payment:     {icon:'⏳', label:'Waiting for payment', btn:null},
   };
-  const row=([name,state,fid,oid])=>{
+  const row=([name,state,fid,oid,,own])=>{
+    const mine=own!==0&&!PREVIEW_CW;   // an admin previewing a coworker only looks
     const info=stateInfo[state]||{icon:'⏳',label:'In progress',btn:null};
     return `
       <div class="sub-row no-tap" style="flex-direction:column;gap:0;padding:0">
@@ -1335,8 +1341,9 @@ function renderPending(){
             <div class="sub-meta">${info.label}</div>
           </div>
         </div>
-        ${info.btn?`<button class="pend-action ${info.cls||''}" onclick="pendAction('${info.action}',${fid||0},${oid||0})">${info.btn}</button>`:''}
-        ${fid?`<button class="pend-action" style="background:transparent;color:var(--hint);border:1.5px solid rgba(255,255,255,.12);margin-top:${info.btn?0:6}px" onclick="orderTicket(${fid})">🎫 Open a ticket about this order</button>`:''}
+        ${info.btn&&mine?`<button class="pend-action ${info.cls||''}" onclick="pendAction('${info.action}',${fid||0},${oid||0})">${info.btn}</button>`:''}
+        ${!mine?`<div class="sub-meta" style="padding:0 15px 11px 56px">${PREVIEW_CW?'Preview — view only.':'Placed from another account — view only.'}</div>`:''}
+        ${fid&&!PREVIEW_CW?`<button class="pend-action" style="background:transparent;color:var(--hint);border:1.5px solid rgba(255,255,255,.12);margin-top:${info.btn?0:6}px" onclick="orderTicket(${fid})">🎫 Open a ticket about this order</button>`:''}
       </div>`;
   };
   const groups=[
@@ -1355,7 +1362,7 @@ function renderPending(){
   if(other.length) html+=`<div class="sub-section-lbl">⏳ In progress (${other.length})</div>`+other.map(row).join('');
   if(unpaid.length){
     html+=`<div class="sub-section-lbl">💳 Not paid yet (${unpaid.length})</div>`+unpaid.map(row).join('')
-      +`<button class="pend-action" style="background:#dc2626;margin:8px 15px 4px" onclick="clearUnpaidOrders()">🗑 Clear unpaid pending orders</button>`;
+      +(!PREVIEW_CW&&unpaid.some(r=>r[5]!==0)?`<button class="pend-action" style="background:#dc2626;margin:8px 15px 4px" onclick="clearUnpaidOrders()">🗑 Clear my unpaid pending orders</button>`:'');
   }
   if(!html){
     html=`<div class="empty-sheet">
@@ -1483,6 +1490,10 @@ function setTabBadges(){
   document.getElementById('annDot').classList.toggle('vis',unread>0);
 }
 setTabBadges();
+if(IS_COWORKER){
+  document.querySelector('.credits-btn').style.display='none';
+  document.getElementById('freeRow').style.display='none';
+}
 
 // ── Basket sheet ──────────────────────────────────────────────────────
 function openBasket(){renderBasket();document.getElementById('basketOverlay').classList.add('on')}
@@ -1584,6 +1595,7 @@ function closeAnnouncements(){document.getElementById('annOverlay').classList.re
 // 'credits' (the 💳 My credits button) and 'free' (How to get accounts for free) show the
 // same facts, with the one the customer asked for first.
 async function openReferral(mode){
+  if(IS_COWORKER) return;
   document.getElementById('refOverlay').classList.add('on');
   document.getElementById('refTitle').textContent=mode==='free'?'🎁 How to get accounts for free':'💳 My credits';
   const el=document.getElementById('refContent');
@@ -1993,7 +2005,7 @@ async function openOrderDetail(fulfilmentId, deliveryId){
       '<div class="card" id="orderDetailCredText" style="padding:11px 13px;white-space:pre-wrap;font-size:13px;line-height:1.6">'+
         escHtml(data.credentials||'')+
       '</div>'+
-      (data.fulfilment_id?'<button class="btn" style="margin-top:12px" onclick="orderTicket('+data.fulfilment_id+')">🎫 Open a Ticket About This Order</button>':'')+
+      (data.fulfilment_id&&!PREVIEW_CW?'<button class="btn" style="margin-top:12px" onclick="orderTicket('+data.fulfilment_id+')">🎫 Open a Ticket About This Order</button>':'')+
       '<button class="btn sec" style="margin-top:8px" onclick="closeOrderDetail()">← Back</button>';
   }catch(e){
     content.innerHTML='<div class="search-empty">Could not load this order: '+escHtml(e.message||String(e))+'</div>'+backBtn;
@@ -2384,6 +2396,7 @@ function setErr(inp,msg){inp.classList.add('err');const el=document.getElementBy
 
 // ── Payment page ──────────────────────────────────────────────────────
 function goGetFreeAccounts(){
+  if(IS_COWORKER) return;
   openReferral('free');
 }
 // iMD's resource catalog runs into the thousands of entries — too many to
@@ -2537,7 +2550,7 @@ function buildPaymentPage(){
    {id:'app:Paysend',ico:'📨',img:LOGOS.paysend,lbl:'Paysend',sub:'Money transfer'},
    {id:'app:Revolut',ico:'🔄',img:LOGOS.revolut,lbl:'Revolut',sub:'Card transfer'},
    {id:'app:TapTap Send',ico:'📲',img:LOGOS.taptap,lbl:'TapTap Send',sub:'Money transfer'},
-   ...(appliedCreditsFlag?[]:[{id:'credits',ico:'🎁',lbl:'My Credits',sub:'Use earned credits'}]),
+   ...((appliedCreditsFlag||IS_COWORKER)?[]:[{id:'credits',ico:'🎁',lbl:'My Credits',sub:'Use earned credits'}]),
   ].forEach(m=>{
     const d=document.createElement('div'); d.className='pm'; d.dataset.id=m.id;
     const icoHtml=m.img?`<img src="${m.img}" class="pm-logo">`:m.ico;

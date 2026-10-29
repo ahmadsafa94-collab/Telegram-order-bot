@@ -102,7 +102,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "51"
+MINI_APP_VERSION = "52"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -3429,6 +3429,9 @@ def _mini_app_admin_edits() -> tuple:
     return prices, removed
 
 
+COWORKER_TAB_LIMIT = 60
+
+
 def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: bool = False) -> str:
     """Builds the Mini App URL. When user_id is known, subscription data and
     custom admin-added items are encoded as a base64 query param (?subs=...)
@@ -3494,26 +3497,54 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
         return f"{MINI_APP_URL}?v={MINI_APP_VERSION}"
 
     try:
+        # A coworker account is shared by several people, so its My Subscriptions and
+        # Pending Orders are every order under that account (as 📦 My Orders already is),
+        # not just the ones this one Telegram account placed. The admin previewing a
+        # coworker sees that coworker's. Otherwise: the customer's own.
+        cw_scope = preview_coworker_id
+        if not cw_scope:
+            _own_cw = db_get_user_coworker(user_id)
+            cw_scope = _own_cw[0] if _own_cw else None
         conn = sqlite3.connect(DB_PATH)
-        # Deliveries with credentials message for the "tap to see details" feature
-        del_rows = conn.execute(
-            "SELECT id, item_id, delivered_at, message, order_id FROM deliveries "
-            "WHERE user_id = ? ORDER BY id DESC",
-            (user_id,),
-        ).fetchall()
-        ful_rows = conn.execute(
-            "SELECT id, order_id, item_id FROM fulfilment WHERE user_id = ? AND state = 'delivered' ORDER BY id",
-            (user_id,),
-        ).fetchall()
-        # Pending: include fulfilment_id and order_id so the Mini App can
-        # send the right resume action back to the bot
-        pend_rows = conn.execute(
-            "SELECT f.id, f.order_id, f.item_id, f.state, o.status FROM fulfilment f "
-            "JOIN orders o ON o.id = f.order_id "
-            "WHERE f.user_id = ? AND f.state != 'delivered' "
-            "AND o.status NOT IN ('cancelled','rejected')",
-            (user_id,),
-        ).fetchall()
+        if cw_scope:
+            # Deliveries with credentials message for the "tap to see details" feature
+            del_rows = conn.execute(
+                "SELECT d.id, d.item_id, d.delivered_at, d.message, d.order_id FROM deliveries d "
+                "JOIN orders o ON o.id = d.order_id WHERE o.coworker_id = ? ORDER BY d.id DESC",
+                (cw_scope,),
+            ).fetchall()
+            ful_rows = conn.execute(
+                "SELECT f.id, f.order_id, f.item_id FROM fulfilment f JOIN orders o ON o.id = f.order_id "
+                "WHERE o.coworker_id = ? AND f.state = 'delivered' ORDER BY f.id",
+                (cw_scope,),
+            ).fetchall()
+            pend_rows = conn.execute(
+                "SELECT f.id, f.order_id, f.item_id, f.state, o.status, f.user_id FROM fulfilment f "
+                "JOIN orders o ON o.id = f.order_id "
+                "WHERE o.coworker_id = ? AND f.state != 'delivered' "
+                "AND o.status NOT IN ('cancelled','rejected')",
+                (cw_scope,),
+            ).fetchall()
+        else:
+            # Deliveries with credentials message for the "tap to see details" feature
+            del_rows = conn.execute(
+                "SELECT id, item_id, delivered_at, message, order_id FROM deliveries "
+                "WHERE user_id = ? ORDER BY id DESC",
+                (user_id,),
+            ).fetchall()
+            ful_rows = conn.execute(
+                "SELECT id, order_id, item_id FROM fulfilment WHERE user_id = ? AND state = 'delivered' ORDER BY id",
+                (user_id,),
+            ).fetchall()
+            # Pending: include fulfilment_id and order_id so the Mini App can
+            # send the right resume action back to the bot
+            pend_rows = conn.execute(
+                "SELECT f.id, f.order_id, f.item_id, f.state, o.status, f.user_id FROM fulfilment f "
+                "JOIN orders o ON o.id = f.order_id "
+                "WHERE f.user_id = ? AND f.state != 'delivered' "
+                "AND o.status NOT IN ('cancelled','rejected')",
+                (user_id,),
+            ).fetchall()
         # Items marked out-of-stock by the admin
         oos_rows = conn.execute(
             "SELECT item_id FROM stock_status WHERE status = 'out_of_stock'"
@@ -3544,6 +3575,12 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
              fid_by_delivery.get(did, 0)]
             for did, iid, dat, msg, oid in del_rows
         ]
+        # A busy coworker account can have hundreds; the link has to stay short.
+        # 📦 My Orders lists them all.
+        delivered_more = 0
+        if cw_scope and len(delivered) > COWORKER_TAB_LIMIT:
+            delivered_more = len(delivered) - COWORKER_TAB_LIMIT
+            delivered = delivered[:COWORKER_TAB_LIMIT]
         pending = [
             # If the ORDER hasn't been paid yet (any of UNPAID_ORDER_STATUSES),
             # show THAT regardless of what the fulfilment row says — the Mini
@@ -3557,8 +3594,10 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
             # instead of lumping both into one vague "pending" bucket.
             [MENU.get(iid, (iid,))[0],
              ostatus if ostatus in UNPAID_ORDER_STATUSES else fstate,
-             fid, oid, ostatus in UNPAID_ORDER_STATUSES]
-            for fid, oid, iid, fstate, ostatus in pend_rows
+             fid, oid, ostatus in UNPAID_ORDER_STATUSES,
+             # 6th: placed by this very account (so its buttons can work); not when an admin previews
+             1 if (not preview_coworker_id and f_uid == user_id) else 0]
+            for fid, oid, iid, fstate, ostatus, f_uid in pend_rows
         ]
         # Custom items — exclude out-of-stock ones so the Mini App catalog
         # automatically stays in sync with the admin's stock toggles
@@ -3611,6 +3650,7 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
             # coworkers, never regular customers.
             "cwid": coworker_login[0] if coworker_login else 0,
             "an": db_unseen_announcement_count(user_id),
+            **({"dx": delivered_more} if delivered_more else {}),
         }
         if preview_coworker_id and coworker_login:
             data["cwn"] = coworker_login[1]
@@ -10891,6 +10931,8 @@ async def http_referral(request):
     user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
     if not user_id:
         return web.json_response({"error": "Unauthorized"}, status=401, headers=headers)
+    if db_get_user_coworker(user_id):
+        return web.json_response({"ok": False, "error": "Not available for coworker accounts."}, status=403, headers=headers)
     link = referral_link(await _bot_username_for(request.app["application"]), user_id)
     db_mark_referral_intro_shown(user_id)
     credits = db_get_credits(user_id)
@@ -16418,7 +16460,15 @@ async def handle_mini_app_action(update, context, data: dict):
         # instead of asking the customer to pick a category first.
         fulfilment_id = data.get("fulfilment_id")
         row = db_get_fulfilment(fulfilment_id) if fulfilment_id else None
-        if not row or row[2] != user_id:
+        if row and row[2] != user_id:
+            # another person on the same coworker account placed it: fine for a ticket
+            _mine = db_get_user_coworker(user_id)
+            conn = sqlite3.connect(DB_PATH)
+            _o = conn.execute("SELECT coworker_id FROM orders WHERE id = ?", (row[1],)).fetchone()
+            conn.close()
+            if not (_mine and _o and _o[0] and _o[0] == _mine[0]):
+                row = None
+        if not row:
             await update.message.reply_text("Could not find that order. Please contact support.")
             return
         _, order_id, _, item_id, unit_no, state, info_json = row
