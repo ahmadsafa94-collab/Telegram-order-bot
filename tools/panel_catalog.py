@@ -101,6 +101,15 @@ def group_of(name: str):
     return None
 
 
+# Items the bot already sells that should also be listed inside a family here.
+# They keep their own id, price and cost (same item, shown in both places);
+# `existing` tells the bot not to create or reprice them.
+EXTRA_PRODUCTS = [
+    {"name": "AccessMedicine", "group": ("access", "Medicine"),
+     "variants": [{"id": "accessmedicine", "months": 12, "label": "1 Year", "price": 20.0, "existing": True}]},
+]
+
+
 def duration_label(months: int) -> str:
     if months == 12:
         return "1 Year"
@@ -133,9 +142,18 @@ def build(scrape_path: str):
                 "panel_price": r["price"], "price": round(r["price"] + MARKUP, 2),
             })
         products.append({"name": tidy(name), "variants": variants})
+    for extra in EXTRA_PRODUCTS:
+        products.append({"name": extra["name"], "variants": [dict(v) for v in extra["variants"]],
+                         "_group": extra["group"]})
+    products.sort(key=lambda p: p["name"].lower())
     # a family needs three members to be worth a row of its own
     members = defaultdict(list)
+    titles = {key: title for key, title, _, _ in GROUPS}
     for p in products:
+        if "_group" in p:
+            key, short = p.pop("_group")
+            members[key].append((p, (key, titles[key], short)))
+            continue
         g = group_of(p["name"])
         if g:
             members[g[0]].append((p, g))
