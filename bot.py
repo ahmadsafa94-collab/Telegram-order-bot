@@ -102,7 +102,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "55"
+MINI_APP_VERSION = "56"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -4242,18 +4242,23 @@ async def book_cancel_notify_choice(update: Update, context: ContextTypes.DEFAUL
     if not request:
         await query.edit_message_text("That book request no longer exists.")
         return
-    user_id, link = request[1], request[3]
+    note = await _notify_book_cancelled(context, request)
+    await query.edit_message_text(f"❌ Book request #{request_id} cancelled. {note}")
+
+
+async def _notify_book_cancelled(context, request) -> str:
+    """Tells the customer their book request was cancelled; returns the note for the admin."""
+    request_id, user_id, link = request[0], request[1], request[3]
     try:
         await context.bot.send_message(
             chat_id=user_id,
             text=f"📚 Your book request has been cancelled:\n{link}",
             disable_web_page_preview=True,
         )
-        note = "The customer has been notified."
+        return "The customer has been notified."
     except Exception:
         logger.exception("Failed to notify customer of cancelled book request #%s", request_id)
-        note = "⚠️ Couldn't notify the customer (they may have blocked the bot)."
-    await query.edit_message_text(f"❌ Book request #{request_id} cancelled. {note}")
+        return "⚠️ Couldn't notify the customer (they may have blocked the bot)."
 
 
 async def book_admin_cancel_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4293,18 +4298,8 @@ async def book_msg_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("That book request no longer exists.")
         return
 
-    user_id = request[1]
-    link = request[3]
-    body = update.message.text
     try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"📚 Message about your book request:\n{link}\n\n{body}",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("↩️ Reply", callback_data=f"bookreply:{request_id}")]]
-            ),
-            disable_web_page_preview=True,
-        )
+        await _send_book_message(context, request, update.message.text)
         await update.message.reply_text(f"✅ Message sent to the customer for book request #{request_id}.")
     except Exception:
         logger.exception("Failed to deliver admin message for book request #%s", request_id)
@@ -4312,6 +4307,19 @@ async def book_msg_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ Could not deliver this to the customer for book request #{request_id}. "
             "They may have blocked the bot."
         )
+
+
+async def _send_book_message(context, request, body: str):
+    """Sends the admin's message about a book request, with a Reply button for the customer."""
+    request_id, user_id, link = request[0], request[1], request[3]
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=f"📚 Message about your book request:\n{link}\n\n{body}",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("↩️ Reply", callback_data=f"bookreply:{request_id}")]]
+        ),
+        disable_web_page_preview=True,
+    )
 
 
 async def book_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4393,7 +4401,11 @@ async def book_price_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db_set_book_price(request_id, price)
     await update.message.reply_text(f"✅ Price set — the customer has been notified.")
+    await _send_book_price(context, request_id, user_id, link, price)
 
+
+async def _send_book_price(context, request_id: int, user_id: int, link: str, price: float):
+    """Tells the customer the price of their book request, with Proceed / Cancel."""
     await context.bot.send_message(
         chat_id=user_id,
         text=(
@@ -11144,6 +11156,328 @@ async def http_admin_chat_action(request):
     return web.json_response({"ok": True}, headers=headers)
 
 
+# ── Admin Shop: Support tab tools (tickets, book requests, serials, coworkers) ───────────
+def _admin_bad(message: str, status: int = 400):
+    from aiohttp import web
+    return web.json_response({"ok": False, "error": message}, status=status, headers=_post_cors_headers())
+
+
+async def _admin_json(request):
+    """The JSON object a POST carries, or None."""
+    try:
+        data = await request.json()
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _who(user_id, username) -> str:
+    return f"@{username}" if username else str(user_id)
+
+
+def db_admin_tickets(status: str, limit: int = 100) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, user_id, username, category, subscription_label, self_help, message, photo_file_id, "
+        "status, resolution_message, created_at, resolved_at FROM tickets WHERE status = ? "
+        "ORDER BY id DESC LIMIT ?", (status, limit)).fetchall()
+    conn.close()
+    return [{
+        "id": r[0], "user_id": r[1], "customer": _who(r[1], r[2]), "category": r[3] or "", "sub": r[4] or "",
+        "self_help": (r[5] or "")[:1500], "message": (r[6] or "")[:3000], "photo": bool(r[7]),
+        "resolved": r[8] == "resolved", "answer": (r[9] or "")[:3000],
+        "date": (r[10] or "")[:16].replace("T", " "), "resolved_date": (r[11] or "")[:16].replace("T", " "),
+    } for r in rows]
+
+
+def db_admin_book_requests() -> list:
+    """Book requests still open: waiting for a price, or priced and waiting for the customer."""
+    out = []
+    for status in ("pending", "priced"):
+        for rid, uid, uname, link, price, created in db_list_book_requests(status):
+            out.append({"id": rid, "user_id": uid, "customer": _who(uid, uname), "link": link,
+                        "price": price, "status": status, "date": (created or "")[:10]})
+    out.sort(key=lambda b: b["id"], reverse=True)
+    return out
+
+
+async def http_admin_counts(request):
+    """Numbers for the badges: unresolved tickets and book requests waiting for a price."""
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    books = db_admin_book_requests()
+    return web.json_response({
+        "ok": True, "tickets": db_unresolved_ticket_count(),
+        "books": sum(1 for b in books if b["status"] == "pending"), "books_open": len(books),
+    }, headers=_imd_search_cors_headers())
+
+
+async def http_admin_tickets(request):
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    status = "resolved" if request.query.get("status") == "resolved" else "unresolved"
+    return web.json_response({"ok": True, "tickets": db_admin_tickets(status), "open": db_unresolved_ticket_count()},
+                             headers=_imd_search_cors_headers())
+
+
+async def http_admin_ticket_photo(request):
+    """The screenshot a customer attached to a ticket, fetched from Telegram."""
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        ticket = db_get_ticket(int(request.query.get("id", "")))
+    except ValueError:
+        ticket = None
+    if not ticket or not ticket[8]:
+        return web.Response(status=404, headers=_imd_search_cors_headers())
+    try:
+        tg_file = await request.app["application"].bot.get_file(ticket[8])
+        data = bytes(await tg_file.download_as_bytearray())
+    except Exception:
+        logger.exception("Couldn't fetch the screenshot of ticket %s", ticket[0])
+        return web.Response(status=502, headers=_imd_search_cors_headers())
+    return web.Response(body=data, content_type="image/jpeg", headers=_imd_search_cors_headers())
+
+
+async def http_admin_ticket_answer(request):
+    """Answers a ticket from the Shop: resolves it with the typed message (or the standard one),
+    or corrects the answer of an already-resolved ticket. The customer is told either way."""
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    data = await _admin_json(request)
+    ticket_id, message = (data or {}).get("id"), (data or {}).get("message", "")
+    if isinstance(ticket_id, bool) or not isinstance(ticket_id, int) or not isinstance(message, str) or len(message) > 3500:
+        return _admin_bad("Invalid request")
+    ticket = db_get_ticket(ticket_id)
+    if not ticket:
+        return _admin_bad("That ticket no longer exists.", 404)
+    message = message.strip()
+    context = _HttpContext(request.app["application"], ADMIN_CHAT_ID)
+    if ticket[9] == "resolved":
+        if not message:
+            return _admin_bad("Type the corrected answer.")
+        await _edit_ticket_answer(context, ticket, message)
+        return web.json_response({"ok": True, "note": f"Updated the answer for ticket #{ticket_id}."}, headers=_post_cors_headers())
+    note = await _close_ticket(context, ticket_id, message or TICKET_STANDARD_RESOLUTION)
+    return web.json_response({"ok": True, "note": note}, headers=_post_cors_headers())
+
+
+async def http_admin_book_requests(request):
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    return web.json_response({"ok": True, "items": db_admin_book_requests()}, headers=_imd_search_cors_headers())
+
+
+async def http_admin_book_action(request):
+    """Set the price of a book request, message the customer about it, or cancel it."""
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    data = await _admin_json(request) or {}
+    request_id, action = data.get("id"), data.get("action")
+    if isinstance(request_id, bool) or not isinstance(request_id, int) or action not in ("price", "message", "cancel"):
+        return _admin_bad("Invalid request")
+    book = db_get_book_request(request_id)
+    if not book:
+        return _admin_bad("That book request no longer exists.", 404)
+    _, user_id, _, link, _, status, _, _, _, _ = book
+    if status in ("ordered", "cancelled"):
+        return _admin_bad(f"Book request #{request_id} is already {status}.", 409)
+    context = _HttpContext(request.app["application"], ADMIN_CHAT_ID)
+    headers = _post_cors_headers()
+    if action == "price":
+        price = data.get("price")
+        if isinstance(price, str):
+            try:
+                price = float(price.strip())
+            except ValueError:
+                price = None
+        if isinstance(price, bool) or not isinstance(price, (int, float)) or not (0 < price < 100000):
+            return _admin_bad("Enter a price above 0.")
+        price = round(float(price), 2)
+        db_set_book_price(request_id, price)
+        try:
+            await _send_book_price(context, request_id, user_id, link, price)
+            note = "Price set — the customer has been notified."
+        except Exception:
+            logger.exception("Couldn't send the price of book request #%s", request_id)
+            note = "Price set, but the customer could not be notified (they may have blocked the bot)."
+        return web.json_response({"ok": True, "note": note, "price": price, "status": "priced"}, headers=headers)
+    if action == "message":
+        body = data.get("message")
+        if not isinstance(body, str) or not body.strip() or len(body) > 3500:
+            return _admin_bad("Type the message to send.")
+        try:
+            await _send_book_message(context, book, body.strip())
+        except Exception:
+            logger.exception("Couldn't deliver the message about book request #%s", request_id)
+            return _admin_bad("Could not deliver it (the customer may have blocked the bot).", 502)
+        return web.json_response({"ok": True, "note": "Message sent to the customer."}, headers=headers)
+    db_set_book_status(request_id, "cancelled")
+    note = f"Book request #{request_id} cancelled."
+    if data.get("notify"):
+        note += " " + await _notify_book_cancelled(context, book)
+    return web.json_response({"ok": True, "note": note}, headers=headers)
+
+
+def _serial_pools() -> list:
+    out = []
+    for dur, label in SERIAL_POOL_LABELS.items():
+        out.append({"duration": dur, "label": label,
+                    "available": [r[1] for r in db_list_serials(dur, "available")],
+                    "not_working": [r[1] for r in db_list_serials(dur, "not_working")]})
+    return out
+
+
+async def http_admin_serials(request):
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    return web.json_response({"ok": True, "pools": _serial_pools()}, headers=_imd_search_cors_headers())
+
+
+async def http_admin_serials_action(request):
+    """add codes to a pool, remove one code, or clear every not-working code."""
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    data = await _admin_json(request) or {}
+    action = data.get("action")
+    headers = _post_cors_headers()
+    if action == "add":
+        duration, text = data.get("duration"), data.get("codes")
+        if duration not in SERIAL_POOL_LABELS or not isinstance(text, str):
+            return _admin_bad("Invalid request")
+        codes = parse_serial_codes(text)
+        if not codes:
+            return _admin_bad("Paste at least one code.")
+        if len(codes) > 1000 or any(len(c) > 200 for c in codes):
+            return _admin_bad("Too many codes at once, or a code is too long.")
+        added = db_add_serials(duration, list(dict.fromkeys(codes)))
+        return web.json_response({"ok": True, "added": added, "skipped": len(codes) - added, "pools": _serial_pools()},
+                                 headers=headers)
+    if action == "remove":
+        code = data.get("code")
+        if not isinstance(code, str) or not code:
+            return _admin_bad("Invalid request")
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute("DELETE FROM serials WHERE code = ? AND status IN ('available', 'not_working')", (code,))
+        conn.commit()
+        conn.close()
+        if not cur.rowcount:
+            return _admin_bad("That code is not in the pool (it may already be used).", 404)
+        return web.json_response({"ok": True, "pools": _serial_pools()}, headers=headers)
+    if action == "clear_not_working":
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute("DELETE FROM serials WHERE status = 'not_working'")
+        conn.commit()
+        conn.close()
+        return web.json_response({"ok": True, "removed": cur.rowcount, "pools": _serial_pools()}, headers=headers)
+    return _admin_bad("Unknown action")
+
+
+def _coworker_rows() -> list:
+    out = []
+    for cid, name, username, pct, created, *_ in db_list_coworkers():
+        orders, revenue, pending = db_coworker_stats(cid)
+        out.append({"id": cid, "name": name, "username": username, "pct": pct,
+                    "orders": orders, "revenue": round(revenue, 2), "pending": pending,
+                    "date": (created or "")[:10]})
+    return out
+
+
+def _clean_pct(value):
+    """A percentage as a float between 0 (exclusive) and 100, or None."""
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not (0 < value <= 100):
+        return None
+    return float(value)
+
+
+async def http_admin_coworkers(request):
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    return web.json_response({"ok": True, "items": _coworker_rows()}, headers=_imd_search_cors_headers())
+
+
+async def http_admin_coworker_action(request):
+    """Add a coworker, change their percentage / username / password, or delete them."""
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    data = await _admin_json(request) or {}
+    action = data.get("action")
+    headers = _post_cors_headers()
+
+    def text(key, limit):
+        v = data.get(key)
+        return v.strip() if isinstance(v, str) and 0 < len(v.strip()) <= limit else None
+
+    if action == "add":
+        name, username, password, pct = text("name", 60), text("username", 40), text("password", 100), _clean_pct(data.get("pct"))
+        if not name or not username or not password:
+            return _admin_bad("Enter a name, a username and a password.")
+        if pct is None:
+            return _admin_bad("The percentage must be a number between 1 and 100.")
+        if db_coworker_username_taken(username):
+            return _admin_bad("That username is already taken.", 409)
+        cid = db_create_coworker(name, username, password, pct)
+        return web.json_response({"ok": True, "id": cid, "items": _coworker_rows()}, headers=headers)
+
+    cid = data.get("id")
+    if isinstance(cid, bool) or not isinstance(cid, int) or not db_get_coworker(cid):
+        return _admin_bad("That coworker no longer exists.", 404)
+    if action == "delete":
+        db_delete_coworker(cid)
+        return web.json_response({"ok": True, "items": _coworker_rows()}, headers=headers)
+    if action == "update":
+        pct = username = password = None
+        if "pct" in data:
+            pct = _clean_pct(data["pct"])
+            if pct is None:
+                return _admin_bad("The percentage must be a number between 1 and 100.")
+        if "username" in data:
+            username = text("username", 40)
+            if not username:
+                return _admin_bad("Enter a username.")
+            if db_coworker_username_taken(username, exclude_id=cid):
+                return _admin_bad("That username is already taken.", 409)
+        if "password" in data:
+            password = text("password", 100)
+            if not password:
+                return _admin_bad("Enter a password.")
+        if pct is None and username is None and password is None:
+            return _admin_bad("Nothing to change.")
+        if pct is not None:
+            db_set_coworker_discount_pct(cid, pct)
+        if username is not None:
+            db_update_coworker_username(cid, username)
+        if password is not None:
+            db_update_coworker_password(cid, password)
+        return web.json_response({"ok": True, "items": _coworker_rows()}, headers=headers)
+    return _admin_bad("Unknown action")
+
+
 BOOK_REQUESTS_PER_HOUR = 5
 
 
@@ -11583,7 +11917,21 @@ async def start_api_server(application):
     api_app.router.add_post("/api/admin_deliver", http_admin_deliver)
     api_app.router.add_options("/api/admin_deliver", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_chat_action", http_admin_chat_action)
+    api_app.router.add_get("/api/admin_counts", http_admin_counts)
+    api_app.router.add_get("/api/admin_tickets", http_admin_tickets)
+    api_app.router.add_get("/api/admin_ticket_photo", http_admin_ticket_photo)
+    api_app.router.add_post("/api/admin_ticket_answer", http_admin_ticket_answer)
+    api_app.router.add_get("/api/admin_book_requests", http_admin_book_requests)
+    api_app.router.add_post("/api/admin_book_action", http_admin_book_action)
+    api_app.router.add_get("/api/admin_serials", http_admin_serials)
+    api_app.router.add_post("/api/admin_serials_action", http_admin_serials_action)
+    api_app.router.add_get("/api/admin_coworkers", http_admin_coworkers)
+    api_app.router.add_post("/api/admin_coworker_action", http_admin_coworker_action)
     api_app.router.add_options("/api/admin_chat_action", http_set_coworker_price_options)
+    api_app.router.add_options("/api/admin_ticket_answer", http_set_coworker_price_options)
+    api_app.router.add_options("/api/admin_book_action", http_set_coworker_price_options)
+    api_app.router.add_options("/api/admin_serials_action", http_set_coworker_price_options)
+    api_app.router.add_options("/api/admin_coworker_action", http_set_coworker_price_options)
     api_app.router.add_post("/api/request_book", http_request_book)
     api_app.router.add_options("/api/request_book", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_item_title", http_set_item_title)
@@ -12053,9 +12401,14 @@ async def ticket_edit_answer_reply(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("That ticket no longer exists.")
         return
 
-    user_id = ticket[1]
-    message_id = ticket[13]
-    new_text = update.message.text
+    await _edit_ticket_answer(context, ticket, update.message.text)
+    await update.message.reply_text(f"✅ Updated the answer for ticket #{ticket_id}.")
+
+
+async def _edit_ticket_answer(context, ticket, new_text: str):
+    """Corrects a resolved ticket's answer: edits the closing message in the customer's
+    chat where possible (else sends the correction as a new message) and stores the new text."""
+    ticket_id, user_id, message_id = ticket[0], ticket[1], ticket[13]
     new_body = f"✅ Your ticket #{ticket_id} has been resolved:\n\n{new_text}"
 
     edited_in_place = False
@@ -12076,7 +12429,6 @@ async def ticket_edit_answer_reply(update: Update, context: ContextTypes.DEFAULT
         )
 
     db_update_ticket_resolution(ticket_id, new_text)
-    await update.message.reply_text(f"✅ Updated the answer for ticket #{ticket_id}.")
 
 
 def _short_submitted(created_at: str) -> str:
