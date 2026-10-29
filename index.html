@@ -16,12 +16,13 @@
   --teal: #0d9488; --teal2:#14b8a6;
   --red:  #ef4444;
   --r:14px;
+  --tabh: calc(58px + env(safe-area-inset-bottom, 0px));
   --field-border: #fff; /* dark UI default — flipped to #000 under [data-theme="light"] below */
 }
 :root[data-theme="light"]{ --field-border: #000; }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-  background:var(--bg);color:var(--text);min-height:100vh;padding-bottom:100px}
+  background:var(--bg);color:var(--text);min-height:100vh;padding-bottom:calc(var(--tabh) + 90px)}
 
 /* ── Header ─────────────────── */
 .hdr{background:var(--bg2);border-bottom:1px solid rgba(255,255,255,.07);
@@ -72,8 +73,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 
 /* ── Floating checkout bar (catalog page, shown once basket has items) ── */
 .floating-checkout{display:none;align-items:center;justify-content:space-between;gap:12px;
-  position:fixed;left:0;right:0;bottom:0;z-index:150;
-  padding:11px 15px calc(11px + env(safe-area-inset-bottom));
+  position:fixed;left:0;right:0;bottom:var(--tabh);z-index:150;
+  padding:11px 15px 11px;
   background:var(--bg2);border-top:1px solid rgba(255,255,255,.08);
   box-shadow:0 -8px 22px rgba(0,0,0,.35)}
 .floating-checkout.vis{display:flex}
@@ -146,7 +147,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .cw-input{width:100%;background:transparent;border:1.5px solid var(--field-border);border-radius:10px;padding:11px 12px;color:var(--text);font-size:15px}
 .cw-danger{color:#ef4444!important;border-color:rgba(239,68,68,.45)!important}
 .admin-add{display:none;width:100%;margin:10px 0 2px;padding:10px;border:1.5px dashed var(--teal2);border-radius:12px;background:transparent;color:var(--teal2);font-size:13px;font-weight:700;cursor:pointer}
-.undo-bar{display:none;position:fixed;left:12px;right:12px;bottom:84px;z-index:400;align-items:center;gap:10px;
+.undo-bar{display:none;position:fixed;left:12px;right:12px;bottom:calc(var(--tabh) + 76px);z-index:400;align-items:center;gap:10px;
   background:#111827;color:#fff;border:1px solid rgba(255,255,255,.15);border-radius:12px;padding:10px 12px;font-size:13px;box-shadow:0 8px 22px rgba(0,0,0,.45)}
 .undo-bar.on{display:flex}
 .undo-bar span{flex:1;min-width:0;overflow-wrap:anywhere}
@@ -318,9 +319,36 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .pend-action:active{opacity:.82}
 .pend-action.teal{background:var(--teal)}
 
+/* ── Bottom tab bar ───────────── */
+.tabbar{position:fixed;left:0;right:0;bottom:0;z-index:160;display:flex;background:var(--bg2);
+  border-top:1px solid rgba(255,255,255,.1);padding-bottom:env(safe-area-inset-bottom,0px)}
+.tabbar .tb{flex:1;min-width:0;height:58px;background:none;border:none;color:var(--hint);cursor:pointer;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+  font-size:10px;font-weight:600;line-height:1.1;text-align:center;padding:0 2px;position:relative}
+.tabbar .tb .tb-i{font-size:19px;line-height:1}
+.tabbar .tb.on{color:var(--teal2)}
+.tabbar .tb.on::before{content:"";position:absolute;top:0;left:22%;right:22%;height:2px;border-radius:0 0 3px 3px;background:var(--teal2)}
+.tabbar .tb .tb-badge{position:absolute;top:5px;left:calc(50% + 7px);min-width:16px;height:16px;border-radius:99px;
+  background:var(--red);color:#fff;font-size:9px;font-weight:700;display:none;align-items:center;justify-content:center;padding:0 4px}
+.tabbar .tb .tb-badge.vis{display:flex}
+body.in-checkout .tabbar{display:none}
+body.in-checkout{padding-bottom:100px}
+/* Request a book */
+.book-btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin:10px 0 2px;padding:11px;
+  border:1.5px solid rgba(45,212,191,.45);border-radius:12px;background:rgba(13,148,136,.1);color:var(--teal2);
+  font-size:13px;font-weight:700;cursor:pointer}
+/* Contact us */
+.contact-row{display:flex;align-items:center;gap:13px;width:100%;text-align:left;margin-bottom:9px;padding:14px;
+  background:var(--bg2);border:1px solid rgba(255,255,255,.08);border-radius:var(--r);color:var(--text);cursor:pointer}
+.contact-row .ci-i{font-size:24px;flex-shrink:0}
+.contact-row .ci-t{flex:1;min-width:0}
+.contact-row .ci-n{font-size:14px;font-weight:700}
+.contact-row .ci-s{font-size:12px;color:var(--hint);margin-top:2px}
+.contact-row .ci-c{color:var(--hint);font-size:20px}
+
 /* ── Toast ───────────────────── */
-.toast{position:fixed;bottom:22px;left:50%;
-  transform:translateX(-50%) translateY(68px);
+.toast{position:fixed;bottom:calc(var(--tabh) + 14px);left:50%;
+  transform:translateX(-50%) translateY(calc(var(--tabh) + 100px));
   background:rgba(13,148,136,.92);color:#fff;padding:8px 15px;
   border-radius:99px;font-size:12px;font-weight:600;white-space:nowrap;
   transition:transform .25s cubic-bezier(.34,1.56,.64,1);z-index:999;pointer-events:none}
@@ -338,9 +366,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
       <p>Medical Subscription Store</p>
     </div>
     <div class="hdr-icons">
-      <button class="ico-btn" title="My Subscriptions" onclick="openOrders()">
-        📋<div class="ico-badge vis" id="subsBadge" style="display:none">!</div>
-      </button>
       <button class="ico-btn" title="My Orders" id="myOrdersBtn" onclick="openMyOrders()" style="display:none">📦</button>
       <button class="ico-btn acc" title="Basket" onclick="openBasket()">
         🧺<div class="ico-badge" id="bc">0</div>
@@ -357,6 +382,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     <input id="searchInput" type="text" placeholder="Search subscriptions..." oninput="performSearch(this.value)">
     <button class="search-clear" id="searchClearBtn" onclick="clearSearch()">✕</button>
   </div>
+  <button class="book-btn" onclick="openBookRequest()">📚 Request a Book</button>
   <button class="admin-add" id="addSubBtn" onclick="openAddSub()">➕ Add a new subscription</button>
   <div class="tabs" id="tabs"></div>
   <div class="tabs" id="tabsMore"></div>
@@ -373,6 +399,35 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     </div>
     <button class="btn" onclick="goDetails()">Proceed to Checkout →</button>
   </div>
+</div>
+
+<!-- Tab: My Subscriptions (delivered) -->
+<div class="page" id="pSubs">
+  <div class="search-wrap" style="margin:0 0 10px">
+    <span class="search-ico">🔍</span>
+    <input id="subsSearchInput" style="border:1.5px solid var(--field-border)" type="text" placeholder="Search order #, name, username, password" oninput="subsSearchInput(this.value)">
+    <button class="search-clear" id="subsSearchClearBtn" onclick="subsSearchClear()">✕</button>
+  </div>
+  <div id="ordersContent"></div>
+</div>
+
+<!-- Tab: Pending Orders -->
+<div class="page" id="pPending">
+  <div id="pendingContent"></div>
+</div>
+
+<!-- Tab: Contact us -->
+<div class="page" id="pContact">
+  <div class="sl">How can we help?</div>
+  <button class="contact-row" onclick="openTg('https://t.me/uptodate_admin')">
+    <span class="ci-i">🆘</span><span class="ci-t"><div class="ci-n">Support</div><div class="ci-s">Chat with our team</div></span><span class="ci-c">›</span>
+  </button>
+  <button class="contact-row" onclick="openTg('https://t.me/uptodate_accounts')">
+    <span class="ci-i">📡</span><span class="ci-t"><div class="ci-n">Join our channel</div><div class="ci-s">@uptodate_accounts · news and offers</div></span><span class="ci-c">›</span>
+  </button>
+  <button class="contact-row" onclick="openTg('https://t.me/MedicAccounts_group')">
+    <span class="ci-i">👥</span><span class="ci-t"><div class="ci-n">Join our group</div><div class="ci-s">@MedicAccounts_group · talk to other members</div></span><span class="ci-c">›</span>
+  </button>
 </div>
 
 <!-- Page 2: Details -->
@@ -425,20 +480,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     <div class="sheet-handle"></div>
     <div class="sheet-title">🧺 Your Basket</div>
     <div id="basketItems"></div>
-  </div>
-</div>
-
-<!-- My Subscriptions sheet -->
-<div class="overlay" id="ordersOverlay" onclick="if(event.target===this)closeOrders()">
-  <div class="sheet">
-    <div class="sheet-handle"></div>
-    <div class="sheet-title">📋 My Subscriptions</div>
-    <div class="search-wrap" style="margin:0 15px 10px">
-      <span class="search-ico">🔍</span>
-      <input id="subsSearchInput" style="border:1.5px solid var(--field-border)" type="text" placeholder="Search order #, name, username, password" oninput="subsSearchInput(this.value)">
-      <button class="search-clear" id="subsSearchClearBtn" onclick="subsSearchClear()">✕</button>
-    </div>
-    <div id="ordersContent"></div>
   </div>
 </div>
 
@@ -551,6 +592,28 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     <div id="historyContent" style="padding:0 15px 15px"></div>
   </div>
 </div>
+
+<!-- Request a book -->
+<div class="overlay" id="bookOverlay" onclick="if(event.target===this)closeBookRequest()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">📚 Request a Book</div>
+    <div style="padding:0 15px 15px">
+      <div style="font-size:13px;color:var(--hint);margin:2px 0 10px;line-height:1.5">Paste the link of the book you are looking for. We will message you in the chat with the price.</div>
+      <input id="bookLink" class="cw-input" type="text" inputmode="url" maxlength="500" placeholder="https://…" aria-label="Link of the book" oninput="document.getElementById('bookSend').disabled=document.getElementById('bookLink').value.trim().length<4">
+      <div id="bookMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>
+      <button class="btn" id="bookSend" disabled onclick="sendBookRequest()">Request this book</button>
+      <button class="btn sec" style="margin-top:8px" onclick="closeBookRequest()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<nav class="tabbar" id="tabbar" aria-label="Main">
+  <button class="tb on" data-tab="catalog" onclick="switchTab('catalog')"><span class="tb-i">🛍</span><span>Catalogue</span></button>
+  <button class="tb" data-tab="subs" onclick="switchTab('subs')"><span class="tb-i">📋</span><span>My Subscriptions</span><span class="tb-badge" id="tbSubs"></span></button>
+  <button class="tb" data-tab="pending" onclick="switchTab('pending')"><span class="tb-i">⏳</span><span>Pending Orders</span><span class="tb-badge" id="tbPending"></span></button>
+  <button class="tb" data-tab="contact" onclick="switchTab('contact')"><span class="tb-i">💬</span><span>Contact us</span></button>
+</nav>
 
 <div class="toast" id="toast"></div>
 
@@ -1046,13 +1109,7 @@ function syncBasket(){
 }
 
 // ── My Subscriptions sheet ────────────────────────────────────────────
-function openOrders(){
-  document.getElementById('subsSearchInput').value='';
-  document.getElementById('subsSearchClearBtn').style.display='none';
-  subsSearchSeq++;
-  renderOrders();
-  document.getElementById('ordersOverlay').classList.add('on');
-}
+function openOrders(){ switchTab('subs'); }
 
 // Search inside My Subscriptions: matched on the server (order #, name, and
 // the delivered username/password) since credentials are never put in the
@@ -1090,7 +1147,6 @@ async function runSubsSearch(q){
     el.innerHTML='<div class="search-empty">Could not search your orders: '+escHtml(e.message||String(e))+'</div>';
   }
 }
-function closeOrders(){document.getElementById('ordersOverlay').classList.remove('on')}
 
 function renderOrders(){
   const el=document.getElementById('ordersContent');
@@ -1161,64 +1217,76 @@ function renderOrders(){
     });
   }
 
-  // ── Pending subscriptions — split into "not paid yet" vs "paid,
-  // not delivered yet" (5th tuple element: unpaid boolean) since these
-  // need completely different next steps (pay vs. just wait). ─────────
-  if(p.length){
-    const stateInfo={
-      needs_info: {
-        icon:'⌛', label:'Action needed: fill in your details',
-        btn:'Complete Registration →', cls:'', action:'complete_registration'
-      },
-      awaiting_receipt: {
-        icon:'📤', label:'Waiting for your payment receipt',
-        btn:'Send Receipt Now →', cls:'teal', action:'send_receipt'
-      },
-      awaiting_payment: {
-        icon:'⏳', label:'Waiting for payment', btn:null
-      },
-      awaiting_confirmation: {
-        icon:'🔍', label:"We've received your receipt — verifying now", btn:null
-      },
-      awaiting_delivery: {
-        icon:'🔄', label:'Being prepared by our team', btn:null
-      },
-    };
-    const renderPendRow=([name,state,fid,oid])=>{
-      const info=stateInfo[state]||{icon:'⏳',label:'In progress',btn:null};
-      return `
-        <div class="sub-row no-tap" style="flex-direction:column;gap:0;padding:0">
-          <div style="display:flex;align-items:flex-start;gap:10px;padding:11px 15px;width:100%">
-            <div class="sub-icon">${info.icon}</div>
-            <div class="sub-info">
-              <div class="sub-name">${name}${oid?` <span style="color:var(--hint);font-weight:400">#${oid}</span>`:''}</div>
-              <div class="sub-meta">${info.label}</div>
-            </div>
-          </div>
-          ${info.btn?`<button class="pend-action ${info.cls||''}"
-            onclick="pendAction('${info.action}',${fid||0},${oid||0})">${info.btn}</button>`:''}
-        </div>`;
-    };
-    const unpaidItems=p.filter(row=>row[4]);
-    const undeliveredItems=p.filter(row=>!row[4]);
-
-    if(unpaidItems.length){
-      html+=`<div class="sub-section-lbl">💳 Not Paid Yet (${unpaidItems.length})</div>`;
-      unpaidItems.forEach(row=>{ html+=renderPendRow(row); });
-      html+=`<button class="pend-action" style="background:#dc2626;margin:8px 15px 4px"
-        onclick="clearUnpaidOrders()">🗑 Clear Unpaid Pending Orders</button>`;
-    }
-    if(undeliveredItems.length){
-      html+=`<div class="sub-section-lbl">🔄 Paid — Not Delivered Yet (${undeliveredItems.length})</div>`;
-      undeliveredItems.forEach(row=>{ html+=renderPendRow(row); });
-    }
-  }
-
   if(!html){
     html=`<div class="empty-sheet">
       <div class="eico">📭</div>
-      <div style="font-size:14px;font-weight:600;margin-bottom:6px">No subscriptions yet</div>
-      <div style="font-size:12px;color:var(--hint)">Your orders appear here after purchase.</div>
+      <div style="font-size:14px;font-weight:600;margin-bottom:6px">No delivered subscriptions yet</div>
+      <div style="font-size:12px;color:var(--hint)">Your subscriptions appear here once they are delivered. Orders still on their way are under Pending Orders.</div>
+    </div>`;
+  }
+  el.innerHTML=html;
+}
+
+// ── Pending Orders tab ───────────────────────────────────────────────
+// Orders that still need something from the customer (details, receipt), are
+// being checked, or are approved and waiting for delivery; each has a ticket
+// button, since this tab (and a subscription's own page) is where tickets start.
+function renderPending(){
+  const el=document.getElementById('pendingContent');
+  if(!SUBS_DATA){
+    el.innerHTML=`<div class="empty-sheet">
+      <div class="eico">⏳</div>
+      <div style="margin-bottom:4px;font-size:14px;font-weight:600;color:var(--text)">Order data not loaded</div>
+      <div style="font-size:12px;line-height:1.7">Send <code style="background:rgba(255,255,255,.1);padding:2px 6px;border-radius:5px">/start</code> in the bot chat to refresh, then reopen the Shop.</div>
+    </div>`;
+    return;
+  }
+  const {p=[]}=SUBS_DATA;
+  const stateInfo={
+    needs_info:           {icon:'⌛', label:'Action needed: fill in your details', btn:'Complete Registration →', cls:'', action:'complete_registration'},
+    awaiting_receipt:     {icon:'📤', label:'Waiting for your payment receipt',    btn:'Send Receipt Now →',      cls:'teal', action:'send_receipt'},
+    awaiting_confirmation:{icon:'🔍', label:"We've received your receipt — verifying now", btn:null},
+    awaiting_delivery:    {icon:'🔄', label:'Approved — being prepared by our team', btn:null},
+    awaiting_payment:     {icon:'⏳', label:'Waiting for payment', btn:null},
+  };
+  const row=([name,state,fid,oid])=>{
+    const info=stateInfo[state]||{icon:'⏳',label:'In progress',btn:null};
+    return `
+      <div class="sub-row no-tap" style="flex-direction:column;gap:0;padding:0">
+        <div style="display:flex;align-items:flex-start;gap:10px;padding:11px 15px;width:100%">
+          <div class="sub-icon">${info.icon}</div>
+          <div class="sub-info">
+            <div class="sub-name">${escHtml(String(name))}${oid?` <span style="color:var(--hint);font-weight:400">#${oid}</span>`:''}</div>
+            <div class="sub-meta">${info.label}</div>
+          </div>
+        </div>
+        ${info.btn?`<button class="pend-action ${info.cls||''}" onclick="pendAction('${info.action}',${fid||0},${oid||0})">${info.btn}</button>`:''}
+        ${fid?`<button class="pend-action" style="background:transparent;color:var(--hint);border:1.5px solid rgba(255,255,255,.12);margin-top:${info.btn?0:6}px" onclick="orderTicket(${fid})">🎫 Open a ticket about this order</button>`:''}
+      </div>`;
+  };
+  const groups=[
+    ['⚡ Action needed',                     r=>r[1]==='needs_info'||r[1]==='awaiting_receipt'],
+    ['🔍 Payment being checked',             r=>r[1]==='awaiting_confirmation'],
+    ['🔄 Approved — waiting for delivery',   r=>r[1]==='awaiting_delivery'],
+  ];
+  let html='', used=new Set();
+  groups.forEach(([label,test])=>{
+    const list=p.filter(r=>test(r));
+    list.forEach(r=>used.add(r));
+    if(list.length){ html+=`<div class="sub-section-lbl">${label} (${list.length})</div>`+list.map(row).join(''); }
+  });
+  const rest=p.filter(r=>!used.has(r));
+  const unpaid=rest.filter(r=>r[4]), other=rest.filter(r=>!r[4]);
+  if(other.length) html+=`<div class="sub-section-lbl">⏳ In progress (${other.length})</div>`+other.map(row).join('');
+  if(unpaid.length){
+    html+=`<div class="sub-section-lbl">💳 Not paid yet (${unpaid.length})</div>`+unpaid.map(row).join('')
+      +`<button class="pend-action" style="background:#dc2626;margin:8px 15px 4px" onclick="clearUnpaidOrders()">🗑 Clear unpaid pending orders</button>`;
+  }
+  if(!html){
+    html=`<div class="empty-sheet">
+      <div class="eico">✅</div>
+      <div style="font-size:14px;font-weight:600;margin-bottom:6px">No pending orders</div>
+      <div style="font-size:12px;color:var(--hint)">Orders that are paid and on their way, or waiting for something from you, show up here.</div>
     </div>`;
   }
   el.innerHTML=html;
@@ -1309,11 +1377,13 @@ function loadSubsInChat(){
   tg.sendData(JSON.stringify({action:'view_subscriptions'}));
 }
 
-// Show the 📋 icon as active if there's data
-if(SUBS_DATA&&(SUBS_DATA.d?.length||SUBS_DATA.p?.length)){
-  const b=document.getElementById('subsBadge');
-  b.style.display='flex'; b.textContent=(SUBS_DATA.d?.length||0)+(SUBS_DATA.p?.length||0);
+// Counts on the My Subscriptions and Pending Orders tabs
+function setTabBadges(){
+  const set=(id,n)=>{ const el=document.getElementById(id); el.textContent=n; el.classList.toggle('vis',n>0); };
+  set('tbSubs',(SUBS_DATA&&SUBS_DATA.d?SUBS_DATA.d.length:0));
+  set('tbPending',(SUBS_DATA&&SUBS_DATA.p?SUBS_DATA.p.length:0));
 }
+setTabBadges();
 
 // ── Basket sheet ──────────────────────────────────────────────────────
 function openBasket(){renderBasket();document.getElementById('basketOverlay').classList.add('on')}
@@ -1340,8 +1410,58 @@ function renderBasket(){
 }
 
 // ── Navigation ────────────────────────────────────────────────────────
-function showPage(id){document.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.id===id))}
-function goCatalog(){showPage('p1');document.getElementById('hdrTitle').textContent='Medic SalesBot';tg.MainButton.hide();window.scrollTo(0,0)}
+function showPage(id){
+  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.id===id));
+  document.body.classList.toggle('in-checkout', id==='p2'||id==='p3');   // checkout steps hide the tab bar
+}
+// ── Bottom tabs ───────────────────────────────────────────────────────
+const TAB_PAGES={catalog:'p1',subs:'pSubs',pending:'pPending',contact:'pContact'};
+const TAB_TITLES={catalog:'Medic SalesBot',subs:'My Subscriptions',pending:'Pending Orders',contact:'Contact us'};
+function switchTab(name){
+  if(!TAB_PAGES[name]) name='catalog';
+  showPage(TAB_PAGES[name]);
+  document.querySelectorAll('.tabbar .tb').forEach(b=>b.classList.toggle('on',b.dataset.tab===name));
+  document.getElementById('hdrTitle').textContent=TAB_TITLES[name];
+  if(name==='subs'){
+    document.getElementById('subsSearchInput').value='';
+    document.getElementById('subsSearchClearBtn').style.display='none';
+    subsSearchSeq++; renderOrders();
+  }
+  if(name==='pending') renderPending();
+  window.scrollTo(0,0);
+}
+function openTg(url){
+  try{ if(tg.openTelegramLink) { tg.openTelegramLink(url); return; } }catch(e){}
+  window.open(url,'_blank');
+}
+function goCatalog(){switchTab('catalog');tg.MainButton.hide()}
+
+// ── Request a book ────────────────────────────────────────────────────
+function openBookRequest(){
+  const reason=ordersUnavailableReason();
+  document.getElementById('bookLink').value='';
+  document.getElementById('bookSend').disabled=true;
+  const msg=document.getElementById('bookMsg');
+  msg.style.color=reason?'#dc2626':'var(--hint)'; msg.textContent=reason||'';
+  document.getElementById('bookOverlay').classList.add('on');
+  setTimeout(()=>document.getElementById('bookLink').focus(),150);
+}
+function closeBookRequest(){document.getElementById('bookOverlay').classList.remove('on')}
+async function sendBookRequest(){
+  const link=document.getElementById('bookLink').value.trim();
+  const msg=document.getElementById('bookMsg'), btn=document.getElementById('bookSend');
+  const bad=t=>{ msg.style.color='#dc2626'; msg.textContent=t; };
+  if(link.length<4) return bad('Paste the link of the book.');
+  const reason=ordersUnavailableReason(); if(reason) return bad(reason);
+  btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Sending…';
+  try{
+    const resp=await fetch(withAuth('/api/request_book'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({link})});
+    const data=await resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
+    if(!data.ok){ bad(data.error||'Could not send the request.'); btn.disabled=false; return; }
+    closeBookRequest();
+    showToast('Request sent — we will message you with the price');
+  }catch(e){ bad('Network error — please try again.'); btn.disabled=false; }
+}
 function goDetails(){
   if(!cartSize()){showToast('Add at least one item first');return;}
   closeBasket();buildDetailForms();
