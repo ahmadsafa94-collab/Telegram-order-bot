@@ -102,7 +102,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "56"
+MINI_APP_VERSION = "57"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -2252,6 +2252,23 @@ def db_customers_with_credits():
     ).fetchall()
     conn.close()
     return rows
+
+
+def db_list_discount_codes() -> list:
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT code, percentage, uses_remaining, expires_at, created_at FROM discount_codes "
+        "ORDER BY created_at DESC, code").fetchall()
+    conn.close()
+    return rows
+
+
+def db_delete_discount_code(code: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("DELETE FROM discount_codes WHERE code = ?", (code.strip().upper(),))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
 
 
 def db_all_user_ids(exclude: int = None):
@@ -7219,6 +7236,23 @@ async def daily_sales_excel_job(context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+def _sales_period(period: str):
+    """(label, UTC start timestamp) of a report period: today / week / month / overall."""
+    offset = timedelta(hours=REPORT_UTC_OFFSET)
+    local_now = datetime.utcnow() + offset
+    if period == "overall":
+        return "Overall (Lifetime)", "0000-01-01T00:00:00"
+    if period == "today":
+        local_since, label = local_now.replace(hour=0, minute=0, second=0, microsecond=0), "Today"
+    elif period == "week":
+        local_since = (local_now - timedelta(days=local_now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        label = "This week"
+    else:
+        local_since, label = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0), "This month"
+    # Convert the local boundary back to UTC, since that's how orders are stored.
+    return label, (local_since - offset).isoformat()
+
+
 async def admin_sales_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Totals sold per product for the chosen period."""
     query = update.callback_query
@@ -7227,28 +7261,7 @@ async def admin_sales_report(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     await query.answer()
 
-    period = query.data.split(":", 1)[1]
-    offset = timedelta(hours=REPORT_UTC_OFFSET)
-    local_now = datetime.utcnow() + offset
-
-    if period == "overall":
-        label = "Overall (Lifetime)"
-        since_iso = "0000-01-01T00:00:00"
-    else:
-        if period == "today":
-            local_since = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-            label = "Today"
-        elif period == "week":
-            local_since = (local_now - timedelta(days=local_now.weekday())).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
-            label = "This week"
-        else:
-            local_since = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            label = "This month"
-        # Convert the local boundary back to UTC, since that's how orders are stored.
-        since_iso = (local_since - offset).isoformat()
-
+    label, since_iso = _sales_period(query.data.split(":", 1)[1])
     counts, revenue = db_sales_since(since_iso)
 
     back = InlineKeyboardMarkup(
@@ -11481,6 +11494,196 @@ async def http_admin_coworker_action(request):
     return _admin_bad("Unknown action")
 
 
+# ── Admin Shop: customers, sales, credits and discount codes ───────────
+def db_admin_customer_search(q: str, limit: int = 15) -> list:
+    """Customers whose Telegram id is q, or whose @username contains q."""
+    q = (q or "").strip().lstrip("@")
+    if not q:
+        return []
+    conn = sqlite3.connect(DB_PATH)
+    if q.isdigit():
+        ids = [r[0] for r in conn.execute(
+            "SELECT user_id FROM users WHERE user_id = ? UNION SELECT user_id FROM orders WHERE user_id = ? LIMIT 1",
+            (int(q), int(q))).fetchall()]
+    else:
+        like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        ids = [r[0] for r in conn.execute(
+            "SELECT user_id FROM users WHERE username LIKE ? ESCAPE '\\' UNION "
+            "SELECT user_id FROM orders WHERE username LIKE ? ESCAPE '\\' LIMIT ?", (like, like, limit)).fetchall()]
+    conn.close()
+    return [db_admin_customer_summary(i) for i in ids]
+
+
+def _customer_username(user_id: int):
+    name = db_get_username(user_id)
+    if name:
+        return name
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT username FROM orders WHERE user_id = ? AND username IS NOT NULL "
+                       "ORDER BY id DESC LIMIT 1", (user_id,)).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def db_admin_customer_summary(user_id: int) -> dict:
+    conn = sqlite3.connect(DB_PATH)
+    orders, spent = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(total), 0) FROM orders WHERE user_id = ? AND status NOT IN "
+        "('awaiting_payment', 'awaiting_receipt', 'awaiting_confirmation', 'cancelled', 'rejected')",
+        (user_id,)).fetchone()
+    conn.close()
+    seen = db_get_user_seen(user_id)
+    return {"user_id": user_id, "username": _customer_username(user_id), "credits": db_get_credits(user_id),
+            "orders": orders, "spent": round(float(spent or 0), 2), "last_seen": (seen[1][:10] if seen else "")}
+
+
+def db_admin_customer(user_id: int):
+    """Everything the chat's /customer shows: delivered and pending units with what the customer filled in."""
+    delivered, pending = db_user_delivered_units(user_id), db_user_pending_items(user_id)
+    summary = db_admin_customer_summary(user_id)
+    seen = db_get_user_seen(user_id)
+    if not delivered and not pending and not summary["credits"] and not seen and not summary["orders"]:
+        return None
+    out = dict(summary, seen=({"first": seen[0][:10], "last": seen[1][:10]} if seen else None),
+               credits_usd=summary["credits"] * CREDIT_VALUE_USD, delivered=[], pending=[])
+    for fid, order_id, item_id, unit_no, info_json in delivered:
+        out["delivered"].append({"order_id": order_id, "name": MENU.get(item_id, (item_id,))[0], "unit": unit_no,
+                                 "info": format_fulfilment_info(item_id, info_json)[:1500]})
+    for fid, order_id, item_id, unit_no, state, order_status in pending:
+        if order_status in UNPAID_ORDER_STATUSES:
+            label = "not paid yet"
+        else:
+            label = "details ready to deliver" if state == "awaiting_delivery" else "waiting on customer"
+        row = db_get_fulfilment(fid)
+        out["pending"].append({"order_id": order_id, "name": MENU.get(item_id, (item_id,))[0], "unit": unit_no,
+                               "label": label, "info": format_fulfilment_info(item_id, row[6] if row else None)[:1500]})
+    return out
+
+
+async def http_admin_customer(request):
+    """?q=<id or @username> lists matches; ?id=<user id> gives one customer in full."""
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    headers = _imd_search_cors_headers()
+    if "id" in request.query:
+        try:
+            customer = db_admin_customer(int(request.query["id"]))
+        except ValueError:
+            customer = None
+        if not customer:
+            return _admin_bad("No record of that customer.", 404)
+        return web.json_response({"ok": True, "customer": customer}, headers=headers)
+    q = request.query.get("q", "")
+    if len(q) > 64:
+        return _admin_bad("Search is too long.")
+    return web.json_response({"ok": True, "customers": db_admin_customer_search(q)}, headers=headers)
+
+
+async def http_admin_credits(request):
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    rows = db_customers_with_credits()
+    items = [{"user_id": uid, "customer": _who(uid, uname), "credits": c, "usd": c * CREDIT_VALUE_USD} for uid, uname, c in rows]
+    total = sum(i["credits"] for i in items)
+    return web.json_response({"ok": True, "items": items, "total_credits": total, "total_usd": total * CREDIT_VALUE_USD,
+                              "value": CREDIT_VALUE_USD}, headers=_imd_search_cors_headers())
+
+
+async def http_admin_sales(request):
+    """The 📈 Input report: accounts sold per product, revenue and revenue by payment method."""
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    period = request.query.get("period", "today")
+    if period not in ("today", "week", "month", "overall"):
+        return _admin_bad("Unknown period.")
+    label, since_iso = _sales_period(period)
+    counts, revenue = db_sales_since(since_iso)
+    methods = [{"method": payment_method_display(m), "revenue": round(r, 2), "count": n}
+               for m, r, n in db_sales_by_method_since(since_iso)]
+    return web.json_response({
+        "ok": True, "period": period, "label": label, "revenue": round(revenue, 2),
+        "accounts": sum(q for _, q in counts), "orders": sum(m["count"] for m in methods),
+        "products": [{"name": MENU.get(i, (i,))[0], "qty": q} for i, q in counts], "methods": methods,
+    }, headers=_imd_search_cors_headers())
+
+
+async def http_admin_sales_excel(request):
+    """Sends the daily-profit Excel to the admin's chat."""
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    today = (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date()
+    try:
+        await send_sales_excel(request.app["application"].bot, ADMIN_CHAT_ID, today, "📊 Daily sales (today so far)")
+    except Exception:
+        logger.exception("Sales Excel from the Shop failed")
+        return _admin_bad("Couldn't build the Excel file.", 500)
+    return web.json_response({"ok": True}, headers=_post_cors_headers())
+
+
+def _discount_rows() -> list:
+    now = datetime.utcnow().isoformat()
+    out = []
+    for code, pct, uses, expires, created in db_list_discount_codes():
+        state = "used up" if uses <= 0 else "expired" if expires < now else "active"
+        out.append({"code": code, "pct": pct, "uses": uses, "expires": (expires or "")[:10], "state": state})
+    return out
+
+
+async def http_admin_discounts(request):
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    return web.json_response({"ok": True, "items": _discount_rows()}, headers=_imd_search_cors_headers())
+
+
+async def http_admin_discount_action(request):
+    """Issue a new discount code (percentage, number of uses, days valid) or delete one."""
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    data = await _admin_json(request) or {}
+    action = data.get("action")
+    headers = _post_cors_headers()
+    if action == "create":
+        def num(key, integer):
+            v = data.get(key)
+            if isinstance(v, str):
+                try:
+                    v = float(v.strip())
+                except ValueError:
+                    return None
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                return None
+            if integer:
+                return int(v) if v == int(v) else None
+            return float(v)
+        pct, uses, days = num("percentage", False), num("uses", True), num("days", True)
+        if pct is None or not (0 < pct <= 100):
+            return _admin_bad("The percentage must be between 1 and 100.")
+        if uses is None or not (1 <= uses <= 100000):
+            return _admin_bad("Uses must be a whole number of at least 1.")
+        if days is None or not (1 <= days <= 3650):
+            return _admin_bad("Days must be a whole number of at least 1.")
+        code = db_create_discount_code(pct, uses, days)
+        return web.json_response({"ok": True, "code": code, "items": _discount_rows()}, headers=headers)
+    if action == "delete":
+        code = data.get("code")
+        if not isinstance(code, str) or not db_delete_discount_code(code):
+            return _admin_bad("That code no longer exists.", 404)
+        return web.json_response({"ok": True, "items": _discount_rows()}, headers=headers)
+    return _admin_bad("Unknown action")
+
+
 BOOK_REQUESTS_PER_HOUR = 5
 
 
@@ -11935,6 +12138,14 @@ async def start_api_server(application):
     api_app.router.add_options("/api/admin_book_action", http_set_coworker_price_options)
     api_app.router.add_options("/api/admin_serials_action", http_set_coworker_price_options)
     api_app.router.add_options("/api/admin_coworker_action", http_set_coworker_price_options)
+    api_app.router.add_get("/api/admin_customer", http_admin_customer)
+    api_app.router.add_get("/api/admin_credits", http_admin_credits)
+    api_app.router.add_get("/api/admin_sales", http_admin_sales)
+    api_app.router.add_post("/api/admin_sales_excel", http_admin_sales_excel)
+    api_app.router.add_get("/api/admin_discounts", http_admin_discounts)
+    api_app.router.add_post("/api/admin_discount_action", http_admin_discount_action)
+    api_app.router.add_options("/api/admin_sales_excel", http_set_coworker_price_options)
+    api_app.router.add_options("/api/admin_discount_action", http_set_coworker_price_options)
     api_app.router.add_post("/api/request_book", http_request_book)
     api_app.router.add_options("/api/request_book", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_item_title", http_set_item_title)
