@@ -141,7 +141,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .dur-btn.need{border-color:#ef4444;color:#ef4444;animation:durGlow 1s ease-in-out infinite}
 @keyframes durGlow{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0)}50%{box-shadow:0 0 12px 3px rgba(239,68,68,.8)}}
 .dur-anchor{position:relative;flex-shrink:0;margin-left:8px}
-.dur-anchor .dur-btn{margin-left:0;min-width:118px;text-align:center}
+.dur-anchor .dur-btn{margin-left:0;min-width:112px;text-align:center}
 .dur-btn.one{cursor:default}
 .dur-menu{display:none;position:absolute;right:0;top:calc(100% + 4px);min-width:100%;width:max-content;z-index:30;
   background:var(--bg2);border:1.5px solid var(--teal2);border-radius:12px;overflow:hidden;
@@ -1378,10 +1378,13 @@ function makeGroupRow(g, members){
 function panelFromPrice(p){
   return Math.min(...p.variants.map(v=>hasCoworkerDiscount(v.id)?coworkerPrice(v.price,v.id):v.price));
 }
-// The price of the duration the row is on (the button beside it names the duration).
+// Under the name: only the admin's ✏️ for the duration the row is on. The price
+// itself is on the duration button ("1 Year - $45").
 function panelSubHtml(row,p){
   const sel=p.variants.find(v=>v.id===row.dataset.selected)||defaultVariant(p);
-  return `<b class="panel-from">${rowPriceHtml(sel.id, sel.price, true)}</b>`;
+  return (PREVIEW_CW||ADMIN_EDIT)
+    ? `<button class="cw-edit" title="Edit this duration" onclick="event.stopPropagation();openCwPriceEdit('${sel.id}')">✏️</button>`
+    : '';
 }
 function panelOf(row){
   const cat=CATALOG.find(c=>c.id==='panel');
@@ -1401,6 +1404,8 @@ function makePanelRow(p){
 function refreshPanelFromPrices(){
   document.querySelectorAll('[data-panel-name]').forEach(row=>{
     const p=panelOf(row), el=row.querySelector('.rs'); if(p&&el) el.innerHTML=panelSubHtml(row,p);
+    const btn=row.querySelector('.dur-btn');
+    if(btn) btn.textContent=durBtnText(row,row.querySelector('.dur-anchor').classList.contains('open'));
   });
 }
 // The button opens a small menu hanging from it — as wide as the button —
@@ -1412,7 +1417,8 @@ function durBtnText(row,open){
   const sel=row.dataset.selected&&IMAP[row.dataset.selected];
   const p=panelOf(row);
   const several=p&&p.variants.length>1;
-  return '⏱ '+(sel?sel.sub:'Durations')+(several?(open?' ▴':' ▾'):'');
+  const price=sel?(hasCoworkerDiscount(sel.id)?coworkerPrice(sel.price,sel.id):sel.price):null;
+  return (sel?sel.sub+' - $'+price:'Durations')+(several?(open?' ▴':' ▾'):'');
 }
 function closeAllDurations(except){
   document.querySelectorAll('.dur-anchor.open').forEach(a=>{
