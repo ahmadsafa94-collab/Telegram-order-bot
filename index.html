@@ -473,6 +473,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
         <div id="cwPriceInfo" style="font-size:13px;color:var(--hint);margin-bottom:10px;overflow-wrap:anywhere"></div>
         <input id="cwPriceInput" type="number" inputmode="decimal" min="0" step="0.01" placeholder="New price in $"
           style="width:100%;background:transparent;border:1.5px solid var(--field-border);border-radius:10px;padding:11px 12px;color:var(--text);font-size:15px">
+        <div id="cwCostBox" style="display:none;margin-top:12px">
+          <div style="font-size:12px;color:var(--hint);margin-bottom:4px">Your cost per account ($) — used for daily sales and profit</div>
+          <input id="cwCostInput" type="number" inputmode="decimal" min="0" step="0.01" placeholder="Cost in $" aria-label="Your cost per account in dollars"
+            style="width:100%;background:transparent;border:1.5px solid var(--field-border);border-radius:10px;padding:11px 12px;color:var(--text);font-size:15px">
+          <div style="font-size:11px;color:var(--hint);margin-top:4px">Applies to sales from now on; past days keep the cost they were sold at.</div>
+        </div>
       </div>
       <div id="cwPriceMsg" style="font-size:12px;margin-top:6px;min-height:16px"></div>
       <button class="btn" id="cwPriceSave" onclick="saveCwPrice(false)">Save</button>
@@ -561,6 +567,7 @@ const ADMIN_EDIT = !!(SUBS_DATA && SUBS_DATA.adm) && !PREVIEW_CW;
 // so its prices and titles can be older than the last edit. Ask the bot for the
 // current ones before the catalog is built (admin only, so a slow reply costs
 // no customer anything).
+let ITEM_COSTS = null;   // admin only: what each subscription costs the owner (never in a customer's link)
 if (ADMIN_EDIT && API_BASE && AUTH_UID && AUTH_TOK) {
   try {
     const x = new XMLHttpRequest();
@@ -568,7 +575,7 @@ if (ADMIN_EDIT && API_BASE && AUTH_UID && AUTH_TOK) {
     x.send();
     if (x.status === 200) {
       const d = JSON.parse(x.responseText);
-      if (d && d.ok) { SUBS_DATA.po = d.po || {}; SUBS_DATA.rm = d.rm || []; SUBS_DATA.nm = d.nm || {}; }
+      if (d && d.ok) { SUBS_DATA.po = d.po || {}; SUBS_DATA.rm = d.rm || []; SUBS_DATA.nm = d.nm || {}; ITEM_COSTS = d.co || {}; }
     }
   } catch(e) { /* keep what the link carried */ }
 }
@@ -1637,6 +1644,7 @@ function openCwPriceEdit(id){
   document.getElementById('cwPriceTitle').textContent=(IMAP[id]&&IMAP[id].fullname)||row.dataset.name;
   document.getElementById('cwPriceBox').style.display='';
   document.getElementById('cwPriceReset').style.display='';
+  const cbox=document.getElementById('cwCostBox'); cbox.style.display='none';
   const tbox=document.getElementById('cwTitleBox');
   if(PREVIEW_CW){
     tbox.style.display='none';
@@ -1648,6 +1656,10 @@ function openCwPriceEdit(id){
     info.textContent='Regular price: $'+base+(PRICE_OVERRIDES[id]!=null?' (edited)':'')+'. Changing it changes the price for every customer.';
     input.value=base;
     document.getElementById('cwPriceReset').textContent='↩️ Back to the original price';
+    if(ITEM_COSTS){
+      cbox.style.display='';
+      document.getElementById('cwCostInput').value=ITEM_COSTS[id]!=null?ITEM_COSTS[id]:0;
+    }
     const it=IMAP[id];
     if(it&&it.tkey){
       cwEditKey=it.tkey;
@@ -1757,7 +1769,25 @@ async function saveCwPrice(useDefault){
         applyTitleLocal(key,td.title); titleToast='Title saved';
       }
     }
-    if(!priceShown){ closeCwPriceEdit(); showToast(titleToast||'Nothing changed'); return; }
+    let costToast=null;
+    if(!PREVIEW_CW&&id&&ITEM_COSTS&&document.getElementById('cwCostBox').style.display!=='none'){
+      const raw=document.getElementById('cwCostInput').value.trim();
+      if(raw!==''){
+        const cost=parseFloat(raw);
+        if(!(cost>=0)){ msg.style.color='#dc2626'; msg.textContent='Enter a cost of 0 or more.'; return; }
+        if(Math.round(cost*100)!==Math.round((ITEM_COSTS[id]||0)*100)){
+          const cr=await fetch(withAuth('/api/set_item_cost'),{
+            method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({item_id:id,cost:cost}),
+          });
+          const cd=await cr.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
+          if(!cd.ok){ msg.style.color='#dc2626'; msg.textContent=cd.error||'Could not save the cost.'; return; }
+          ITEM_COSTS[id]=cd.cost; costToast='Cost saved';
+        }
+      }
+    }
+    const extras=[titleToast,costToast].filter(Boolean).join(' · ');
+    if(!priceShown){ closeCwPriceEdit(); showToast(extras||'Nothing changed'); return; }
     const resp=await fetch(withAuth(PREVIEW_CW?'/api/set_coworker_price':'/api/set_item_price'),{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({item_id:id,price:price}),
@@ -1788,7 +1818,7 @@ async function saveCwPrice(useDefault){
     refreshPanelFromPrices();
     try{ syncBasket(); renderBasket(); }catch(e){}
     closeCwPriceEdit();
-    showToast(titleToast?titleToast+' · '+toast:toast);
+    showToast(extras?extras+' · '+toast:toast);
   }catch(e){
     msg.style.color='#dc2626'; msg.textContent='Network error — please try again.';
   }finally{ btn.disabled=false; }

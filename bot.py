@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "41"
+MINI_APP_VERSION = "42"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -267,6 +267,7 @@ SINGLE_MAIN_ITEMS = [
 # with 280 more buttons. Their price is edited from the Shop itself.
 PANEL_ITEM_IDS = set()
 PANEL_GROUP_KEYS = set()
+PANEL_COSTS = {}  # what the supplier panel charges us per duration: the starting cost for sales/profit
 PANEL_CATALOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel_catalog.json")
 
 
@@ -282,6 +283,8 @@ def _load_panel_catalog():
         for v in product.get("variants", []):
             MENU[v["id"]] = (f"{product['name']} - {v['label']}", float(v["price"]))
             PANEL_ITEM_IDS.add(v["id"])
+            if v.get("panel_price") is not None:
+                PANEL_COSTS[v["id"]] = float(v["panel_price"])
 
 
 _load_panel_catalog()
@@ -1309,7 +1312,7 @@ def db_init():
     now = datetime.utcnow().isoformat()
     conn.executemany(
         "INSERT OR IGNORE INTO item_costs (item_id, cost, updated_at) VALUES (?, ?, ?)",
-        [(item_id, cost, now) for item_id, cost in DEFAULT_ITEM_COSTS.items()],
+        [(item_id, cost, now) for item_id, cost in {**PANEL_COSTS, **DEFAULT_ITEM_COSTS}.items()],
     )
 
     conn.commit()
@@ -10638,7 +10641,37 @@ async def http_shop_edits(request):
     if user_id != ADMIN_CHAT_ID:
         return web.json_response({"ok": False, "error": "Admin only"}, status=403, headers=headers)
     price_overrides, removed_ids = _mini_app_admin_edits()
-    return web.json_response({"ok": True, "po": price_overrides, "rm": removed_ids, "nm": dict(SHOP_TITLES)}, headers=headers)
+    # "co": what each subscription costs the owner (sales and profit). Admin-only:
+    # it is never part of a customer's Shop link.
+    costs = {i: c for i, c in db_get_item_costs().items() if i in MENU}
+    return web.json_response(
+        {"ok": True, "po": price_overrides, "rm": removed_ids, "nm": dict(SHOP_TITLES), "co": costs}, headers=headers)
+
+
+async def http_set_item_cost(request):
+    """The cost box in the Shop's ✏️ editor: what one account of this subscription
+    costs the owner, used by the daily sales and profit. Same as 📦 Manage Stock →
+    💲 Edit Cost. Applies to sales from now on. Admin's own verified account only."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    if user_id != ADMIN_CHAT_ID:
+        return web.json_response({"ok": False, "error": "Admin only"}, status=403, headers=headers)
+    try:
+        data = await request.json()
+        item_id = data["item_id"]
+        cost = data["cost"]
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if not isinstance(item_id, str) or item_id not in MENU:
+        return web.json_response({"ok": False, "error": "Unknown subscription."}, status=400, headers=headers)
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0 or cost > 10000:
+        return web.json_response({"ok": False, "error": "Enter a cost of 0 or more."}, status=400, headers=headers)
+    cost = round(float(cost), 2)
+    db_set_item_cost(item_id, cost)
+    return web.json_response({"ok": True, "item_id": item_id, "cost": cost}, headers=headers)
 
 
 async def http_set_item_title(request):
@@ -11013,6 +11046,8 @@ async def start_api_server(application):
     api_app.router.add_post("/api/set_item_price", http_set_item_price)
     api_app.router.add_options("/api/set_item_price", http_set_coworker_price_options)
     api_app.router.add_get("/api/shop_edits", http_shop_edits)
+    api_app.router.add_post("/api/set_item_cost", http_set_item_cost)
+    api_app.router.add_options("/api/set_item_cost", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_item_title", http_set_item_title)
     api_app.router.add_options("/api/set_item_title", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_coworker_price", http_set_coworker_price)
