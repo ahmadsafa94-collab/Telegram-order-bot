@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "38"
+MINI_APP_VERSION = "39"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -9696,7 +9696,7 @@ INTERNATIONAL_PAYMENT_METHODS = [
 SHOP_GUIDE_FOR_REPLY_BOT = f"""\
 Buying a subscription:
 1. Open the shop bot and press Start. Tap the "🟢 SHOP 🟢 (Click here to buy)" button at the bottom (or "🛒 Open Shop").
-2. In the shop, pick the category tab (iMD, Uptodate, Amboss, Telegram AI Bots, All Subscriptions) and tap + on the subscription to add it to the basket. Search is available too.
+2. In the shop, pick the category tab (iMD, Uptodate, Amboss, More Subscriptions, All Subscriptions) and tap + on the subscription to add it to the basket. Search is available too.
 3. Open the basket, fill in the account details asked for (for iMD: new account or renewal, plus the account fields), and apply credits or a discount code if they have one.
 4. Choose a payment method and submit. The shop bot then posts "Order #<number>" in its chat with the exact payment details for that method.
 5. Pay, then tap "✅ I've Paid" under that order message and upload the receipt screenshot (photo or PDF; several are fine for split payments), then confirm.
