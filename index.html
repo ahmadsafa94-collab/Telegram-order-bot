@@ -142,6 +142,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 @keyframes durGlow{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0)}50%{box-shadow:0 0 12px 3px rgba(239,68,68,.8)}}
 .dur-anchor{position:relative;flex-shrink:0;margin-left:8px}
 .dur-anchor .dur-btn{margin-left:0;min-width:118px;text-align:center}
+.dur-btn.one{cursor:default}
 .dur-menu{display:none;position:absolute;right:0;top:calc(100% + 4px);min-width:100%;width:max-content;z-index:30;
   background:var(--bg2);border:1.5px solid var(--teal2);border-radius:12px;overflow:hidden;
   box-shadow:0 8px 22px rgba(0,0,0,.4)}
@@ -1329,7 +1330,7 @@ function buildCatalog(){
       alphabetical.forEach(i=>sec.appendChild(makeRow({...i,sub:'1 Year'},true)));
     }
     if(cat.panel){
-      const lbl=document.createElement('div'); lbl.className='sl'; lbl.textContent='Tap Durations to choose how long'; sec.appendChild(lbl);
+      const lbl=document.createElement('div'); lbl.className='sl'; lbl.textContent='Tap the duration button to change how long'; sec.appendChild(lbl);
       const seen=new Set(), entries=[];
       cat.panel.forEach(p=>{
         if(p.group){ if(seen.has(p.group.key)) return; seen.add(p.group.key); entries.push({sort:groupTitle(p.group), g:p.group}); }
@@ -1346,8 +1347,16 @@ function buildCatalog(){
 
 // A single product row: with several durations a button that opens their
 // list, with one a plain row.
-function panelNode(p){
-  return p.variants.length>1 ? makePanelRow(p) : makeRow({id:p.variants[0].id,name:p.title,price:p.variants[0].price,sub:p.variants[0].label,e:'🗂'},true);
+function panelNode(p){ return makePanelRow(p); }
+// "6 Months" -> 6, "1 Year" -> 12, "2 Years" -> 24
+function durMonths(label){
+  const n=parseInt(label,10)||0;
+  return /year/i.test(label)?n*12:n;
+}
+// What a row starts on: 1 Year when the product has it, otherwise its longest duration.
+function defaultVariant(p){
+  return p.variants.find(v=>durMonths(v.label)===12)
+    || p.variants.reduce((a,v)=>durMonths(v.label)>durMonths(a.label)?v:a, p.variants[0]);
 }
 // A family of products (Access MhMedical, LWW Health Library ...): one row
 // that opens to the products inside it.
@@ -1369,25 +1378,24 @@ function makeGroupRow(g, members){
 function panelFromPrice(p){
   return Math.min(...p.variants.map(v=>hasCoworkerDiscount(v.id)?coworkerPrice(v.price,v.id):v.price));
 }
-// "3 durations · from $X" until one is chosen, then "6 Months · $X".
+// The price of the duration the row is on (the button beside it names the duration).
 function panelSubHtml(row,p){
-  const sel=row.dataset.selected&&p.variants.find(v=>v.id===row.dataset.selected);
-  if(sel){
-    const price=hasCoworkerDiscount(sel.id)?coworkerPrice(sel.price,sel.id):sel.price;
-    return `${escHtml(sel.label)} · <b class="panel-from">$${price}</b>`;
-  }
-  return `${p.variants.length} durations · <b class="panel-from">from $${panelFromPrice(p)}</b>`;
+  const sel=p.variants.find(v=>v.id===row.dataset.selected)||defaultVariant(p);
+  return `<b class="panel-from">${rowPriceHtml(sel.id, sel.price, true)}</b>`;
 }
 function panelOf(row){
   const cat=CATALOG.find(c=>c.id==='panel');
   return cat&&cat.panel.find(x=>x.name===row.dataset.panelName);
 }
 function makePanelRow(p){
-  const d=document.createElement('div'); d.className='solo'; d.dataset.panelName=p.name; d.dataset.selected='';
+  const d=document.createElement('div'); d.className='solo'; d.dataset.panelName=p.name;
+  const sel=defaultVariant(p); d.dataset.selected=sel.id;
   d.innerHTML=`<div style="font-size:21px">🗂</div>
     <div class="ri"><div class="rn">${escHtml(p.title)}</div><div class="rs">${panelSubHtml(d,p)}</div></div>
-    <div class="dur-anchor"><button class="dur-btn" onclick="toggleDurations(this)">⏱ Durations ▾</button><div class="dur-menu"></div></div>
-    <button class="add-btn" onclick="addPanelSelected(this)">+</button>`;
+    <div class="dur-anchor"><button class="dur-btn${p.variants.length>1?'':' one'}" onclick="toggleDurations(this)"></button><div class="dur-menu"></div></div>
+    <button class="add-btn" id="ab-${sel.id}" onclick="addPanelSelected(this)">${cart[sel.id]?'✓':'+'}</button>`;
+  const add=d.querySelector('.add-btn'); add.classList.toggle('in',!!cart[sel.id]);
+  d.querySelector('.dur-btn').textContent=durBtnText(d,false);
   return d;
 }
 function refreshPanelFromPrices(){
@@ -1402,7 +1410,9 @@ function refreshPanelFromPrices(){
 // else, closes the menu.
 function durBtnText(row,open){
   const sel=row.dataset.selected&&IMAP[row.dataset.selected];
-  return '⏱ '+(sel?sel.sub:'Durations')+(open?' ▴':' ▾');
+  const p=panelOf(row);
+  const several=p&&p.variants.length>1;
+  return '⏱ '+(sel?sel.sub:'Durations')+(several?(open?' ▴':' ▾'):'');
 }
 function closeAllDurations(except){
   document.querySelectorAll('.dur-anchor.open').forEach(a=>{
@@ -1414,6 +1424,7 @@ function closeAllDurations(except){
 function toggleDurations(btn){
   const anchor=btn.closest('.dur-anchor'); if(!anchor) return;
   const row=btn.closest('[data-panel-name]');
+  const only=panelOf(row); if(only&&only.variants.length<2) return;   // nothing else to choose
   closeAllDurations(anchor);
   const menu=anchor.querySelector('.dur-menu');
   if(!menu.childElementCount){
@@ -1635,10 +1646,10 @@ let cwEditId=null, cwEditKey=null, cwEditGroup=false;
 // THAT coworker pays; on the admin's own Shop link it changes the regular
 // price (and the title) for everyone.
 function openCwPriceEdit(id){
-  const row=document.querySelector('[data-item-id="'+id+'"]');
-  if(!row) return;
+  const row=document.querySelector('[data-item-id="'+id+'"]')||{dataset:{}};
+  if(!IMAP[id]&&!row.dataset.base) return;
   cwEditId=id; cwEditGroup=false; cwEditKey=null;
-  const base=parseFloat(row.dataset.base);
+  const base=IMAP[id]?IMAP[id].price:parseFloat(row.dataset.base);
   const info=document.getElementById('cwPriceInfo');
   const input=document.getElementById('cwPriceInput');
   document.getElementById('cwPriceTitle').textContent=(IMAP[id]&&IMAP[id].fullname)||row.dataset.name;
