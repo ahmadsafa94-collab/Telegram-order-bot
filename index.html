@@ -631,7 +631,7 @@ const CATALOG = [
   ]},
   // Catch-all — rendered on its own row of tabs below iMD/Uptodate/Amboss
   // (see buildCatalog), and its items are sorted alphabetically there too.
-  {id:'other',name:'All Subscriptions',emoji:'📚',single:[
+  {id:'other',name:'More Subscriptions',emoji:'📚',single:[
     {id:'dynamed',e:'💊',name:'Dynamed',price:20},
     {id:'dynamedex',e:'💊',name:'DynamedEx',price:30},
     {id:'bmj_best_practice',e:'📋',name:'BMJ Best Practice',price:20},
@@ -658,8 +658,8 @@ const CATALOG = [
 // Extra subscriptions from panel_catalog.json (generated block above): one
 // tab; a product with several durations is one row whose button opens the
 // list of durations to pick from.
-CATALOG.splice(CATALOG.length-1, 0, {
-  id:'panel', name:'More Subscriptions', emoji:'🗂', row2:true,
+CATALOG.push({
+  id:'panel', name:'All Subscriptions', emoji:'🗂', row2:true,
   panel: PANEL_CATALOG.map(([name, vs]) => ({name, variants: vs.map(([id,label,price]) => ({id,label,price}))})),
 });
 
@@ -689,6 +689,10 @@ const REMOVED_IDS = new Set((SUBS_DATA && SUBS_DATA.rm) || []);
     if (empty && cat.id !== 'other') CATALOG.splice(c, 1);
   }
 })();
+
+// Tabs switched off in the Mini App Editor: still defined above, just not shown.
+const HIDDEN_TABS = new Set(['ai_bots']);
+for (let c = CATALOG.length - 1; c >= 0; c--) if (HIDDEN_TABS.has(CATALOG[c].id)) CATALOG.splice(c, 1);
 
 const IMAP = {};
 // Some item names already lead with their category (e.g. "Uptodate Online",
@@ -1239,7 +1243,7 @@ function goPayment(){if(!validateDetails())return;buildPaymentPage();showPage('p
 // ── Catalog build ─────────────────────────────────────────────────────
 function buildCatalog(){
   // Structured categories (iMD, Uptodate, Amboss) get the first row of
-  // tabs; the flat catch-all (All Subscriptions) gets its own row below.
+  // tabs; the flat catch-all (More Subscriptions) gets its own row below.
   const tabsEl=document.getElementById('tabs');
   const tabsMoreEl=document.getElementById('tabsMore');
   const secEl=document.getElementById('catSec');
@@ -1686,7 +1690,7 @@ function performSearch(raw){
   countLbl.textContent=`${matches.length} result${matches.length>1?'s':''}`;
   resEl.appendChild(countLbl);
 
-  // Grouped by category (Uptodate, iMD, Amboss, All Subscriptions) in the
+  // Grouped by category (Uptodate, iMD, Amboss, More Subscriptions) in the
   // same order as the tabs, with that category's name as a header — so a
   // search spanning several categories still reads like the real catalog.
   CATALOG.forEach(cat=>{
@@ -2248,7 +2252,7 @@ if (SUBS_DATA && SUBS_DATA.c && SUBS_DATA.c.length) {
     moreSec.appendChild(lbl);
     SUBS_DATA.c.forEach(([itemId, name, price]) => {
       // Register in IMAP with the actual bot item_id so orders work correctly
-      IMAP[itemId] = {id: itemId, name, price, sub: '', catId: 'other', catName: 'All Subscriptions', fullname: name};
+      IMAP[itemId] = {id: itemId, name, price, sub: '', catId: 'other', catName: 'More Subscriptions', fullname: name};
     });
     [...SUBS_DATA.c].sort((a, b) => a[1].localeCompare(b[1])).forEach(([itemId, name, price]) => {
       const row = makeRow({id: itemId, name, price, sub: '', e: '📦'}, true);
