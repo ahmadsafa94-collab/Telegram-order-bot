@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "47"
+MINI_APP_VERSION = "48"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -281,6 +281,8 @@ def _load_panel_catalog():
         if product.get("group"):
             PANEL_GROUP_KEYS.add(product["group"]["key"])
         for v in product.get("variants", []):
+            if v.get("existing"):
+                continue  # an item the bot already sells, listed here as well: leave it as it is
             MENU[v["id"]] = (f"{product['name']} - {v['label']}", float(v["price"]))
             PANEL_ITEM_IDS.add(v["id"])
             if v.get("panel_price") is not None:

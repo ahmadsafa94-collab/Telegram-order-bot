@@ -313,6 +313,23 @@
    }
   },
   {
+   "name": "AccessMedicine",
+   "variants": [
+    {
+     "id": "accessmedicine",
+     "months": 12,
+     "label": "1 Year",
+     "price": 20.0,
+     "existing": true
+    }
+   ],
+   "group": {
+    "key": "grp:access",
+    "name": "Access MhMedical",
+    "short": "Medicine"
+   }
+  },
+  {
    "name": "AccessWorldmed",
    "variants": [
     {
