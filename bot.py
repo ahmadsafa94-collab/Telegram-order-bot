@@ -99,7 +99,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "45"
+MINI_APP_VERSION = "47"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -10645,7 +10645,91 @@ async def http_shop_edits(request):
     # it is never part of a customer's Shop link.
     costs = {i: c for i, c in db_get_item_costs().items() if i in MENU}
     return web.json_response(
-        {"ok": True, "po": price_overrides, "rm": removed_ids, "nm": dict(SHOP_TITLES), "co": costs}, headers=headers)
+        {"ok": True, "po": price_overrides, "rm": removed_ids, "nm": dict(SHOP_TITLES), "co": costs,
+         "c": _mini_app_custom_items()}, headers=headers)
+
+
+def _admin_shop_request(request):
+    """(user_id, error_response): the verified admin behind a Shop editor call, or the
+    401/403 to send back."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return None, web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    if user_id != ADMIN_CHAT_ID:
+        return None, web.json_response({"ok": False, "error": "Admin only"}, status=403, headers=headers)
+    return user_id, None
+
+
+async def http_set_items_removed(request):
+    """The 🗑 in the Shop's ✏️ editor: takes subscriptions (every duration of a
+    product, or one) out of the Shop and the bot's menus, exactly like
+    📦 Manage Stock → Remove, or puts them back (the Undo). Past orders are
+    unaffected. Admin's own verified account only."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        data = await request.json()
+        ids = data["item_ids"]
+        removed = data["removed"]
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if not isinstance(removed, bool) or not isinstance(ids, list) or not ids or len(ids) > 60 \
+            or any(not isinstance(i, str) or i not in MENU for i in ids):
+        return web.json_response({"ok": False, "error": "Unknown subscription."}, status=400, headers=headers)
+    for item_id in dict.fromkeys(ids):
+        db_set_item_removed(item_id, removed)
+        ITEM_OVERRIDES[item_id] = ITEM_OVERRIDES.get(item_id, (None, None, None, False))[:3] + (removed,)
+    return web.json_response({"ok": True, "item_ids": list(dict.fromkeys(ids)), "removed": removed}, headers=headers)
+
+
+async def http_add_item(request):
+    """The ➕ in the admin Shop: adds a subscription to the list — the same as the bot's
+    ➕ Add New Subscription (name, duration, price), plus an optional cost for the
+    sales/profit report. It is saved at once and offered to customers as soon as
+    their Shop link is refreshed. Admin's own verified account only."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        data = await request.json()
+        name, duration, price = data["name"], data["duration"], data["price"]
+        cost = data.get("cost")
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+
+    def clean(text, limit):
+        if not isinstance(text, str):
+            return ""
+        text = re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f<>]", " ", text)).strip()
+        return text if 0 < len(text) <= limit else ""
+
+    name, duration = clean(name, 80), clean(duration, 30)
+    if not name or not duration:
+        return web.json_response({"ok": False, "error": "Give it a name and a duration."}, status=400, headers=headers)
+    if isinstance(price, bool) or not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0 or price > 10000:
+        return web.json_response({"ok": False, "error": "Enter a price above 0."}, status=400, headers=headers)
+    if cost is not None and (isinstance(cost, bool) or not isinstance(cost, (int, float)) or not math.isfinite(cost)
+                             or cost < 0 or cost > 10000):
+        return web.json_response({"ok": False, "error": "Enter a cost of 0 or more."}, status=400, headers=headers)
+    price = round(float(price), 2)
+    full_name = f"{name} - {duration}"
+    item_id = generate_item_id(full_name)
+    db_add_custom_item(item_id, full_name, price)
+    MENU[item_id] = (full_name, price)
+    BASE_PRICES[item_id] = price
+    if item_id not in SINGLE_MAIN_ITEMS:
+        SINGLE_MAIN_ITEMS.append(item_id)
+    if cost is not None:
+        db_set_item_cost(item_id, round(float(cost), 2))
+    return web.json_response({"ok": True, "item": [item_id, full_name, price],
+                              "cost": None if cost is None else round(float(cost), 2)}, headers=headers)
 
 
 async def http_set_item_cost(request):
@@ -11046,6 +11130,10 @@ async def start_api_server(application):
     api_app.router.add_post("/api/set_item_price", http_set_item_price)
     api_app.router.add_options("/api/set_item_price", http_set_coworker_price_options)
     api_app.router.add_get("/api/shop_edits", http_shop_edits)
+    api_app.router.add_post("/api/set_items_removed", http_set_items_removed)
+    api_app.router.add_options("/api/set_items_removed", http_set_coworker_price_options)
+    api_app.router.add_post("/api/add_item", http_add_item)
+    api_app.router.add_options("/api/add_item", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_item_cost", http_set_item_cost)
     api_app.router.add_options("/api/set_item_cost", http_set_coworker_price_options)
     api_app.router.add_post("/api/set_item_title", http_set_item_title)
