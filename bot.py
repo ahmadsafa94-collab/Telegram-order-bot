@@ -102,7 +102,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "62"
+MINI_APP_VERSION = "63"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -3762,12 +3762,10 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
 
 
 def _coworker_cost_pricing_data(coworker_id: int) -> dict:
-    """{cwm: margin %, cwk: {item: cost}} for a coworker priced 'after cost' (so the Mini App can show the
-    same prices the server charges); empty for everyone else. Only products with a cost set are sent."""
-    cost_pct = db_get_coworker_cost_pct(coworker_id)
-    if cost_pct is None:
-        return {}
-    return {"cwm": cost_pct, "cwk": {i: c for i, c in db_get_item_costs().items() if c > 0 and i in PANEL_TAB_ITEM_IDS}}
+    """{cwa: 1} for a coworker priced 'after cost' on the All Subscriptions tab — just a flag. The prices
+    themselves come from /api/my_prices (they are far too many for the link, and the owner's costs and the
+    percentage must never reach a coworker's device)."""
+    return {"cwa": 1} if db_get_coworker_cost_pct(coworker_id) is not None else {}
 
 
 def main_menu_keyboard(user_id: int = 0):
@@ -12153,6 +12151,36 @@ async def http_set_item_title(request):
     return web.json_response({"ok": True, "item_id": key, "title": title}, headers=headers)
 
 
+async def http_my_prices(request):
+    """The prices a coworker pays on the All Subscriptions tab when they are priced 'after cost'
+    ({item_id: price}); empty otherwise. The admin can ask for a coworker's with ?previewcw=<id> and
+    additionally gets the percentage itself."""
+    from aiohttp import web
+    headers = _imd_search_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    is_admin = user_id == ADMIN_CHAT_ID
+    cid = None
+    preview = request.query.get("previewcw", "")
+    if preview and is_admin:
+        cid = int(preview) if preview.isdigit() else None
+        if cid is None or not db_get_coworker(cid):
+            return web.json_response({"ok": False, "error": "That coworker no longer exists."}, status=404, headers=headers)
+    else:
+        login = db_get_user_coworker(user_id)
+        cid = login[0] if login else None
+    out = {"ok": True, "prices": {}}
+    cost_pct = db_get_coworker_cost_pct(cid) if cid else None
+    if cost_pct is not None:
+        out["prices"] = {i: _coworker_unit_price_by_id(i, cid) for i in PANEL_TAB_ITEM_IDS if i in MENU}
+        if is_admin and preview:
+            out["cost_pct"] = cost_pct
+    elif is_admin and preview:
+        out["cost_pct"] = None
+    return web.json_response(out, headers=headers)
+
+
 async def http_set_coworker_price(request):
     """Lets the admin edit a coworker's price for one subscription from the
     Shop preview (the ✏️ beside each price). Strictly the admin's own
@@ -12496,6 +12524,7 @@ async def start_api_server(application):
     api_app.router.add_post("/api/set_item_price", http_set_item_price)
     api_app.router.add_options("/api/set_item_price", http_set_coworker_price_options)
     api_app.router.add_get("/api/shop_edits", http_shop_edits)
+    api_app.router.add_get("/api/my_prices", http_my_prices)
     api_app.router.add_post("/api/set_items_removed", http_set_items_removed)
     api_app.router.add_options("/api/set_items_removed", http_set_coworker_price_options)
     api_app.router.add_post("/api/add_item", http_add_item)

@@ -921,28 +921,33 @@ const COWORKER_PCT = (SUBS_DATA && SUBS_DATA.cw) || 0;
 // from the admin's Coworkers panel instead of the percentage above, since
 // iMD's resale margin doesn't scale the same way a % discount does.
 const COWORKER_ITEM_PRICES = (SUBS_DATA && SUBS_DATA.cwp) || {};
-// "% off after cost": the owner's cost stays and the coworker gets this % off what is left (retail − cost).
-// cwm = that %, cwk = cost per product (only those with a cost). Same rule as bot.py's price_after_cost.
-// It only applies to the All Subscriptions tab; More Subscriptions, iMD, Uptodate … keep the regular %.
-let COWORKER_MARGIN = (SUBS_DATA && SUBS_DATA.cwm!=null) ? Number(SUBS_DATA.cwm) : null;
-const COWORKER_COSTS = (SUBS_DATA && SUBS_DATA.cwk) || {};
-let _panelIds=null;
-function isPanelItem(id){
-  if(!_panelIds) _panelIds=new Set(PANEL_CATALOG.flatMap(p=>p[1].map(v=>v[0])));
-  return _panelIds.has(id);
-}
-function priceAfterCost(retail, cost, pct){
-  const c=Math.max(0,Math.min(Number(cost)||0,retail));
-  return Math.round((c+(retail-c)*(1-pct/100))*100)/100;
-}
+// "% off after cost" for the All Subscriptions tab: the server works the prices out (the owner's costs and the
+// percentage never reach a coworker's device) and /api/my_prices hands over the finished prices. The link only
+// carries a flag (cwa) — the prices are far too many for it.
+let COWORKER_MARGIN = null;               // admin preview only: the % being previewed
+const COWORKER_PANEL_PRICES = {};
 function hasCoworkerDiscount(itemId){
-  return (COWORKER_MARGIN!=null && isPanelItem(itemId)) || COWORKER_PCT>0 || (itemId && COWORKER_ITEM_PRICES[itemId]!=null);
+  return COWORKER_PCT>0 || (itemId && (COWORKER_ITEM_PRICES[itemId]!=null || COWORKER_PANEL_PRICES[itemId]!=null));
 }
 function coworkerPrice(price, itemId){
   if(itemId && COWORKER_ITEM_PRICES[itemId]!=null) return COWORKER_ITEM_PRICES[itemId];
-  if(COWORKER_MARGIN!=null && isPanelItem(itemId)) return priceAfterCost(price, COWORKER_COSTS[itemId]||0, COWORKER_MARGIN);
+  if(itemId && COWORKER_PANEL_PRICES[itemId]!=null) return COWORKER_PANEL_PRICES[itemId];
   return COWORKER_PCT>0 ? Math.round(price * (1 - COWORKER_PCT / 100) * 100) / 100 : price;
 }
+async function loadCoworkerPanelPrices(){
+  if(!API_BASE||!AUTH_UID||!AUTH_TOK) return;
+  try{
+    const resp=await fetch(withAuth('/api/my_prices')), d=await resp.json().catch(()=>({}));
+    if(!d.ok) return;
+    Object.keys(COWORKER_PANEL_PRICES).forEach(k=>delete COWORKER_PANEL_PRICES[k]);
+    Object.assign(COWORKER_PANEL_PRICES,d.prices||{});
+    if('cost_pct' in d){ COWORKER_MARGIN=d.cost_pct; try{ setCwMarginBtn(); }catch(e){} }
+    document.querySelectorAll('[data-item-id]').forEach(row=>{ const rp=row.querySelector('.rp'); if(rp) rp.innerHTML=rowPriceHtml(row.dataset.itemId, parseFloat(row.dataset.base), row.classList.contains('dur-opt')); });
+    try{ refreshPanelFromPrices(); }catch(e){}
+    try{ syncBasket(); renderBasket(); }catch(e){}
+  }catch(e){}
+}
+if(IS_COWORKER && ((SUBS_DATA&&SUBS_DATA.cwa) || PREVIEW_CW)) setTimeout(loadCoworkerPanelPrices,0);
 // Out-of-stock item ids — read once here so makeRow() can render every
 // row (catalog tabs, search results, "Additional Subscriptions") with
 // the correct disabled/✕ state from the moment it's created, not just
@@ -2987,13 +2992,8 @@ async function saveCwMargin(clear){
   msg.style.color='var(--hint)'; msg.textContent='Saving…';
   try{
     await adminPost('/api/admin_coworker_action',{action:'update',id:Number(PREVIEW_CW),cost_pct:v});
-    if(v!=null){   // fetch the costs so the tiles show the same price the server will charge
-      const d=await apiGet('/api/admin_coworker_prices?id='+PREVIEW_CW);
-      d.items.forEach(i=>{ if(i.cost>0) COWORKER_COSTS[i.id]=i.cost; else delete COWORKER_COSTS[i.id]; });
-    }
     COWORKER_MARGIN=v; setCwMarginBtn();
-    document.querySelectorAll('[data-item-id]').forEach(row=>{ const rp=row.querySelector('.rp'); if(rp) rp.innerHTML=rowPriceHtml(row.dataset.itemId, parseFloat(row.dataset.base), row.classList.contains('dur-opt')); });
-    refreshPanelFromPrices(); try{ syncBasket(); renderBasket(); }catch(e){}
+    await loadCoworkerPanelPrices();      // the server works out the new prices; the tiles redraw from them
     closeCwMargin(); showToast(v!=null?CW_NAME+': All Subscriptions now '+v+'% off after cost':'Back to the regular discount');
   }catch(e){ bad(e.message); }
 }
