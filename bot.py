@@ -102,7 +102,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "63"
+MINI_APP_VERSION = "64"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -1520,6 +1520,44 @@ def db_delete_order(order_id: int):
     deleted = cur.rowcount
     conn.close()
     return bool(deleted)
+
+
+def db_remove_pending_unit(fulfilment_id: int):
+    """Removes one pending unit for good. If it was the order's last unit the whole order goes with it (so it
+    also leaves the admin Shop, the coworker's statistics and the sales figures); otherwise the order loses
+    that item and its share of the total. Returns None if there was no such unit, else
+    {"order_id", "order_deleted"}."""
+    row = db_get_fulfilment(fulfilment_id)
+    if not row:
+        return None
+    _, order_id, user_id, item_id, unit_no, state, info_json = row
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM fulfilment WHERE id = ?", (fulfilment_id,))
+    remaining = conn.execute("SELECT COUNT(*) FROM fulfilment WHERE order_id = ?", (order_id,)).fetchone()[0]
+    order = conn.execute("SELECT items_json, total, coworker_id FROM orders WHERE id = ?", (order_id,)).fetchone()
+    conn.commit()
+    conn.close()
+    if remaining == 0:
+        db_delete_order(order_id)
+        return {"order_id": order_id, "order_deleted": True}
+    if order:
+        try:
+            items = json.loads(order[0])
+        except (TypeError, ValueError):
+            items = {}
+        if items.get(item_id):
+            price = lambda i: (_coworker_unit_price_by_id(i, order[2]) if order[2] else MENU.get(i, (i, 0))[1])
+            worth = sum(price(i) * q for i, q in items.items())
+            share = price(item_id) / worth if worth > 0 else 0
+            items[item_id] -= 1
+            if items[item_id] <= 0:
+                del items[item_id]
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE orders SET items_json = ?, total = ? WHERE id = ?",
+                         (json.dumps(items), round(float(order[1] or 0) * (1 - share), 2), order_id))
+            conn.commit()
+            conn.close()
+    return {"order_id": order_id, "order_deleted": False}
 
 
 def db_order_undelivered_items(order_id: int):
@@ -11210,6 +11248,9 @@ def db_admin_pending() -> list:
         return []
     via = _order_via(r[1] for r in rows)
     conn = sqlite3.connect(DB_PATH)
+    done = dict(conn.execute(
+        "SELECT order_id, COUNT(*) FROM fulfilment WHERE state = 'delivered' AND order_id IN (%s) GROUP BY order_id"
+        % ",".join("?" * len({r[1] for r in rows})), sorted({r[1] for r in rows})).fetchall())
     info = dict(conn.execute(
         "SELECT id, info_json FROM fulfilment WHERE id IN (%s)" % ",".join("?" * len(rows)), [r[0] for r in rows]).fetchall())
     conn.close()
@@ -11220,7 +11261,7 @@ def db_admin_pending() -> list:
             "user_id": uid, "customer": f"@{uname}" if uname else str(uid), "state": state, "date": (created or "")[:10],
             "info": format_fulfilment_info(iid, info.get(fid)) if info.get(fid) else "",
             "fields": [{"label": l, "value": v} for l, v in fulfilment_info_fields(info.get(fid))],
-            "imd": iid in IMD_TRIGGER_ITEMS, "template": delivery_template_kind(iid), "via": via.get(oid),
+            "imd": iid in IMD_TRIGGER_ITEMS, "template": delivery_template_kind(iid), "via": via.get(oid), "order_done": done.get(oid, 0),
             "title": delivery_title_duration(MENU.get(iid, (iid,))[0])[0],
             "duration": delivery_title_duration(MENU.get(iid, (iid,))[0])[1],
         })
@@ -11316,6 +11357,37 @@ class _HttpCbUpdate:
         self.effective_user = types.SimpleNamespace(id=user_id)
         self.effective_chat = types.SimpleNamespace(id=user_id)
         self.message = None
+
+
+async def http_admin_delete_order(request):
+    """Deletes an order completely — its units, deliveries and the order itself — so it leaves the admin Shop,
+    the coworker's statistics, the sales figures and the bot's own lists. The customer is not told."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        order_id = (await request.json())["order_id"]
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if isinstance(order_id, bool) or not isinstance(order_id, int):
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if not db_get_order(order_id):
+        return web.json_response({"ok": False, "error": "That order no longer exists."}, status=404, headers=headers)
+    conn = sqlite3.connect(DB_PATH)
+    fids = {r[0] for r in conn.execute("SELECT id FROM fulfilment WHERE order_id = ?", (order_id,))}
+    dids = {r[0] for r in conn.execute("SELECT id FROM deliveries WHERE order_id = ?", (order_id,))}
+    conn.close()
+    db_delete_order(order_id)
+    # if the admin was in the middle of typing details for one of its units, drop that prompt
+    ud = request.app["application"].user_data[ADMIN_CHAT_ID]
+    if ud.get("awaiting_credentials_fulfilment") in fids:
+        ud.pop("awaiting_credentials_fulfilment", None)
+    for key in ("awaiting_edit_delivery", "awaiting_edit_delivery_notify"):
+        if ud.get(key) in dids:
+            ud.pop(key, None)
+    return web.json_response({"ok": True, "note": f"Order #{order_id} deleted."}, headers=headers)
 
 
 async def http_admin_chat_action(request):
@@ -12546,6 +12618,8 @@ async def start_api_server(application):
     api_app.router.add_options("/api/admin_deliver", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_chat_action", http_admin_chat_action)
     api_app.router.add_post("/api/admin_edit_delivery", http_admin_edit_delivery)
+    api_app.router.add_post("/api/admin_delete_order", http_admin_delete_order)
+    api_app.router.add_options("/api/admin_delete_order", http_set_coworker_price_options)
     api_app.router.add_options("/api/admin_edit_delivery", http_set_coworker_price_options)
     api_app.router.add_get("/api/admin_counts", http_admin_counts)
     api_app.router.add_get("/api/admin_tickets", http_admin_tickets)
@@ -14640,11 +14714,13 @@ async def pending_delete_execute(update: Update, context: ContextTypes.DEFAULT_T
     _, order_id, user_id, item_id, unit_no, state, info_json = row
     name = MENU.get(item_id, (item_id,))[0]
 
-    db_delete_fulfilment(fulfilment_id)
+    result = db_remove_pending_unit(fulfilment_id)
 
     back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Pending Orders", callback_data="apend_back")]])
     await query.edit_message_text(
-        f"🗑 Deleted: {name}{f' #{unit_no}' if unit_no > 1 else ''} — Order #{order_id}",
+        f"🗑 Deleted: {name}{f' #{unit_no}' if unit_no > 1 else ''} — Order #{order_id}"
+        + ("\nIt was the order's last item, so the whole order is gone (also from the statistics)."
+           if result and result["order_deleted"] else ""),
         reply_markup=back,
     )
 
