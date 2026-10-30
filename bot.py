@@ -102,7 +102,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "60"
+MINI_APP_VERSION = "61"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -940,6 +940,9 @@ def db_init():
         # {item_id: cost per account} at the moment the order was paid, so a
         # later cost change never rewrites past days in the sales Excel.
         ("costs_json", "TEXT"),
+        # Postpaid coworkers order without paying: on_credit marks such an order, settled_at is when
+        # the owner marked it paid (NULL = still owed).
+        ("on_credit", "INTEGER DEFAULT 0"), ("settled_at", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE orders ADD COLUMN {column} {coltype}")
@@ -1233,7 +1236,8 @@ def db_init():
     # model there. NULL means "no override set — fall back to the regular
     # percentage discount", so this is backward compatible with coworkers
     # created before this existed.
-    for column, coltype in [("imd_6m_price", "REAL"), ("imd_1y_price", "REAL"), ("imd_2y_price", "REAL")]:
+    for column, coltype in [("imd_6m_price", "REAL"), ("imd_1y_price", "REAL"), ("imd_2y_price", "REAL"),
+                            ("payment_mode", "TEXT NOT NULL DEFAULT 'prepaid'")]:
         try:
             conn.execute(f"ALTER TABLE coworkers ADD COLUMN {column} {coltype}")
         except sqlite3.OperationalError:
@@ -1608,14 +1612,42 @@ def db_user_delivered_units(user_id: int):
     return rows
 
 
+# An order a postpaid coworker placed on credit is not income until the owner marks it paid.
+NOT_OWED_SQL = "NOT (COALESCE(on_credit, 0) = 1 AND settled_at IS NULL)"
+
+
+def db_get_coworker_mode(coworker_id: int) -> str:
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT payment_mode FROM coworkers WHERE id = ?", (coworker_id,)).fetchone()
+    conn.close()
+    return row[0] if row and row[0] in ("prepaid", "postpaid") else "prepaid"
+
+
+def db_set_coworker_mode(coworker_id: int, mode: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE coworkers SET payment_mode = ? WHERE id = ?", (mode, coworker_id))
+    conn.commit()
+    conn.close()
+
+
+def db_coworker_unpaid_count(coworker_id: int) -> int:
+    """Orders this coworker placed on credit that have not been marked paid."""
+    conn = sqlite3.connect(DB_PATH)
+    n = conn.execute(
+        "SELECT COUNT(*) FROM orders WHERE coworker_id = ? AND on_credit = 1 AND settled_at IS NULL "
+        "AND status NOT IN ('cancelled', 'rejected')", (coworker_id,)).fetchone()[0]
+    conn.close()
+    return n
+
+
 def db_sales_since(since_iso: str):
     """Units sold per product since a timestamp, counting only orders that
     were actually paid for. Returns (list of (item_id, qty), revenue)."""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
         "SELECT items_json, total FROM orders "
-        "WHERE created_at >= ? AND status NOT IN ('awaiting_payment', 'awaiting_receipt', "
-        "'awaiting_confirmation', 'cancelled', 'rejected')",
+        "WHERE COALESCE(settled_at, created_at) >= ? AND status NOT IN ('awaiting_payment', 'awaiting_receipt', "
+        f"'awaiting_confirmation', 'cancelled', 'rejected') AND {NOT_OWED_SQL}",
         (since_iso,),
     ).fetchall()
     conn.close()
@@ -1640,8 +1672,8 @@ def db_sales_by_method_since(since_iso: str):
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
         "SELECT COALESCE(payment_method, 'Unknown'), SUM(total), COUNT(*) FROM orders "
-        "WHERE created_at >= ? AND status NOT IN ('awaiting_payment', 'awaiting_receipt', "
-        "'awaiting_confirmation', 'cancelled', 'rejected') "
+        "WHERE COALESCE(settled_at, created_at) >= ? AND status NOT IN ('awaiting_payment', 'awaiting_receipt', "
+        f"'awaiting_confirmation', 'cancelled', 'rejected') AND {NOT_OWED_SQL} "
         "GROUP BY COALESCE(payment_method, 'Unknown') ORDER BY SUM(total) DESC",
         (since_iso,),
     ).fetchall()
@@ -1675,9 +1707,9 @@ def db_daily_sales(until_local_day):
     the day it was paid. Returns (days, products_sold) for sales_excel."""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT items_json, total, COALESCE(paid_at, created_at), costs_json FROM orders "
+        "SELECT items_json, total, COALESCE(settled_at, paid_at, created_at), costs_json FROM orders "
         "WHERE status NOT IN ('awaiting_payment', 'awaiting_receipt', "
-        "'awaiting_confirmation', 'cancelled', 'rejected')"
+        f"'awaiting_confirmation', 'cancelled', 'rejected') AND {NOT_OWED_SQL}"
     ).fetchall()
     conn.close()
 
@@ -3666,6 +3698,7 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
             # Mini App uses this to show the My Orders button only to
             # coworkers, never regular customers.
             "cwid": coworker_login[0] if coworker_login else 0,
+            **({"cwpost": 1} if coworker_login and db_get_coworker_mode(coworker_login[0]) == "postpaid" else {}),
             "an": db_unseen_announcement_count(user_id),
             **({"dx": delivered_more} if delivered_more else {}),
         }
@@ -7125,6 +7158,7 @@ PAYMENT_METHOD_ICONS = {
     "Credits (Full)": "🎁",
     "Discount Code (Full)": "🏷️",
     "Mini App": "📱",
+    "Postpaid": "📒",
     "Unknown": "❔",
 }
 
@@ -10041,7 +10075,7 @@ async def http_sales_export(request):
     rows = conn.execute(
         "SELECT id, user_id, username, items_json, total, status, created_at, paid_at, delivered_at, "
         "payment_method, discount_code, credits_applied FROM orders "
-        "WHERE status IN ('paid', 'delivered') AND COALESCE(paid_at, created_at) >= ? ORDER BY id",
+        f"WHERE status IN ('paid', 'delivered') AND {NOT_OWED_SQL} AND COALESCE(settled_at, paid_at, created_at) >= ? ORDER BY id",
         (since,),
     ).fetchall()
     conn.close()
@@ -11060,11 +11094,16 @@ def db_admin_delivered(query: str = "", offset: int = 0, limit: int = ADMIN_PAGE
         })
     items.reverse()
     q = (query or "").strip().lower()
+    # who each order came through (shown as a tag, and searchable by coworker name)
+    via = _order_via(i["order_id"] for i in items)
+    for i in items:
+        i["via"] = via.get(i["order_id"])
     if q.startswith("#") and q[1:].isdigit():          # "#12" is order 12, nothing else
         items = [i for i in items if i["order_id"] == int(q[1:])]
     elif q:
         items = [i for i in items if q in str(i["order_id"]) or q in i["name"].lower() or q in i["customer"].lower()
-                 or q == str(i["user_id"]) or q in i["text"].lower()]
+                 or q == str(i["user_id"]) or q in i["text"].lower()
+                 or (i["via"] and q in i["via"]["name"].lower())]
     return items[offset:offset + limit], len(items)
 
 
@@ -11095,11 +11134,33 @@ def delivery_title_duration(name: str):
     return re.sub(r"\s{2,}", " ", title), duration
 
 
+def _order_via(order_ids) -> dict:
+    """{order_id: None | {id, name, mode, pay}} — who an order came through ('pay' is unpaid/paid for
+    postpaid coworkers' orders)."""
+    ids = sorted(set(order_ids))
+    if not ids:
+        return {}
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT o.id, o.coworker_id, o.on_credit, o.settled_at, c.name, c.payment_mode FROM orders o "
+        "LEFT JOIN coworkers c ON c.id = o.coworker_id WHERE o.id IN (%s)" % ",".join("?" * len(ids)), ids).fetchall()
+    conn.close()
+    out = {}
+    for oid, cid, on_credit, settled, name, mode in rows:
+        if not cid:
+            out[oid] = None
+            continue
+        out[oid] = {"id": cid, "name": name or "(deleted coworker)", "mode": mode or "prepaid",
+                    "pay": (("paid" if settled else "unpaid") if on_credit else None)}
+    return out
+
+
 def db_admin_pending() -> list:
     """Paid orders with units still to deliver, with what the customer filled in."""
     rows = db_all_pending_items()
     if not rows:
         return []
+    via = _order_via(r[1] for r in rows)
     conn = sqlite3.connect(DB_PATH)
     info = dict(conn.execute(
         "SELECT id, info_json FROM fulfilment WHERE id IN (%s)" % ",".join("?" * len(rows)), [r[0] for r in rows]).fetchall())
@@ -11111,7 +11172,7 @@ def db_admin_pending() -> list:
             "user_id": uid, "customer": f"@{uname}" if uname else str(uid), "state": state, "date": (created or "")[:10],
             "info": format_fulfilment_info(iid, info.get(fid)) if info.get(fid) else "",
             "fields": [{"label": l, "value": v} for l, v in fulfilment_info_fields(info.get(fid))],
-            "imd": iid in IMD_TRIGGER_ITEMS, "template": delivery_template_kind(iid),
+            "imd": iid in IMD_TRIGGER_ITEMS, "template": delivery_template_kind(iid), "via": via.get(oid),
             "title": delivery_title_duration(MENU.get(iid, (iid,))[0])[0],
             "duration": delivery_title_duration(MENU.get(iid, (iid,))[0])[1],
         })
@@ -11473,7 +11534,8 @@ def _coworker_rows() -> list:
         orders, revenue, pending = db_coworker_stats(cid)
         out.append({"id": cid, "name": name, "username": username, "pct": pct,
                     "orders": orders, "revenue": round(revenue, 2), "pending": pending,
-                    "date": (created or "")[:10]})
+                    "date": (created or "")[:10], "mode": db_get_coworker_mode(cid),
+                    "unpaid": db_coworker_unpaid_count(cid)})
     return out
 
 
@@ -11527,6 +11589,106 @@ def db_coworker_period_stats(coworker_id: int, since_iso: str) -> dict:
             "products": [{"name": MENU.get(i, (i,))[0], "qty": q} for i, q in sorted(products.items(), key=lambda kv: -kv[1])]}
 
 
+def _ledger_orders(coworker_id: int):
+    """Orders this coworker placed on credit, newest first, each with whether every unit is delivered."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, items_json, total, created_at, settled_at FROM orders WHERE coworker_id = ? AND on_credit = 1 "
+        "AND status NOT IN ('cancelled', 'rejected', 'awaiting_payment', 'awaiting_receipt', 'awaiting_confirmation') "
+        "ORDER BY id DESC", (coworker_id,)).fetchall()
+    undelivered = {r[0] for r in conn.execute(
+        "SELECT DISTINCT f.order_id FROM fulfilment f JOIN orders o ON o.id = f.order_id "
+        "WHERE o.coworker_id = ? AND o.on_credit = 1 AND f.state != 'delivered'", (coworker_id,)).fetchall()}
+    has_units = {r[0] for r in conn.execute(
+        "SELECT DISTINCT f.order_id FROM fulfilment f JOIN orders o ON o.id = f.order_id "
+        "WHERE o.coworker_id = ? AND o.on_credit = 1", (coworker_id,)).fetchall()}
+    conn.close()
+    out = []
+    for oid, items_json, total, created, settled in rows:
+        try:
+            items = json.loads(items_json) or {}
+        except (TypeError, ValueError):
+            items = {}
+        out.append({"id": oid, "items": {i: int(q) for i, q in items.items()}, "total": round(float(total or 0), 2),
+                    "date": (created or "")[:10], "settled": settled, "delivered": oid in has_units and oid not in undelivered})
+    return out
+
+
+def _unpaid_report(name: str, billable: list) -> str:
+    counts = {}
+    for o in billable:
+        for i, q in o["items"].items():
+            counts[i] = counts.get(i, 0) + q
+    total = round(sum(o["total"] for o in billable), 2)
+    lines = [f"📒 Unpaid report — {name}", ""]
+    if not billable:
+        return "\n".join(lines + ["Nothing to pay — all delivered orders are settled."])
+    for i, q in sorted(counts.items(), key=lambda kv: (-kv[1], MENU.get(kv[0], (kv[0],))[0])):
+        lines.append(f"{q} × {MENU.get(i, (i,))[0]}")
+    lines += ["", f"Total accounts: {sum(counts.values())}", f"Orders: {len(billable)}", f"Total to be paid: {CURRENCY}{total:.2f}"]
+    return "\n".join(lines)
+
+
+async def http_admin_coworker_ledger(request):
+    """?id=<coworker>&state=unpaid|paid — a postpaid coworker's orders. Only fully delivered orders can be
+    billed (they make up the report and 'mark all as paid'); orders still being delivered are listed apart."""
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        cid = int(request.query.get("id", ""))
+    except ValueError:
+        cid = None
+    coworker = db_get_coworker(cid) if cid is not None else None
+    if not coworker:
+        return _admin_bad("That coworker no longer exists.", 404)
+    state = "paid" if request.query.get("state") == "paid" else "unpaid"
+    orders = _ledger_orders(cid)
+    names = lambda o: ", ".join(f"{q} × {MENU.get(i, (i,))[0]}" for i, q in o["items"].items())[:160]
+    row = lambda o: {"id": o["id"], "date": o["date"], "total": o["total"], "items": names(o), "delivered": o["delivered"],
+                     "settled_date": (o["settled"] or "")[:10]}
+    unpaid = [o for o in orders if not o["settled"]]
+    billable = [o for o in unpaid if o["delivered"]]
+    waiting = [o for o in unpaid if not o["delivered"]]
+    paid = [o for o in orders if o["settled"]]
+    out = {"ok": True, "state": state, "name": coworker[1], "mode": db_get_coworker_mode(cid),
+           "owed_total": round(sum(o["total"] for o in billable), 2), "owed_orders": len(billable),
+           "waiting_orders": len(waiting), "waiting_total": round(sum(o["total"] for o in waiting), 2),
+           "paid_total": round(sum(o["total"] for o in paid), 2), "paid_orders": len(paid)}
+    if state == "unpaid":
+        out["items"] = [row(o) for o in billable + waiting]
+        out["report"] = _unpaid_report(coworker[1], billable)
+    else:
+        out["items"] = [row(o) for o in sorted(paid, key=lambda o: (o["settled"], o["id"]), reverse=True)[:100]]
+    return web.json_response(out, headers=_imd_search_cors_headers())
+
+
+async def http_admin_coworker_settle(request):
+    """{id, action: 'mark_all_paid'} — marks every fully delivered unpaid order of this coworker as paid."""
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    data = await _admin_json(request) or {}
+    cid = data.get("id")
+    if data.get("action") != "mark_all_paid" or isinstance(cid, bool) or not isinstance(cid, int):
+        return _admin_bad("Invalid request")
+    if not db_get_coworker(cid):
+        return _admin_bad("That coworker no longer exists.", 404)
+    billable = [o for o in _ledger_orders(cid) if not o["settled"] and o["delivered"]]
+    if not billable:
+        return _admin_bad("Nothing to mark — no delivered unpaid orders.", 409)
+    conn = sqlite3.connect(DB_PATH)
+    conn.executemany("UPDATE orders SET settled_at = ? WHERE id = ? AND settled_at IS NULL",
+                     [(datetime.utcnow().isoformat(), o["id"]) for o in billable])
+    conn.commit()
+    conn.close()
+    amount = round(sum(o["total"] for o in billable), 2)
+    return web.json_response({"ok": True, "count": len(billable), "amount": amount,
+                              "note": f"Marked {len(billable)} order(s) as paid — {CURRENCY}{amount:.2f}."}, headers=_post_cors_headers())
+
+
 async def http_admin_coworker_stats(request):
     """?id=<coworker>&period=today|week|month|overall — one coworker's statistics."""
     from aiohttp import web
@@ -11560,6 +11722,7 @@ async def http_admin_coworker_stats(request):
     return web.json_response({
         "ok": True, "period": period, "label": label, "name": coworker[1], "username": coworker[2], "pct": coworker[3],
         "since": (coworker[4] or "")[:10], "pending": pending, "lifetime_orders": lifetime_orders,
+        "mode": db_get_coworker_mode(cid), "owed_total": round(sum(o["total"] for o in _ledger_orders(cid) if not o["settled"] and o["delivered"]), 2),
         "lifetime_revenue": round(lifetime_revenue, 2), "avg_order": round(stats["revenue"] / stats["orders"], 2) if stats["orders"] else 0,
         **stats, "recent": recent}, headers=_imd_search_cors_headers())
 
@@ -11586,17 +11749,28 @@ async def http_admin_coworker_action(request):
             return _admin_bad("The percentage must be a number between 1 and 100.")
         if db_coworker_username_taken(username):
             return _admin_bad("That username is already taken.", 409)
+        mode = data.get("mode", "prepaid")
+        if mode not in ("prepaid", "postpaid"):
+            return _admin_bad("Payment mode must be prepaid or postpaid.")
         cid = db_create_coworker(name, username, password, pct)
+        db_set_coworker_mode(cid, mode)
         return web.json_response({"ok": True, "id": cid, "items": _coworker_rows()}, headers=headers)
 
     cid = data.get("id")
     if isinstance(cid, bool) or not isinstance(cid, int) or not db_get_coworker(cid):
         return _admin_bad("That coworker no longer exists.", 404)
     if action == "delete":
+        owed = db_coworker_unpaid_count(cid)
+        if owed:
+            return _admin_bad(f"This coworker still has {owed} unpaid order(s) — mark them as paid first.", 409)
         db_delete_coworker(cid)
         return web.json_response({"ok": True, "items": _coworker_rows()}, headers=headers)
     if action == "update":
-        pct = username = password = None
+        pct = username = password = mode = None
+        if "mode" in data:
+            mode = data["mode"]
+            if mode not in ("prepaid", "postpaid"):
+                return _admin_bad("Payment mode must be prepaid or postpaid.")
         if "pct" in data:
             pct = _clean_pct(data["pct"])
             if pct is None:
@@ -11611,8 +11785,10 @@ async def http_admin_coworker_action(request):
             password = text("password", 100)
             if not password:
                 return _admin_bad("Enter a password.")
-        if pct is None and username is None and password is None:
+        if pct is None and username is None and password is None and mode is None:
             return _admin_bad("Nothing to change.")
+        if mode is not None:
+            db_set_coworker_mode(cid, mode)
         if pct is not None:
             db_set_coworker_discount_pct(cid, pct)
         if username is not None:
@@ -12264,6 +12440,9 @@ async def start_api_server(application):
     api_app.router.add_post("/api/admin_serials_action", http_admin_serials_action)
     api_app.router.add_get("/api/admin_coworkers", http_admin_coworkers)
     api_app.router.add_get("/api/admin_coworker_stats", http_admin_coworker_stats)
+    api_app.router.add_get("/api/admin_coworker_ledger", http_admin_coworker_ledger)
+    api_app.router.add_post("/api/admin_coworker_settle", http_admin_coworker_settle)
+    api_app.router.add_options("/api/admin_coworker_settle", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_coworker_action", http_admin_coworker_action)
     api_app.router.add_options("/api/admin_chat_action", http_set_coworker_price_options)
     api_app.router.add_options("/api/admin_ticket_answer", http_set_coworker_price_options)
@@ -12994,6 +13173,7 @@ async def coworker_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 {name}\n"
         f"Username: {username}\n"
         f"Discount: {discount_pct:.0f}% off\n"
+        f"Payment: {'📒 Postpaid (pays later)' if db_get_coworker_mode(coworker_id) == 'postpaid' else 'Prepaid'}\n"
         f"iMD 6-Month: {imd_6m_label}\n"
         f"iMD 1-Year: {imd_1y_label}\n"
         f"iMD 2-Year: {imd_2y_label}\n"
@@ -13317,6 +13497,14 @@ async def coworker_delete_execute(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("That coworker no longer exists.")
         return
     name = coworker[1]
+
+    owed = db_coworker_unpaid_count(coworker_id)
+    if owed:
+        await query.edit_message_text(
+            f"{name} still has {owed} unpaid postpaid order(s). Mark them as paid (admin Shop → Support → Coworkers → "
+            "Statistics) before deleting.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"coworker:{coworker_id}")]]))
+        return
 
     db_delete_coworker(coworker_id)
 
@@ -17433,11 +17621,20 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
     # already stack with each other below.
     coworker_login = db_get_user_coworker(user_id)
     coworker_id = None
+    postpaid = False
     if coworker_login:
         coworker_id = coworker_login[0]
         total = round(sum(_coworker_unit_price_by_id(i, coworker_id) * q for i, q in order_items.items()), 2)
+        # Postpaid coworkers are billed later: no payment step, no discount code or credits.
+        postpaid = db_get_coworker_mode(coworker_id) == "postpaid"
+        if postpaid:
+            data = {**data, "discount_code": "", "use_credits": False}
     else:
         total = sum(MENU[i][1] * q for i, q in order_items.items())
+    if pay_method.lower() == "postpaid" and not postpaid:
+        text = "Pay-later ordering is only available to coworkers on a postpaid plan."
+        await message.reply_text(text)
+        return {"ok": False, "error": text}
 
     # ── Apply discount code + credits server-side (authoritative — never
     # trust client-computed amounts for the actual charge) ─────────────
@@ -17478,7 +17675,12 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
         pay_method = "Cryptocurrency"
     elif pay_method == "paypal":
         pay_method = "PayPal"
-    db_set_payment_method(order_id, pay_method or "Mini App")
+    db_set_payment_method(order_id, "Postpaid" if postpaid else (pay_method or "Mini App"))
+    if postpaid:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE orders SET on_credit = 1 WHERE id = ?", (order_id,))
+        conn.commit()
+        conn.close()
 
     # Create a fulfilment row for each unit and pre-populate it with the
     # registration details the customer already filled in the Mini App.
@@ -17526,6 +17728,8 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
         # for credentials — they've already been collected in the Mini App.
         if iid not in IMD_TRIGGER_ITEMS and iid not in UPTODATE_AI_TRIGGER_ITEMS:
             db_set_fulfilment_state(fid, "awaiting_delivery")
+            if postpaid:
+                continue    # fulfilment starts right away below and tells the admin then
             # Notify admin immediately with the stored credentials so they
             # can register as soon as the payment is confirmed.
             item_name = MENU.get(iid, (iid,))[0]
@@ -17592,6 +17796,10 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
     summary = "\n".join(lines)
     if skipped:
         summary += "\n\n⚠️ Skipped (out of stock):\n" + "\n".join(skipped)
+
+    if postpaid:
+        return await _place_postpaid_order(context, message, order_id, user_id, username, coworker_id,
+                                           order_items, total, summary)
 
     # ── Route based on payment method ───────────────────
     pay_lower = pay_method.lower()
@@ -17745,6 +17953,28 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
         except Exception:
             logger.exception("Failed to notify admin of Mini App order #%s", order_id)
 
+    return {"ok": True, "order_id": order_id}
+
+
+async def _place_postpaid_order(context, message, order_id, user_id, username, coworker_id,
+                                order_items, total, summary) -> dict:
+    """A postpaid coworker's order: no payment step. It is marked paid at once so delivery starts,
+    but it stays 'owed' (on_credit, no settled_at) until the owner marks it paid."""
+    db_update_status(order_id, "paid")                      # also freezes the costs
+    await message.reply_text(
+        f"✅ Order #{order_id} received — {CURRENCY}{total:.2f} is added to your account (pay later). "
+        f"We're preparing it now.\n\n{summary}")
+    coworker = db_get_coworker(coworker_id)
+    if ADMIN_CHAT_ID:
+        who = f"@{username}" if username else str(user_id)
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(f"📒 Postpaid order #{order_id} — {coworker[1] if coworker else 'coworker'} ({who})\n"
+                      f"{summary}\nTotal: {CURRENCY}{total:.2f} — NOT paid yet (added to their account)."))
+        except Exception:
+            logger.exception("Failed to notify admin of postpaid order #%s", order_id)
+    await start_order_fulfilment(context, order_id, user_id, order_items)
     return {"ok": True, "order_id": order_id}
 
 
