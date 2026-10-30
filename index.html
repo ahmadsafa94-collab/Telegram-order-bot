@@ -2035,13 +2035,15 @@ function drawAdminSerials(){
   const el=document.getElementById('serContent'), keep={};
   adminPools.forEach((p,i)=>{ const f=document.getElementById('serNew-'+i); if(f) keep[i]=f.value; });
   const nw=adminPools.reduce((a,p)=>a+p.not_working.length,0);
-  el.innerHTML=adminPools.map((p,i)=>
+  el.innerHTML=
+    (nw?'<button class="btn" style="margin:0 0 4px;background:#dc2626" onclick="clearBadSerials()">🗑 Remove all '+nw+' not-working serial'+(nw===1?'':'s')+'</button>'
+       :'<button class="tk-btn" style="margin-bottom:4px;opacity:.55" disabled>✅ No not-working serials</button>')+
+    adminPools.map((p,i)=>
     '<div class="pool-hd"><span>'+escHtml(p.label)+'</span><span class="t-pill '+(p.available.length?'ok':'open')+'">'+p.available.length+' available</span></div>'+
     (p.available.map(c=>'<div class="code-chip"><span>'+escHtml(c)+'</span><button aria-label="Remove" onclick="removeSerial('+i+',\'a\','+p.available.indexOf(c)+')">✕</button></div>').join('')||'<div class="t-meta">None available.</div>')+
     (p.not_working.length?'<div class="t-meta" style="margin:8px 0 4px;color:#f87171">Not working — rejected by iMD</div>'+p.not_working.map((c,k)=>'<div class="code-chip bad"><span>'+escHtml(c)+'</span><button aria-label="Remove" onclick="removeSerial('+i+',\'n\','+k+')">✕</button></div>').join(''):'')+
     '<textarea id="serNew-'+i+'" class="cw-input" rows="2" placeholder="Paste new codes — one per line, or spaces, or a - b - c" aria-label="New codes for '+escHtml(p.label)+'" style="margin-top:8px">'+escHtml(keep[i]||'')+'</textarea>'+
     '<button class="tk-btn" style="margin-top:6px" onclick="addSerials('+i+')">➕ Add to '+escHtml(p.label)+'</button>').join('')+
-    (nw?'<button class="tk-btn" style="margin-top:16px;color:#f87171" onclick="clearBadSerials()">🗑 Remove all '+nw+' not-working codes</button>':'')+
     '<div id="serMsg" style="font-size:12px;margin:10px 0;min-height:14px"></div>';
 }
 async function serialsCall(body,okText){
@@ -2058,7 +2060,7 @@ function removeSerial(i,kind,k){
   const code=(kind==='a'?adminPools[i].available:adminPools[i].not_working)[k];
   askConfirm('Remove '+code+' from the pool?',()=>serialsCall({action:'remove',code},()=>'Removed '+code));
 }
-function clearBadSerials(){ askConfirm('Remove every not-working code?',()=>serialsCall({action:'clear_not_working'},d=>'Removed '+d.removed+' not-working code(s)')); }
+function clearBadSerials(){ const n=adminPools.reduce((a,p)=>a+p.not_working.length,0); askConfirm('Remove all '+n+' not-working serial'+(n===1?'':'s')+'? Codes that are available or already used are not touched.',()=>serialsCall({action:'clear_not_working'},d=>'Removed '+d.removed+' not-working code(s)')); }
 
 // Coworkers
 let adminCw=[];
