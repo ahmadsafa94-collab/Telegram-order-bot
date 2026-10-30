@@ -762,6 +762,22 @@ body.in-checkout{padding-bottom:100px}
     <div style="padding:0 15px"><button class="btn sec" onclick="closeAdminCoworkers()">Close</button></div>
   </div>
 </div>
+<!-- Preview: % after cost for the All Subscriptions tab -->
+<div class="overlay" id="cwMarginOverlay" onclick="if(event.target===this)closeCwMargin()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="cwMarginTitle">All Subscriptions</div>
+    <div style="padding:12px 15px 15px">
+      <div class="t-meta" style="margin:0 0 8px;line-height:1.5">The % off <b>after your cost price</b>, for every subscription in the All Subscriptions tab. You keep the cost; they get this % off the difference between retail and cost. More Subscriptions keeps its regular discount, and a price you set with ✏️ still wins.</div>
+      <div class="t-meta" style="margin:0 0 10px">Example: cost $10, retail $30, 25% → 25% off the $20 difference → they pay $25.</div>
+      <input id="cwMarginInput" class="cw-input" type="number" inputmode="decimal" min="0" max="100" step="0.1" placeholder="% off after cost (0–100)" aria-label="Percentage after cost">
+      <div id="cwMarginMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>
+      <button class="btn" id="cwMarginSave" onclick="saveCwMargin(false)">Set</button>
+      <button class="btn sec" id="cwMarginClear" style="margin-top:8px" onclick="saveCwMargin(true)">↩️ Back to the regular discount</button>
+      <button class="btn sec" style="margin-top:8px" onclick="closeCwMargin()">Cancel</button>
+    </div>
+  </div>
+</div>
 <!-- Announcements -->
 <div class="overlay" id="annOverlay" onclick="if(event.target===this)closeAnnouncements()">
   <div class="sheet">
@@ -905,11 +921,26 @@ const COWORKER_PCT = (SUBS_DATA && SUBS_DATA.cw) || 0;
 // from the admin's Coworkers panel instead of the percentage above, since
 // iMD's resale margin doesn't scale the same way a % discount does.
 const COWORKER_ITEM_PRICES = (SUBS_DATA && SUBS_DATA.cwp) || {};
+// "% off after cost": the owner's cost stays and the coworker gets this % off what is left (retail − cost).
+// cwm = that %, cwk = cost per product (only those with a cost). Same rule as bot.py's price_after_cost.
+// It only applies to the All Subscriptions tab; More Subscriptions, iMD, Uptodate … keep the regular %.
+let COWORKER_MARGIN = (SUBS_DATA && SUBS_DATA.cwm!=null) ? Number(SUBS_DATA.cwm) : null;
+const COWORKER_COSTS = (SUBS_DATA && SUBS_DATA.cwk) || {};
+let _panelIds=null;
+function isPanelItem(id){
+  if(!_panelIds) _panelIds=new Set(PANEL_CATALOG.flatMap(p=>p[1].map(v=>v[0])));
+  return _panelIds.has(id);
+}
+function priceAfterCost(retail, cost, pct){
+  const c=Math.max(0,Math.min(Number(cost)||0,retail));
+  return Math.round((c+(retail-c)*(1-pct/100))*100)/100;
+}
 function hasCoworkerDiscount(itemId){
-  return COWORKER_PCT>0 || (itemId && COWORKER_ITEM_PRICES[itemId]!=null);
+  return (COWORKER_MARGIN!=null && isPanelItem(itemId)) || COWORKER_PCT>0 || (itemId && COWORKER_ITEM_PRICES[itemId]!=null);
 }
 function coworkerPrice(price, itemId){
   if(itemId && COWORKER_ITEM_PRICES[itemId]!=null) return COWORKER_ITEM_PRICES[itemId];
+  if(COWORKER_MARGIN!=null && isPanelItem(itemId)) return priceAfterCost(price, COWORKER_COSTS[itemId]||0, COWORKER_MARGIN);
   return COWORKER_PCT>0 ? Math.round(price * (1 - COWORKER_PCT / 100) * 100) / 100 : price;
 }
 // Out-of-stock item ids — read once here so makeRow() can render every
@@ -2168,6 +2199,7 @@ function drawAdminCoworkers(){
   el.innerHTML='<button class="btn" style="margin:0 0 12px" onclick="drawAddCoworker()">➕ Add a coworker</button>'+
     (adminCw.length?adminCw.map(c=>
       '<div class="t-card" style="cursor:pointer" onclick="drawEditCoworker('+c.id+')"><div class="t-top"><div class="t-title">'+escHtml(c.name)+'<div class="t-meta">@'+escHtml(c.username)+' · '+c.orders+' order'+(c.orders===1?'':'s')+(c.pending?' · '+c.pending+' pending':'')+' · $'+Number(c.revenue).toFixed(2)+'</div>'+
+      (c.cost_pct!=null?'<div style="margin-top:4px"><span class="via cw">🗂 All Subscriptions: '+Number(c.cost_pct)+'% after cost</span></div>':'')+
       (c.mode==='postpaid'?'<div style="margin-top:4px"><span class="via owed">📒 Postpaid'+(c.unpaid?' · '+c.unpaid+' unpaid':'')+'</span></div>':'')+'</div>'+
       '<span class="t-pill ok">'+Number(c.pct)+'% off</span></div></div>').join(''):'<div class="empty-sheet"><div class="eico">🤝</div>No coworkers yet.</div>');
 }
@@ -2205,6 +2237,7 @@ function drawEditCoworker(id){
   document.getElementById('cwmContent').innerHTML=
     '<div class="t-meta" style="margin:0 0 6px">'+c.orders+' order'+(c.orders===1?'':'s')+(c.pending?' · '+c.pending+' pending':'')+' · $'+Number(c.revenue).toFixed(2)+' · since '+escHtml(c.date)+'</div>'+
     '<button class="btn" style="margin:0 0 4px" onclick="drawCoworkerStats('+id+',null,\'overview\')">📊 Statistics</button>'+
+    '<button class="tk-btn" style="margin:0 0 4px" onclick="drawCoworkerPrices('+id+')">💲 All Subscriptions prices'+(c.cost_pct!=null?' · '+Number(c.cost_pct)+'% after cost':'')+'</button>'+
     '<div style="font-size:12px;color:var(--hint);margin:10px 0 4px">Mode of payment</div>'+
     '<div class="seg"><button class="'+(c.mode!=='postpaid'?'on':'')+'" onclick="setCoworkerMode('+id+',\'prepaid\')">Prepaid</button><button class="'+(c.mode==='postpaid'?'on':'')+'" onclick="setCoworkerMode('+id+',\'postpaid\')">Postpaid</button></div>'+
     '<div class="t-meta" style="margin:-4px 0 4px">'+(c.mode==='postpaid'?'Orders without paying; you mark them paid in Statistics → Not paid yet.'+(c.unpaid?' '+c.unpaid+' unpaid order'+(c.unpaid===1?'':'s')+' so far.':''):'Pays for each order before it is delivered, like customers.')+'</div>'+
@@ -2241,6 +2274,54 @@ async function drawCoworkerStats(id,period,tab){
       (d.recent.length?'<div class="sub-section-lbl" style="margin-top:10px">Latest orders</div>'+d.recent.map(o=>'<div class="t-card" style="padding:9px 13px;margin-bottom:6px"><div class="t-top"><div class="t-title">Order #'+o.id+'<div class="t-meta">'+escHtml(o.date)+' · '+escHtml(o.items)+'</div></div><span style="text-align:right"><div style="font-weight:700;font-size:13px">'+money(o.total)+'</div><div class="t-meta" style="margin:0">'+escHtml(o.status)+'</div></span></div></div>').join(''):'')+
       '<button class="btn sec" style="margin-top:8px" onclick="drawEditCoworker('+id+')">← Back</button>';
   }catch(e){ el.innerHTML=failHtml(e)+'<button class="btn sec" onclick="drawEditCoworker('+id+')">← Back</button>'; }
+}
+
+// Prices of all subscriptions for one coworker, with the "% off after cost" setting
+let cwPrices=null, cwPricesFilter='';
+async function drawCoworkerPrices(id){
+  const el=document.getElementById('cwmContent'); el.innerHTML=loadingHtml;
+  try{
+    cwPrices=Object.assign(await apiGet('/api/admin_coworker_prices?id='+id),{id}); cwPricesFilter='';
+    document.getElementById('cwmTitle').textContent='💲 '+cwPrices.name;
+    drawCoworkerPricesView();
+  }catch(e){ el.innerHTML=failHtml(e)+'<button class="btn sec" onclick="drawEditCoworker('+id+')">← Back</button>'; }
+}
+function drawCoworkerPricesView(){
+  const d=cwPrices, id=d.id, el=document.getElementById('cwmContent');
+  const q=cwPricesFilter.toLowerCase();
+  const rows=d.items.filter(i=>!q||i.name.toLowerCase().includes(q));
+  el.innerHTML=
+    '<div class="t-card" style="margin-bottom:10px"><div class="t-title">All Subscriptions tab: '+(d.cost_pct!=null?Number(d.cost_pct)+'% off after your cost':Number(d.pct)+'% off the retail price')+'</div>'+
+    '<div class="t-meta" style="margin-top:4px">'+(d.cost_pct!=null?'You keep your cost price; they get '+Number(d.cost_pct)+'% off the profit margin (retail − cost). Custom prices ★ still win.':'Set a % off after cost to price the All Subscriptions tab from your cost price instead.')+' More Subscriptions and everything else keep their regular '+Number(d.pct)+'% discount.</div>'+
+    '<div style="font-size:12px;color:var(--hint);margin:10px 0 4px">% off after cost</div>'+
+    '<div style="display:flex;gap:8px;align-items:flex-start"><div style="flex:1">'+fieldBox('cwCostPct','e.g. 25',d.cost_pct,'number')+'</div>'+
+    '<button class="btn" style="margin:0;width:auto;padding:11px 16px" onclick="saveCostPct('+id+')">Set</button></div>'+
+    '<div class="t-meta" style="margin:-2px 0 6px">Example: cost $10, retail $30, 25% → 25% off the $20 difference → they pay $25.</div>'+
+    (d.cost_pct!=null?'<button class="tk-btn" onclick="clearCostPct('+id+')">↩️ Go back to the regular '+Number(d.pct)+'% discount</button>':'')+
+    '<div id="cwmMsg" style="font-size:12px;margin:6px 0 0;min-height:14px"></div></div>'+
+    '<input id="cwPriceSearch" class="cw-input" type="text" placeholder="Search subscriptions" aria-label="Search subscriptions" value="'+escHtml(cwPricesFilter)+'" oninput="cwPricesFilter=this.value;drawCoworkerPricesList()" style="margin-bottom:8px">'+
+    '<div id="cwPriceList"></div>'+
+    '<button class="btn sec" style="margin-top:8px" onclick="drawEditCoworker('+id+')">← Back</button>';
+  drawCoworkerPricesList();
+}
+function drawCoworkerPricesList(){
+  const d=cwPrices, q=cwPricesFilter.toLowerCase(), rows=d.items.filter(i=>!q||i.name.toLowerCase().includes(q));
+  document.getElementById('cwPriceList').innerHTML=
+    '<div class="t-meta" style="margin:0 0 6px">'+rows.length+' subscription'+(rows.length===1?'':'s')+' · retail / your cost → their price · ★ = custom price</div>'+
+    (rows.map(i=>'<div class="t-card" style="padding:9px 13px;margin-bottom:6px"><div class="t-top"><div class="t-title">'+escHtml(i.name)+
+      '<div class="t-meta">Retail '+money(i.retail)+' · Cost '+(i.cost>0?money(i.cost):'not set')+'</div></div>'+
+      '<span class="t-pill '+(i.custom?'open':'ok')+'">'+money(i.price)+(i.custom?' ★':'')+'</span></div></div>').join('')||'<div class="search-empty">No subscription matches.</div>');
+}
+async function saveCostPct(id){
+  const raw=document.getElementById('cwCostPct').value.trim(), v=parseFloat(raw);
+  if(raw===''||!(v>=0&&v<=100)) return cwMsg('Enter a percentage between 0 and 100.');
+  cwMsg('Saving…',true);
+  try{ const r=await adminPost('/api/admin_coworker_action',{action:'update',id,cost_pct:v}); adminCw=r.items; await drawCoworkerPrices(id); cwMsg('Saved — every subscription without a custom price now uses '+v+'% off after cost.',true); }
+  catch(e){ cwMsg(e.message); }
+}
+async function clearCostPct(id){
+  try{ const r=await adminPost('/api/admin_coworker_action',{action:'update',id,cost_pct:null}); adminCw=r.items; await drawCoworkerPrices(id); cwMsg('Back to the regular percentage discount.',true); }
+  catch(e){ cwMsg(e.message); }
 }
 
 async function setCoworkerMode(id,mode){
@@ -2441,6 +2522,9 @@ function buildCatalog(){
     }
     if(cat.panel){
       const lbl=document.createElement('div'); lbl.className='sl'; lbl.textContent='Tap the duration button to change how long'; sec.appendChild(lbl);
+      if(PREVIEW_CW){   // the admin looking at this coworker's Shop can price the whole tab from their cost
+        const mb=document.createElement('button'); mb.id='cwMarginBtn'; mb.className='tk-btn'; mb.style.margin='0 0 10px'; mb.onclick=openCwMargin; mb.textContent=cwMarginBtnText(); sec.appendChild(mb);
+      }
       const seen=new Set(), entries=[];
       cat.panel.forEach(p=>{
         if(p.group){ if(seen.has(p.group.key)) return; seen.add(p.group.key); entries.push({sort:groupTitle(p.group), g:p.group}); }
@@ -2883,6 +2967,37 @@ async function resetCwTitle(){
     applyTitleLocal(key,null); closeCwPriceEdit(); showToast('Back to the original title');
   }catch(e){ msg.style.color='#dc2626'; msg.textContent='Network error — please try again.'; }
 }
+// Preview: price the whole All Subscriptions tab "% off after cost" for this coworker
+const cwMarginBtnText=()=>'💲 '+(COWORKER_MARGIN!=null?'All subscriptions: '+COWORKER_MARGIN+'% off after cost — change':'Set % off after cost for all subscriptions');
+function setCwMarginBtn(){
+  const b=document.getElementById('cwMarginBtn'); if(b) b.textContent=cwMarginBtnText();
+}
+function openCwMargin(){
+  document.getElementById('cwMarginTitle').textContent='🗂 All Subscriptions · '+CW_NAME;
+  const i=document.getElementById('cwMarginInput'); i.value=COWORKER_MARGIN!=null?COWORKER_MARGIN:'';
+  document.getElementById('cwMarginMsg').textContent='';
+  document.getElementById('cwMarginClear').style.display=COWORKER_MARGIN!=null?'block':'none';
+  document.getElementById('cwMarginOverlay').classList.add('on'); setTimeout(()=>i.focus(),150);
+}
+function closeCwMargin(){ document.getElementById('cwMarginOverlay').classList.remove('on'); }
+async function saveCwMargin(clear){
+  const msg=document.getElementById('cwMarginMsg'), bad=t=>{ msg.style.color='#dc2626'; msg.textContent=t; };
+  let v=null;
+  if(!clear){ const raw=document.getElementById('cwMarginInput').value.trim(); v=parseFloat(raw); if(raw===''||!(v>=0&&v<=100)) return bad('Enter a percentage between 0 and 100.'); }
+  msg.style.color='var(--hint)'; msg.textContent='Saving…';
+  try{
+    await adminPost('/api/admin_coworker_action',{action:'update',id:Number(PREVIEW_CW),cost_pct:v});
+    if(v!=null){   // fetch the costs so the tiles show the same price the server will charge
+      const d=await apiGet('/api/admin_coworker_prices?id='+PREVIEW_CW);
+      d.items.forEach(i=>{ if(i.cost>0) COWORKER_COSTS[i.id]=i.cost; else delete COWORKER_COSTS[i.id]; });
+    }
+    COWORKER_MARGIN=v; setCwMarginBtn();
+    document.querySelectorAll('[data-item-id]').forEach(row=>{ const rp=row.querySelector('.rp'); if(rp) rp.innerHTML=rowPriceHtml(row.dataset.itemId, parseFloat(row.dataset.base), row.classList.contains('dur-opt')); });
+    refreshPanelFromPrices(); try{ syncBasket(); renderBasket(); }catch(e){}
+    closeCwMargin(); showToast(v!=null?CW_NAME+': All Subscriptions now '+v+'% off after cost':'Back to the regular discount');
+  }catch(e){ bad(e.message); }
+}
+
 async function saveCwPrice(useDefault){
   const msg=document.getElementById('cwPriceMsg');
   const titleShown=document.getElementById('cwTitleBox').style.display!=='none';
