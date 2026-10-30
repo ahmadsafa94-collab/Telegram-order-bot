@@ -102,7 +102,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "61"
+MINI_APP_VERSION = "62"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -269,6 +269,7 @@ SINGLE_MAIN_ITEMS = [
 # those feed one-button-per-item admin keyboards that Telegram cannot send
 # with 280 more buttons. Their price is edited from the Shop itself.
 PANEL_ITEM_IDS = set()
+PANEL_TAB_ITEM_IDS = set()   # every item shown in the Shop's All Subscriptions tab (PANEL_ITEM_IDS + the 'existing' ones)
 PANEL_GROUP_KEYS = set()
 PANEL_COSTS = {}  # what the supplier panel charges us per duration: the starting cost for sales/profit
 PANEL_CATALOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel_catalog.json")
@@ -284,6 +285,7 @@ def _load_panel_catalog():
         if product.get("group"):
             PANEL_GROUP_KEYS.add(product["group"]["key"])
         for v in product.get("variants", []):
+            PANEL_TAB_ITEM_IDS.add(v["id"])
             if v.get("existing"):
                 continue  # an item the bot already sells, listed here as well: leave it as it is
             MENU[v["id"]] = (f"{product['name']} - {v['label']}", float(v["price"]))
@@ -1237,7 +1239,10 @@ def db_init():
     # percentage discount", so this is backward compatible with coworkers
     # created before this existed.
     for column, coltype in [("imd_6m_price", "REAL"), ("imd_1y_price", "REAL"), ("imd_2y_price", "REAL"),
-                            ("payment_mode", "TEXT NOT NULL DEFAULT 'prepaid'")]:
+                            ("payment_mode", "TEXT NOT NULL DEFAULT 'prepaid'"),
+                            # NULL = use discount_pct off the retail price; a number = that % off the profit
+                            # margin (retail minus the owner's cost), for every subscription without a custom price
+                            ("cost_pct", "REAL")]:
         try:
             conn.execute(f"ALTER TABLE coworkers ADD COLUMN {column} {coltype}")
         except sqlite3.OperationalError:
@@ -1628,6 +1633,37 @@ def db_set_coworker_mode(coworker_id: int, mode: str):
     conn.execute("UPDATE coworkers SET payment_mode = ? WHERE id = ?", (mode, coworker_id))
     conn.commit()
     conn.close()
+
+
+def db_get_coworker_cost_pct(coworker_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT cost_pct FROM coworkers WHERE id = ?", (coworker_id,)).fetchone()
+    conn.close()
+    return float(row[0]) if row and row[0] is not None else None
+
+
+def db_set_coworker_cost_pct(coworker_id: int, pct):
+    """pct=None goes back to the plain percentage discount."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE coworkers SET cost_pct = ? WHERE id = ?", (pct, coworker_id))
+    conn.commit()
+    conn.close()
+
+
+def price_after_cost(retail: float, cost: float, pct: float) -> float:
+    """The owner's cost stays; the coworker gets `pct`% off what is left (retail - cost).
+    Cost 10, retail 30, 25% -> 10 + 20 * 0.75 = 25. A cost at or above retail leaves the retail price."""
+    cost = max(0.0, min(float(cost or 0), float(retail)))
+    return round(cost + (float(retail) - cost) * (1 - pct / 100), 2)
+
+
+def coworker_default_price(item_id: str, retail: float, pct: float, cost_pct, costs: dict) -> float:
+    """What a coworker pays for a subscription with no custom price of its own. Items in the Shop's All
+    Subscriptions tab use the '% off after cost' when one is set; everything else (More Subscriptions, iMD,
+    Uptodate ...) keeps the regular percentage discount."""
+    if cost_pct is not None and item_id in PANEL_TAB_ITEM_IDS:
+        return price_after_cost(retail, costs.get(item_id, 0.0), cost_pct)
+    return round(retail * (1 - pct / 100), 2)
 
 
 def db_coworker_unpaid_count(coworker_id: int) -> int:
@@ -3230,7 +3266,11 @@ def _coworker_unit_price_by_id(item_id: str, coworker_id: int) -> float:
     coworker_pct = cw[3]
     # A custom price the admin set for this coworker beats their default.
     fixed = db_get_coworker_price_overrides(coworker_id).get(item_id)
-    return fixed if fixed is not None else round(base_price * (1 - coworker_pct / 100), 2)
+    if fixed is not None:
+        return fixed
+    cost_pct = db_get_coworker_cost_pct(coworker_id)
+    costs = db_get_item_costs() if cost_pct is not None and item_id in PANEL_TAB_ITEM_IDS else {}
+    return coworker_default_price(item_id, base_price, coworker_pct, cost_pct, costs)
 
 
 def _coworker_unit_price(item_id: str, user_id: int) -> float:
@@ -3694,6 +3734,7 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
             "cr": credits_balance,
             "cw": coworker_pct,
             "cwp": coworker_imd_prices,
+            **(_coworker_cost_pricing_data(coworker_login[0]) if coworker_login else {}),
             # Explicit coworker flag (not just inferring from cw>0) — the
             # Mini App uses this to show the My Orders button only to
             # coworkers, never regular customers.
@@ -3718,6 +3759,15 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
             except Exception:
                 pass
         return f"{MINI_APP_URL}?v={MINI_APP_VERSION}{auth_params}"
+
+
+def _coworker_cost_pricing_data(coworker_id: int) -> dict:
+    """{cwm: margin %, cwk: {item: cost}} for a coworker priced 'after cost' (so the Mini App can show the
+    same prices the server charges); empty for everyone else. Only products with a cost set are sent."""
+    cost_pct = db_get_coworker_cost_pct(coworker_id)
+    if cost_pct is None:
+        return {}
+    return {"cwm": cost_pct, "cwk": {i: c for i, c in db_get_item_costs().items() if c > 0 and i in PANEL_TAB_ITEM_IDS}}
 
 
 def main_menu_keyboard(user_id: int = 0):
@@ -11534,7 +11584,7 @@ def _coworker_rows() -> list:
         orders, revenue, pending = db_coworker_stats(cid)
         out.append({"id": cid, "name": name, "username": username, "pct": pct,
                     "orders": orders, "revenue": round(revenue, 2), "pending": pending,
-                    "date": (created or "")[:10], "mode": db_get_coworker_mode(cid),
+                    "date": (created or "")[:10], "mode": db_get_coworker_mode(cid), "cost_pct": db_get_coworker_cost_pct(cid),
                     "unpaid": db_coworker_unpaid_count(cid)})
     return out
 
@@ -11627,6 +11677,30 @@ def _unpaid_report(name: str, billable: list) -> str:
         lines.append(f"{q} × {MENU.get(i, (i,))[0]}")
     lines += ["", f"Total accounts: {sum(counts.values())}", f"Orders: {len(billable)}", f"Total to be paid: {CURRENCY}{total:.2f}"]
     return "\n".join(lines)
+
+
+async def http_admin_coworker_prices(request):
+    """?id=<coworker> — every subscription with its retail price, the owner's cost and what this coworker pays."""
+    from aiohttp import web
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        cid = int(request.query.get("id", ""))
+    except ValueError:
+        cid = None
+    coworker = db_get_coworker(cid) if cid is not None else None
+    if not coworker:
+        return _admin_bad("That coworker no longer exists.", 404)
+    costs = db_get_item_costs()
+    overrides = db_get_coworker_price_overrides(cid)
+    cost_pct = db_get_coworker_cost_pct(cid)
+    items = []
+    for i in sorted((x for x in PANEL_TAB_ITEM_IDS if x in MENU), key=lambda x: (MENU[x][0].lower(), x)):
+        items.append({"id": i, "name": MENU[i][0], "retail": MENU[i][1], "cost": costs.get(i, 0.0), "custom": i in overrides,
+                      "price": overrides.get(i, coworker_default_price(i, MENU[i][1], coworker[3], cost_pct, costs))})
+    return web.json_response({"ok": True, "name": coworker[1], "pct": coworker[3], "cost_pct": db_get_coworker_cost_pct(cid),
+                              "items": items}, headers=_imd_search_cors_headers())
 
 
 async def http_admin_coworker_ledger(request):
@@ -11767,6 +11841,18 @@ async def http_admin_coworker_action(request):
         return web.json_response({"ok": True, "items": _coworker_rows()}, headers=headers)
     if action == "update":
         pct = username = password = mode = None
+        set_cost_pct, cost_pct = False, None
+        if "cost_pct" in data:      # null = go back to the plain percentage discount
+            set_cost_pct, v = True, data["cost_pct"]
+            if v is not None:
+                if isinstance(v, str):
+                    try:
+                        v = float(v.strip())
+                    except ValueError:
+                        v = None
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not (0 <= v <= 100):
+                    return _admin_bad("The percentage must be between 0 and 100.")
+                cost_pct = float(v)
         if "mode" in data:
             mode = data["mode"]
             if mode not in ("prepaid", "postpaid"):
@@ -11785,8 +11871,10 @@ async def http_admin_coworker_action(request):
             password = text("password", 100)
             if not password:
                 return _admin_bad("Enter a password.")
-        if pct is None and username is None and password is None and mode is None:
+        if pct is None and username is None and password is None and mode is None and not set_cost_pct:
             return _admin_bad("Nothing to change.")
+        if set_cost_pct:
+            db_set_coworker_cost_pct(cid, cost_pct)
         if mode is not None:
             db_set_coworker_mode(cid, mode)
         if pct is not None:
@@ -12441,6 +12529,7 @@ async def start_api_server(application):
     api_app.router.add_get("/api/admin_coworkers", http_admin_coworkers)
     api_app.router.add_get("/api/admin_coworker_stats", http_admin_coworker_stats)
     api_app.router.add_get("/api/admin_coworker_ledger", http_admin_coworker_ledger)
+    api_app.router.add_get("/api/admin_coworker_prices", http_admin_coworker_prices)
     api_app.router.add_post("/api/admin_coworker_settle", http_admin_coworker_settle)
     api_app.router.add_options("/api/admin_coworker_settle", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_coworker_action", http_admin_coworker_action)
@@ -13174,7 +13263,8 @@ async def coworker_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Username: {username}\n"
         f"Discount: {discount_pct:.0f}% off\n"
         f"Payment: {'📒 Postpaid (pays later)' if db_get_coworker_mode(coworker_id) == 'postpaid' else 'Prepaid'}\n"
-        f"iMD 6-Month: {imd_6m_label}\n"
+        + (f"All Subscriptions tab: {db_get_coworker_cost_pct(coworker_id):g}% off after your cost price\n" if db_get_coworker_cost_pct(coworker_id) is not None else "")
+        + f"iMD 6-Month: {imd_6m_label}\n"
         f"iMD 1-Year: {imd_1y_label}\n"
         f"iMD 2-Year: {imd_2y_label}\n"
         f"Added: {created_at[:10]}\n\n"
@@ -13270,6 +13360,8 @@ def _coworker_price_rows(coworker_id: int):
     if not coworker:
         return []
     overrides = db_get_coworker_price_overrides(coworker_id)
+    cost_pct = db_get_coworker_cost_pct(coworker_id)
+    costs = db_get_item_costs()
     rows = []
     items = all_toggleable_items()
     if "medical_toolkit" in MENU and "medical_toolkit" not in items:
@@ -13279,7 +13371,7 @@ def _coworker_price_rows(coworker_id: int):
             continue
         rows.append((
             item_id, MENU[item_id][0],
-            overrides.get(item_id, round(MENU[item_id][1] * (1 - coworker[3] / 100), 2)),
+            overrides.get(item_id, coworker_default_price(item_id, MENU[item_id][1], coworker[3], cost_pct, costs)),
             item_id in overrides,
         ))
     return rows
@@ -13337,9 +13429,11 @@ async def coworker_price_info(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("Not found.", show_alert=True)
         return
     name, base = MENU[item_id]
-    default = round(base * (1 - coworker[3] / 100), 2)
+    cost_pct = db_get_coworker_cost_pct(coworker[0])
+    default = coworker_default_price(item_id, base, coworker[3], cost_pct, db_get_item_costs())
+    how = f"{cost_pct:g}% off after cost" if cost_pct is not None and item_id in PANEL_TAB_ITEM_IDS else f"{coworker[3]:.0f}% off"
     custom = db_get_coworker_price_overrides(coworker[0]).get(item_id)
-    text = f"{name}\nRegular price: {CURRENCY}{base:.2f}\nDefault for {coworker[1]}: {CURRENCY}{default:.2f} ({coworker[3]:.0f}% off)"
+    text = f"{name}\nRegular price: {CURRENCY}{base:.2f}\nDefault for {coworker[1]}: {CURRENCY}{default:.2f} ({how})"
     text += f"\nCustom price: {CURRENCY}{custom:.2f}" if custom is not None else "\nNo custom price set."
     await query.answer(text, show_alert=True)
 
