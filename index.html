@@ -352,6 +352,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .t-meta{font-size:11px;color:var(--hint);margin-top:3px}
 .t-body{font-size:12.5px;line-height:1.55;margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere}
 .t-answer{margin-top:8px;padding:9px 11px;border-radius:10px;background:rgba(13,148,136,.12);border:1px solid rgba(13,148,136,.3);font-size:12.5px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.via{display:inline-block;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:99px;margin:0 5px 0 0;white-space:nowrap}
+.via.direct{background:rgba(255,255,255,.08);color:var(--hint)}
+.via.cw{background:rgba(13,148,136,.2);color:var(--teal2)}
+.via.owed{background:rgba(245,158,11,.16);color:#fbbf24}
+.via.ok{background:rgba(34,197,94,.15);color:#4ade80}
 .fld-list{margin-top:8px;display:flex;flex-direction:column;gap:5px}
 .fld{display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:8px 10px;border-radius:9px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.03);color:var(--text);font-size:12.5px;cursor:pointer}
 .fld:active{background:rgba(13,148,136,.18)}
@@ -517,7 +522,7 @@ body.in-checkout{padding-bottom:100px}
 
 <!-- Page 3: Payment -->
 <div class="page" id="p3">
-  <div class="sl">Choose Payment Method</div>
+  <div class="sl" id="payTitle">Choose Payment Method</div>
   <div id="discountBox" style="background:var(--bg2);border:1px solid rgba(255,255,255,.08);border-radius:var(--r);padding:10px 12px;margin-bottom:12px">
     <div style="display:flex;gap:8px">
       <input id="discountInput" type="text" placeholder="Discount code (optional)" style="flex:1;background:transparent;border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:8px 10px;color:var(--text);font-size:13px">
@@ -888,6 +893,7 @@ if (ADMIN_EDIT && API_BASE && AUTH_UID && AUTH_TOK) {
 const CREDITS_BALANCE = (SUBS_DATA && SUBS_DATA.cr) || 0;
 // A coworker account (or the admin previewing one) has no credits or free-accounts program.
 const IS_COWORKER = !!(SUBS_DATA && SUBS_DATA.cwid);
+const POSTPAID = !!(SUBS_DATA && SUBS_DATA.cwpost);
 const DISCOUNT_CODES = (SUBS_DATA && SUBS_DATA.dc) || {};
 const CREDIT_VALUE_USD = 4;
 // Coworker discount — set when this Telegram account is logged in via
@@ -1699,7 +1705,7 @@ async function loadAdminDelivered(reset){
     el.innerHTML='<div class="t-meta" style="margin:0 0 8px">'+adminDel.total+' delivered'+(q?' match your search':'')+'</div>'+
       adminDel.items.map((i,n)=>
         '<div class="t-card" id="ad-'+n+'"><div class="t-top" style="cursor:pointer" onclick="toggleAdminCard('+n+')">'+
-        '<div class="t-title">'+escHtml(i.name)+' <span style="color:var(--hint);font-weight:400">#'+i.order_id+'</span><div class="t-meta">'+cardMeta(i)+'</div></div>'+
+        '<div class="t-title">'+escHtml(i.name)+' <span style="color:var(--hint);font-weight:400">#'+i.order_id+'</span><div class="t-meta">'+cardMeta(i)+'</div><div style="margin-top:5px">'+viaTag(i.via)+'</div></div>'+
         '<span class="t-pill ok">✅</span></div>'+
         '<div class="ad-body" style="display:none"><div class="t-body">'+(i.text?escHtml(i.text):'<span style="color:var(--hint)">No text on file for this delivery.</span>')+'</div>'+
         '<div style="display:flex;gap:8px;margin-top:10px">'+
@@ -1752,6 +1758,7 @@ function drawAdminPending(){
       o.units.map(i=>
         '<div class="t-card" id="ap-'+i.fid+'"><div class="t-top"><div class="t-title">'+escHtml(i.name)+(i.unit>1?' #'+i.unit:'')+'</div>'+
         '<span class="t-pill '+(i.state==='needs_info'?'open':'ok')+'">'+(i.state==='needs_info'?'⌛ Waiting for customer':'📤 Ready')+'</span></div>'+
+        '<div style="margin-top:6px">'+viaTag(i.via)+'</div>'+
         fieldsHtml(i)+
         '<div style="display:flex;gap:8px;margin-top:10px">'+
           (i.imd?'':'<button class="btn" style="margin:0;padding:10px;width:auto;flex:1.4" onclick="openDeliver('+i.fid+')">📤 Deliver</button>')+
@@ -1763,7 +1770,7 @@ function openDeliver(fid){
   const i=adminPending.find(x=>x.fid===fid); if(!i) return;
   deliverFid=fid; editDelivery=null;
   document.getElementById('delTitle').textContent=i.name+' · Order #'+i.order_id;
-  document.getElementById('delInfo').innerHTML=escHtml(i.customer)+(i.state==='needs_info'?'<br>The customer has not sent their details yet.':'')+((i.fields&&i.fields.length)||i.info?fieldsHtml(i):'');
+  document.getElementById('delInfo').innerHTML=escHtml(i.customer)+'<div style="margin:5px 0">'+viaTag(i.via)+'</div>'+(i.state==='needs_info'?'<br>The customer has not sent their details yet.':'')+((i.fields&&i.fields.length)||i.info?fieldsHtml(i):'');
   document.getElementById('delLabel').textContent='Account details to send to the customer — fill in what is missing';
   document.getElementById('delNotifyRow').style.display='none';
   document.getElementById('delSend').textContent='📤 Send to customer';
@@ -1791,6 +1798,10 @@ function closeDeliver(){document.getElementById('delOverlay').classList.remove('
 function copyText(text,okMsg){
   const fallback=()=>{ try{ const t=document.createElement('textarea'); t.value=text; t.style.position='fixed'; t.style.opacity='0'; document.body.appendChild(t); t.select(); const ok=document.execCommand('copy'); t.remove(); showToast(ok?okMsg:'Select the text and copy it'); }catch(e){ showToast('Select the text and copy it'); } };
   try{ navigator.clipboard.writeText(text).then(()=>showToast(okMsg)).catch(fallback); }catch(e){ fallback(); }
+}
+function viaTag(v){
+  if(!v) return '<span class="via direct">👤 Direct</span>';
+  return '<span class="via cw">🤝 via '+escHtml(v.name)+'</span>'+(v.pay?'<span class="via '+(v.pay==='paid'?'ok':'owed')+'">📒 '+(v.pay==='paid'?'paid':'unpaid')+'</span>':'');
 }
 function fieldsHtml(i){
   if(i.fields&&i.fields.length) return '<div class="fld-list">'+i.fields.map((f,k)=>
@@ -2156,7 +2167,8 @@ function drawAdminCoworkers(){
   const el=document.getElementById('cwmContent');
   el.innerHTML='<button class="btn" style="margin:0 0 12px" onclick="drawAddCoworker()">➕ Add a coworker</button>'+
     (adminCw.length?adminCw.map(c=>
-      '<div class="t-card" style="cursor:pointer" onclick="drawEditCoworker('+c.id+')"><div class="t-top"><div class="t-title">'+escHtml(c.name)+'<div class="t-meta">@'+escHtml(c.username)+' · '+c.orders+' order'+(c.orders===1?'':'s')+(c.pending?' · '+c.pending+' pending':'')+' · $'+Number(c.revenue).toFixed(2)+'</div></div>'+
+      '<div class="t-card" style="cursor:pointer" onclick="drawEditCoworker('+c.id+')"><div class="t-top"><div class="t-title">'+escHtml(c.name)+'<div class="t-meta">@'+escHtml(c.username)+' · '+c.orders+' order'+(c.orders===1?'':'s')+(c.pending?' · '+c.pending+' pending':'')+' · $'+Number(c.revenue).toFixed(2)+'</div>'+
+      (c.mode==='postpaid'?'<div style="margin-top:4px"><span class="via owed">📒 Postpaid'+(c.unpaid?' · '+c.unpaid+' unpaid':'')+'</span></div>':'')+'</div>'+
       '<span class="t-pill ok">'+Number(c.pct)+'% off</span></div></div>').join(''):'<div class="empty-sheet"><div class="eico">🤝</div>No coworkers yet.</div>');
 }
 function cwMsg(t,ok){ const m=document.getElementById('cwmMsg'); if(m){ m.style.color=ok?'var(--hint)':'#dc2626'; m.textContent=t; } }
@@ -2164,9 +2176,17 @@ function drawAddCoworker(){
   document.getElementById('cwmTitle').textContent='➕ New coworker';
   document.getElementById('cwmContent').innerHTML=
     fieldBox('cwNewName','Name')+fieldBox('cwNewUser','Login username')+fieldBox('cwNewPass','Login password')+fieldBox('cwNewPct','Percentage discount (1–100)','','number')+
+    '<div style="font-size:12px;color:var(--hint);margin:4px 0">Mode of payment</div>'+
+    '<div class="seg" id="cwNewMode" data-mode="prepaid"><button class="on" onclick="pickNewMode(\'prepaid\')">Prepaid</button><button onclick="pickNewMode(\'postpaid\')">Postpaid</button></div>'+
+    '<div class="t-meta" id="cwNewModeHint" style="margin:-4px 0 8px">Pays for each order before it is delivered, like customers.</div>'+
     '<div id="cwmMsg" style="font-size:12px;margin:4px 0 8px;min-height:14px"></div>'+
     '<button class="btn" id="cwNewSave" onclick="saveNewCoworker()">Create coworker</button>'+
     '<button class="btn sec" style="margin-top:8px" onclick="drawAdminCoworkers()">← Back</button>';
+}
+function pickNewMode(m){
+  const seg=document.getElementById('cwNewMode'); seg.dataset.mode=m;
+  [...seg.children].forEach((b,k)=>b.classList.toggle('on',(k===0)===(m==='prepaid')));
+  document.getElementById('cwNewModeHint').textContent=m==='postpaid'?'Orders without paying; you mark them paid later.':'Pays for each order before it is delivered, like customers.';
 }
 async function saveNewCoworker(){
   const v=id=>document.getElementById(id).value.trim(), btn=document.getElementById('cwNewSave');
@@ -2174,7 +2194,7 @@ async function saveNewCoworker(){
   if(!name||!username||!password) return cwMsg('Enter a name, a username and a password.');
   if(!(pct>0&&pct<=100)) return cwMsg('The percentage must be between 1 and 100.');
   btn.disabled=true; cwMsg('Creating…',true);
-  try{ const d=await adminPost('/api/admin_coworker_action',{action:'add',name,username,password,pct}); adminCw=d.items; showToast('Coworker added'); drawAdminCoworkers(); }
+  try{ const d=await adminPost('/api/admin_coworker_action',{action:'add',name,username,password,pct,mode:document.getElementById('cwNewMode').dataset.mode}); adminCw=d.items; showToast('Coworker added'); drawAdminCoworkers(); }
   catch(e){ cwMsg(e.message); btn.disabled=false; }
 }
 function drawEditCoworker(id){
@@ -2184,7 +2204,10 @@ function drawEditCoworker(id){
     '<button class="btn" style="margin:0;width:auto;padding:11px 16px" onclick="'+fn+'">Save</button></div>';
   document.getElementById('cwmContent').innerHTML=
     '<div class="t-meta" style="margin:0 0 6px">'+c.orders+' order'+(c.orders===1?'':'s')+(c.pending?' · '+c.pending+' pending':'')+' · $'+Number(c.revenue).toFixed(2)+' · since '+escHtml(c.date)+'</div>'+
-    '<button class="btn" style="margin:0 0 4px" onclick="drawCoworkerStats('+id+')">📊 Statistics</button>'+
+    '<button class="btn" style="margin:0 0 4px" onclick="drawCoworkerStats('+id+',null,\'overview\')">📊 Statistics</button>'+
+    '<div style="font-size:12px;color:var(--hint);margin:10px 0 4px">Mode of payment</div>'+
+    '<div class="seg"><button class="'+(c.mode!=='postpaid'?'on':'')+'" onclick="setCoworkerMode('+id+',\'prepaid\')">Prepaid</button><button class="'+(c.mode==='postpaid'?'on':'')+'" onclick="setCoworkerMode('+id+',\'postpaid\')">Postpaid</button></div>'+
+    '<div class="t-meta" style="margin:-4px 0 4px">'+(c.mode==='postpaid'?'Orders without paying; you mark them paid in Statistics → Not paid yet.'+(c.unpaid?' '+c.unpaid+' unpaid order'+(c.unpaid===1?'':'s')+' so far.':''):'Pays for each order before it is delivered, like customers.')+'</div>'+
     row('Percentage discount','pct',fieldBox('cwPct','Percentage (1–100)',c.pct,'number'),'saveCoworker('+id+',\'pct\')')+
     row('Login username','username',fieldBox('cwUser','Username',c.username),'saveCoworker('+id+',\'username\')')+
     row('Login password','password',fieldBox('cwPass','New password'),'saveCoworker('+id+',\'password\')')+
@@ -2192,18 +2215,27 @@ function drawEditCoworker(id){
     '<button class="tk-btn" style="color:#f87171;margin-bottom:8px" onclick="deleteCoworker('+id+')">🗑 Delete this coworker</button>'+
     '<button class="btn sec" onclick="drawAdminCoworkers()">← Back</button>';
 }
-let cwStatsPeriod='overall';
-async function drawCoworkerStats(id,period){
+let cwStatsPeriod='overall', cwStatsTab='overview';
+function cwTabs(id,c){
+  if(!c||c.mode!=='postpaid') return '';
+  const t=(k,l)=>'<button class="'+(cwStatsTab===k?'on':'')+'" onclick="'+(k==='overview'?'drawCoworkerStats('+id+',null,\'overview\')':'drawCoworkerLedger('+id+',\''+k+'\')')+'">'+l+'</button>';
+  return '<div class="seg">'+t('overview','Overview')+t('unpaid','Not paid yet'+(c.unpaid?' ('+c.unpaid+')':''))+t('paid','Paid')+'</div>';
+}
+async function drawCoworkerStats(id,period,tab){
   if(period) cwStatsPeriod=period;
+  if(tab) cwStatsTab=tab;
+  const cw=adminCw.find(x=>x.id===id);
+  if(cw&&cw.mode==='postpaid'&&cwStatsTab!=='overview') return drawCoworkerLedger(id,cwStatsTab);
   const el=document.getElementById('cwmContent'); el.innerHTML=loadingHtml;
   try{
     const d=await apiGet('/api/admin_coworker_stats?id='+id+'&period='+cwStatsPeriod);
     document.getElementById('cwmTitle').textContent='📊 '+d.name;
     const seg=[['today','Today'],['week','Week'],['month','Month'],['overall','Overall']].map(x=>'<button class="'+(cwStatsPeriod===x[0]?'on':'')+'" onclick="drawCoworkerStats('+id+',\''+x[0]+'\')">'+x[1]+'</button>').join('');
     const stat=(label,val)=>'<div style="flex:1;min-width:0;padding:10px;border-radius:12px;background:rgba(255,255,255,.05);text-align:center"><div style="font-size:11px;color:var(--hint)">'+label+'</div><div style="font-size:16px;font-weight:800;margin-top:2px">'+val+'</div></div>';
-    el.innerHTML='<div class="seg">'+seg+'</div>'+
+    el.innerHTML=cwTabs(id,cw)+'<div class="seg">'+seg+'</div>'+
       '<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">Bought · '+escHtml(d.label)+'</div><div class="n">'+money(d.revenue)+'</div><div style="font-size:12px;color:var(--hint);margin-top:2px">'+d.accounts+' account'+(d.accounts===1?'':'s')+' · '+d.orders+' order'+(d.orders===1?'':'s')+(d.orders?' · avg '+money(d.avg_order):'')+'</div></div>'+
       '<div style="display:flex;gap:8px;margin-bottom:10px">'+stat('Costs',money(d.costs))+stat('Profit',money(d.profit))+stat('Pending',d.pending)+'</div>'+
+      (d.mode==='postpaid'?'<div class="t-meta" style="margin:0 0 8px;color:#fbbf24">📒 Postpaid · owes you '+money(d.owed_total)+' for delivered, unpaid orders</div>':'')+
       '<div class="t-meta" style="margin:0 0 8px">@'+escHtml(d.username)+' · '+Number(d.pct)+'% off · since '+escHtml(d.since)+' · lifetime '+d.lifetime_orders+' order'+(d.lifetime_orders===1?'':'s')+' · '+money(d.lifetime_revenue)+(d.last?' · last order '+escHtml(d.last):'')+'</div>'+
       (d.products.length?'<div class="sub-section-lbl">Accounts bought</div>'+d.products.map(p=>'<div class="t-card" style="padding:9px 13px;margin-bottom:6px"><div class="t-top"><div class="t-title">'+escHtml(p.name)+'</div><span class="t-pill ok">× '+p.qty+'</span></div></div>').join(''):'<div class="search-empty">No paid orders in this period.</div>')+
       (d.recent.length?'<div class="sub-section-lbl" style="margin-top:10px">Latest orders</div>'+d.recent.map(o=>'<div class="t-card" style="padding:9px 13px;margin-bottom:6px"><div class="t-top"><div class="t-title">Order #'+o.id+'<div class="t-meta">'+escHtml(o.date)+' · '+escHtml(o.items)+'</div></div><span style="text-align:right"><div style="font-weight:700;font-size:13px">'+money(o.total)+'</div><div class="t-meta" style="margin:0">'+escHtml(o.status)+'</div></span></div></div>').join(''):'')+
@@ -2211,6 +2243,46 @@ async function drawCoworkerStats(id,period){
   }catch(e){ el.innerHTML=failHtml(e)+'<button class="btn sec" onclick="drawEditCoworker('+id+')">← Back</button>'; }
 }
 
+async function setCoworkerMode(id,mode){
+  const c=adminCw.find(x=>x.id===id); if(!c||c.mode===mode) return;
+  try{ const d=await adminPost('/api/admin_coworker_action',{action:'update',id,mode}); adminCw=d.items; drawEditCoworker(id); cwMsg(mode==='postpaid'?'Now postpaid — their orders go through without payment.':'Now prepaid — they pay before delivery.',true); }
+  catch(e){ cwMsg(e.message); }
+}
+async function drawCoworkerLedger(id,state){
+  cwStatsTab=state;
+  const cw=adminCw.find(x=>x.id===id), el=document.getElementById('cwmContent'); el.innerHTML=loadingHtml;
+  try{
+    const d=await apiGet('/api/admin_coworker_ledger?id='+id+'&state='+state);
+    document.getElementById('cwmTitle').textContent='📒 '+d.name;
+    const order=o=>'<div class="t-card" style="padding:10px 13px;margin-bottom:6px"><div class="t-top"><div class="t-title">Order #'+o.id+'<div class="t-meta">'+escHtml(o.date)+(o.settled_date?' · paid '+escHtml(o.settled_date):'')+' · '+escHtml(o.items)+'</div></div>'+
+      '<span style="text-align:right"><div style="font-weight:700;font-size:13px">'+money(o.total)+'</div><div class="t-meta" style="margin:0">'+(o.settled_date?'✅ paid':o.delivered?'✅ delivered':'⏳ being delivered')+'</div></span></div></div>';
+    let body;
+    if(state==='unpaid'){
+      body='<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">To be paid by '+escHtml(d.name)+'</div><div class="n">'+money(d.owed_total)+'</div><div style="font-size:12px;color:var(--hint);margin-top:2px">'+d.owed_orders+' delivered order'+(d.owed_orders===1?'':'s')+'</div></div>'+
+        '<div style="display:flex;gap:8px;margin-bottom:8px"><button class="tk-btn" style="flex:1;width:auto" onclick="toggleUnpaidReport()">📄 Show unpaid report</button>'+
+        '<button class="btn" style="margin:0;flex:1;width:auto;padding:9px" '+(d.owed_orders?'':'disabled ')+'onclick="markAllPaid('+id+','+d.owed_orders+','+d.owed_total+')">✅ Mark all as paid</button></div>'+
+        '<div id="cwReport" style="display:none;margin-bottom:10px"><pre id="cwReportText" style="white-space:pre-wrap;overflow-wrap:anywhere;margin:0 0 6px;padding:11px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.12);font-size:12.5px;line-height:1.5;font-family:inherit">'+escHtml(d.report)+'</pre>'+
+        '<button class="tk-btn" onclick="copyText(document.getElementById(\'cwReportText\').textContent,\'Report copied\')">📋 Copy report</button></div>'+
+        (d.waiting_orders?'<div class="t-meta" style="margin:0 0 6px">⏳ '+d.waiting_orders+' order'+(d.waiting_orders===1?'':'s')+' ('+money(d.waiting_total)+') still being delivered — they become payable once everything is delivered.</div>':'')+
+        (d.items.length?d.items.map(order).join(''):'<div class="empty-sheet"><div class="eico">✅</div>No unpaid orders.</div>');
+    }else{
+      body='<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">Paid by '+escHtml(d.name)+'</div><div class="n">'+money(d.paid_total)+'</div><div style="font-size:12px;color:var(--hint);margin-top:2px">'+d.paid_orders+' order'+(d.paid_orders===1?'':'s')+'</div></div>'+
+        (d.items.length?d.items.map(order).join(''):'<div class="empty-sheet"><div class="eico">📒</div>Nothing has been marked paid yet.</div>');
+    }
+    el.innerHTML=cwTabs(id,cw||{mode:'postpaid',unpaid:d.owed_orders+d.waiting_orders})+body+'<button class="btn sec" style="margin-top:8px" onclick="drawEditCoworker('+id+')">← Back</button>';
+  }catch(e){ el.innerHTML=failHtml(e)+'<button class="btn sec" onclick="drawEditCoworker('+id+')">← Back</button>'; }
+}
+function toggleUnpaidReport(){ const r=document.getElementById('cwReport'); r.style.display=r.style.display==='none'?'block':'none'; }
+function markAllPaid(id,n,total){
+  const c=adminCw.find(x=>x.id===id);
+  askConfirm('Mark all '+n+' delivered unpaid order'+(n===1?'':'s')+' ('+money(total)+') of '+(c?c.name:'this coworker')+' as paid? The unpaid report will be cleared.',async()=>{
+    try{
+      const d=await adminPost('/api/admin_coworker_settle',{id,action:'mark_all_paid'}); showToast(d.note||'Marked as paid');
+      try{ adminCw=(await apiGet('/api/admin_coworkers')).items||adminCw; }catch(e){}
+      drawCoworkerLedger(id,'unpaid');
+    }catch(e){ showToast(e.message); }
+  });
+}
 async function saveCoworker(id,field){
   const val=document.getElementById({pct:'cwPct',username:'cwUser',password:'cwPass'}[field]).value.trim();
   if(!val) return cwMsg(field==='password'?'Type the new password.':'Fill this in first.');
@@ -3211,6 +3283,16 @@ function buildPaymentPage(){
   if(_ov) _ov.classList.remove('on');
   selPay=null; selCountry=null; selApp=null;
   const pmGrid=document.getElementById('pmGrid');
+  if(POSTPAID){   // postpaid coworker: nothing to pay now, the order goes on their account
+    document.getElementById('payTitle').textContent='Place your order';
+    document.getElementById('discountBox').style.display='none';
+    pmGrid.innerHTML='<div class="pm" data-id="postpaid" style="grid-column:1/-1"><div class="ico">📒</div><div class="lbl">Pay later</div><div class="sub">Added to your account — nothing to pay now</div></div>';
+    pmGrid.firstChild.onclick=()=>selMethod('postpaid',total);
+    document.getElementById('sumCard').innerHTML=Object.entries(cart).map(([id,{name,price,qty}])=>
+      `<div class="sumrow"><div>${name}${qty>1?` ×${qty}`:''}</div><div class="r">$${((hasCoworkerDiscount(id)?coworkerPrice(price,id):price)*qty).toFixed(2)}</div></div>`
+    ).join('')+`<div class="sumrow"><div>Total (pay later)</div><div class="r">$${total.toFixed(2)}</div></div>`;
+    return;
+  }
   const addSectionLabel=(text)=>{
     const lbl=document.createElement('div');
     lbl.style.cssText='grid-column:1/-1;font-size:12px;font-weight:700;color:var(--hint);margin:8px 2px 2px;text-transform:uppercase;letter-spacing:.03em';
@@ -3286,6 +3368,9 @@ function selMethod(id,total){
         return;
       }
     }
+  }else if(id==='postpaid'){
+    det.innerHTML=`<div class="pdtl on">📒 <strong>Pay later</strong> — this order of <strong>$${total.toFixed(2)}</strong> is added to your account and settled with us afterwards. There is nothing to pay now, and delivery starts right away.</div>`;
+    sub.textContent='Place order — pay later ✅'; sub.style.display='block';
   }else if(id==='card'){
     det.innerHTML=`<div class="pdtl on">1. <a href="https://payments.suyool.com/pay/g401_MD" target="_blank" style="color:var(--teal2)">Open Payment Link ↗</a><br>2. "Pay online with your card"<br>3. From: your name · Amount: <strong>$${total.toFixed(2)}</strong> · Message: empty<br>4. Enter card details and complete</div>`;
     sub.textContent="I've Paid ✅"; sub.style.display='block';
@@ -3308,7 +3393,7 @@ function selMethod(id,total){
     det.innerHTML=`<div class="pdtl on">${USA_APPS[appName]||''}<br><br>Amount: <strong>$${total.toFixed(2)}</strong></div>`;
     sub.textContent="I've Paid ✅"; sub.style.display='block';
   }
-  const TITLES={stars:'⭐ Telegram Stars',credits:'🎁 My Credits',card:'💳 Visa/Mastercard',
+  const TITLES={postpaid:'📒 Pay later',stars:'⭐ Telegram Stars',credits:'🎁 My Credits',card:'💳 Visa/Mastercard',
     paypal:'🅿️ PayPal',crypto:'₿ Cryptocurrency',country_missing:'🌐 Select Your Country'};
   const title=TITLES[id]||(id.startsWith('app:')?id.slice(4):id.startsWith('country:')?id.slice(8):'Payment Details');
   openPmDetail(title);
