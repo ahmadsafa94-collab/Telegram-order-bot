@@ -1788,9 +1788,10 @@ function drawAdminPending(){
   if(adminPendTab!=='deliver') return;
   const el=document.getElementById('pendingContent');
   if(!adminPending.length){ el.innerHTML='<div class="empty-sheet"><div class="eico">✅</div><div style="font-size:14px;font-weight:600;margin-bottom:6px">Nothing waiting for delivery</div><div style="font-size:12px;color:var(--hint)">Paid orders that still need delivering show up here.</div></div>'; return; }
-  const orders=[]; adminPending.forEach(i=>{ let o=orders.find(x=>x.order_id===i.order_id); if(!o){ o={order_id:i.order_id,customer:i.customer,user_id:i.user_id,date:i.date,units:[]}; orders.push(o); } o.units.push(i); });
+  const orders=[]; adminPending.forEach(i=>{ let o=orders.find(x=>x.order_id===i.order_id); if(!o){ o={order_id:i.order_id,customer:i.customer,user_id:i.user_id,date:i.date,done:i.order_done||0,units:[]}; orders.push(o); } o.units.push(i); });
   el.innerHTML='<div class="t-meta" style="margin:0 0 8px">'+adminPending.length+' to deliver · '+orders.length+' order'+(orders.length===1?'':'s')+'</div>'+
-    orders.map(o=>'<div class="sub-section-lbl" style="margin-top:6px">Order #'+o.order_id+' · '+escHtml(o.customer)+' · '+escHtml(o.date)+'</div>'+
+    orders.map(o=>'<div class="sub-section-lbl" style="margin-top:6px;display:flex;align-items:center;justify-content:space-between;gap:8px"><span>Order #'+o.order_id+' · '+escHtml(o.customer)+' · '+escHtml(o.date)+'</span>'+
+      '<button class="via" style="border:0;cursor:pointer;background:rgba(239,68,68,.15);color:#f87171;margin:0;text-transform:none;letter-spacing:0" onclick="deleteAdminOrder('+o.order_id+')">🗑 Delete order</button></div>'+
       o.units.map(i=>
         '<div class="t-card" id="ap-'+i.fid+'"><div class="t-top"><div class="t-title">'+escHtml(i.name)+(i.unit>1?' #'+i.unit:'')+'</div>'+
         '<span class="t-pill '+(i.state==='needs_info'?'open':'ok')+'">'+(i.state==='needs_info'?'⌛ Waiting for customer':'📤 Ready')+'</span></div>'+
@@ -1800,6 +1801,19 @@ function drawAdminPending(){
           (i.imd?'':'<button class="btn" style="margin:0;padding:10px;width:auto;flex:1.4" onclick="openDeliver('+i.fid+')">📤 Deliver</button>')+
           '<button class="tk-btn" style="flex:1;width:auto;white-space:nowrap" onclick="adminChat(\'deliver\','+i.fid+')">'+(i.imd?'🤖 Renew / deliver in chat':'💬 Open in chat')+'</button>'+
         '</div></div>').join('')).join('');
+}
+function deleteAdminOrder(orderId){
+  const units=adminPending.filter(x=>x.order_id===orderId); if(!units.length) return;
+  const done=units[0].order_done||0;
+  askConfirm('Delete order #'+orderId+' ('+units[0].customer+') completely? Its '+units.length+' pending item'+(units.length===1?'':'s')+
+    (done?' and '+done+' already delivered one'+(done===1?'':'s')+' (they vanish from the customer\'s My Subscriptions)':'')+
+    ' will be removed from the Shop, the statistics and the bot. The customer is not told. This can\'t be undone.',async()=>{
+    try{
+      const d=await adminPost('/api/admin_delete_order',{order_id:orderId});
+      adminPending=adminPending.filter(x=>x.order_id!==orderId); setAdminBadges(); drawAdminPendTabs(); drawAdminPending();
+      showToast(d.note||'Order deleted'); refreshAdminCounts();
+    }catch(e){ showToast(e.message); }
+  });
 }
 let deliverFid=null;
 function openDeliver(fid){
