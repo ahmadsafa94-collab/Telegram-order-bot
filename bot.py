@@ -102,7 +102,7 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Pages has a newer version, so a query param that only changes when the
 # page's contents change (bumped by hand on every index.html edit) forces
 # a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "59"
+MINI_APP_VERSION = "60"
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
@@ -7080,17 +7080,16 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await coworkers_menu(update, context)
 
 
-def format_fulfilment_info(item_id: str, info_json: str) -> str:
-    """Renders the details a customer submitted for one unit."""
+def fulfilment_info_fields(info_json: str) -> list:
+    """[(label, value)] for what a customer submitted for one unit (empty when nothing)."""
     if not info_json:
-        return "(no details collected)"
+        return []
     try:
         info = json.loads(info_json)
     except (TypeError, ValueError):
-        return "(details unreadable)"
-    if not info:
-        return "(no details collected)"
-
+        return []
+    if not isinstance(info, dict):
+        return []
     labels = {
         "first_name": "First name", "last_name": "Last name", "email": "Email",
         "username": "Username", "password": "Password",
@@ -7101,9 +7100,20 @@ def format_fulfilment_info(item_id: str, info_json: str) -> str:
     # Internal bookkeeping for a 2-Year iMD order's second serial — not
     # something the customer submitted, so not worth showing here.
     hidden_keys = {"imd2y_step", "imd2y_username"}
-    return "\n".join(
-        f"{labels.get(k, k)}: {v}" for k, v in info.items() if k not in hidden_keys
-    )
+    return [(labels.get(k, k), str(v)) for k, v in info.items() if k not in hidden_keys]
+
+
+def format_fulfilment_info(item_id: str, info_json: str) -> str:
+    """Renders the details a customer submitted for one unit."""
+    if not info_json:
+        return "(no details collected)"
+    try:
+        info = json.loads(info_json)
+    except (TypeError, ValueError):
+        return "(details unreadable)"
+    if not info:
+        return "(no details collected)"
+    return "\n".join(f"{label}: {value}" for label, value in fulfilment_info_fields(info_json))
 
 
 PAYMENT_METHOD_ICONS = {
@@ -11058,6 +11068,33 @@ def db_admin_delivered(query: str = "", offset: int = 0, limit: int = ADMIN_PAGE
     return items[offset:offset + limit], len(items)
 
 
+AMBOSS_PREMIUM_ITEMS = {"item4", "amboss_premium_1y", "amboss_premium_promo"}
+
+
+def delivery_template_kind(item_id: str) -> str:
+    """Which ready-made delivery message the Shop offers for this product."""
+    if item_id in AMBOSS_PREMIUM_ITEMS:
+        return "amboss_premium"
+    if item_id == "amboss_library":
+        return "amboss_library"
+    if item_id.startswith("up_") and item_id.endswith("_web"):
+        return "uptodate_web"
+    if item_id.startswith("up_") and item_id.endswith("_app"):
+        return "uptodate_app"
+    if item_id in ("item1", "item3"):
+        return "uptodate"
+    return "other"
+
+
+def delivery_title_duration(name: str):
+    """('Uptodate Online - Mobile App', '1 Year') from 'Uptodate Online 1 Year - Mobile App'."""
+    m = re.search(r"\b(\d+)\s*(years?|months?)\b", name, re.I)
+    duration = f"{m.group(1)} {m.group(2).capitalize()}" if m else ""
+    title = re.sub(r"\s*\b\d+\s*(?:years?|months?)\b", "", name, flags=re.I) if m else name
+    title = re.sub(r"(\s*-\s*){2,}", " - ", title).strip(" -")
+    return re.sub(r"\s{2,}", " ", title), duration
+
+
 def db_admin_pending() -> list:
     """Paid orders with units still to deliver, with what the customer filled in."""
     rows = db_all_pending_items()
@@ -11073,7 +11110,10 @@ def db_admin_pending() -> list:
             "fid": fid, "order_id": oid, "item_id": iid, "name": MENU.get(iid, (iid,))[0], "unit": unit_no,
             "user_id": uid, "customer": f"@{uname}" if uname else str(uid), "state": state, "date": (created or "")[:10],
             "info": format_fulfilment_info(iid, info.get(fid)) if info.get(fid) else "",
-            "imd": iid in IMD_TRIGGER_ITEMS,
+            "fields": [{"label": l, "value": v} for l, v in fulfilment_info_fields(info.get(fid))],
+            "imd": iid in IMD_TRIGGER_ITEMS, "template": delivery_template_kind(iid),
+            "title": delivery_title_duration(MENU.get(iid, (iid,))[0])[0],
+            "duration": delivery_title_duration(MENU.get(iid, (iid,))[0])[1],
         })
     return out
 
@@ -11132,6 +11172,28 @@ async def http_admin_deliver(request):
                                  status=502, headers=headers)
     name, order_id, delivery_id = result
     return web.json_response({"ok": True, "name": name, "order_id": order_id, "delivery_id": delivery_id}, headers=headers)
+
+
+async def http_admin_edit_delivery(request):
+    """Correct the account details of something already delivered, from the admin Shop."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        data = await request.json()
+        delivery_id, text, notify = data["delivery_id"], data["text"], bool(data.get("notify"))
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if isinstance(delivery_id, bool) or not isinstance(delivery_id, int) or not isinstance(text, str) or not text.strip() or len(text) > 3500:
+        return web.json_response({"ok": False, "error": "Type the corrected account details."}, status=400, headers=headers)
+    row = db_get_delivery_admin(delivery_id)
+    if not row:
+        return web.json_response({"ok": False, "error": "That delivery no longer exists."}, status=404, headers=headers)
+    context = _HttpContext(request.app["application"], ADMIN_CHAT_ID)
+    name, order_id, note = await _apply_delivery_edit(context, row, text.strip(), notify)
+    return web.json_response({"ok": True, "note": f"Updated {name} (Order #{order_id}) {note}.", "text": text.strip()}, headers=headers)
 
 
 class _HttpCbUpdate:
@@ -12190,6 +12252,8 @@ async def start_api_server(application):
     api_app.router.add_post("/api/admin_deliver", http_admin_deliver)
     api_app.router.add_options("/api/admin_deliver", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_chat_action", http_admin_chat_action)
+    api_app.router.add_post("/api/admin_edit_delivery", http_admin_edit_delivery)
+    api_app.router.add_options("/api/admin_edit_delivery", http_set_coworker_price_options)
     api_app.router.add_get("/api/admin_counts", http_admin_counts)
     api_app.router.add_get("/api/admin_tickets", http_admin_tickets)
     api_app.router.add_get("/api/admin_ticket_photo", http_admin_ticket_photo)
@@ -16569,10 +16633,16 @@ async def edit_delivery_notify_choice(update: Update, context: ContextTypes.DEFA
         await query.edit_message_text("That delivery no longer exists.")
         return
 
-    _, order_id, user_id, item_id, _old_message, message_id, delivered_at = row
-    name = MENU.get(item_id, (item_id,))[0]
+    name, order_id, status_note = await _apply_delivery_edit(context, row, new_text, choice == "yes")
+    await query.edit_message_text(f"✅ Updated {name} credentials (Order #{order_id}) {status_note}.")
 
-    notify = choice == "yes"
+
+async def _apply_delivery_edit(context, row, new_text: str, notify: bool):
+    """Saves corrected account details for a delivery and, if asked, tells the customer (editing
+    the original message when it can, else sending the correction). Returns (name, order_id, note)."""
+    delivery_id, order_id, user_id, item_id, _old_message, message_id, delivered_at = row
+    name = MENU.get(item_id, (item_id,))[0]
+    status_note = "— customer was NOT notified"
     if notify:
         new_body = f"🔑 Here are your account details for {name} (Order #{order_id}):\n\n{new_text}"
         edited_in_place = False
@@ -16582,20 +16652,21 @@ async def edit_delivery_notify_choice(update: Update, context: ContextTypes.DEFA
                 edited_in_place = True
             except Exception:
                 logger.exception("Failed to edit delivery message %s for user %s", delivery_id, user_id)
-        if not edited_in_place:
-            # Can't edit in place (message too old, deleted, or its id was
-            # never captured) — send the correction as a new message instead.
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"✏️ Updated account details for {name} (Order #{order_id}):\n\n{new_text}",
-            )
-        status_note = "and the customer was notified"
-    else:
-        status_note = "— customer was NOT notified"
-
+        try:
+            if not edited_in_place:
+                # Can't edit in place (message too old, deleted, or its id was
+                # never captured) — send the correction as a new message instead.
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"✏️ Updated account details for {name} (Order #{order_id}):\n\n{new_text}",
+                )
+            status_note = "and the customer was notified"
+        except Exception:
+            logger.exception("Couldn't tell user %s about the corrected delivery %s", user_id, delivery_id)
+            status_note = "— but the customer could not be notified (they may have blocked the bot)"
     db_update_delivery_message(delivery_id, new_text)
     db_update_order_credentials(order_id, new_text)
-    await query.edit_message_text(f"✅ Updated {name} credentials (Order #{order_id}) {status_note}.")
+    return name, order_id, status_note
 
 
 async def add_serials_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

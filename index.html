@@ -352,6 +352,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .t-meta{font-size:11px;color:var(--hint);margin-top:3px}
 .t-body{font-size:12.5px;line-height:1.55;margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere}
 .t-answer{margin-top:8px;padding:9px 11px;border-radius:10px;background:rgba(13,148,136,.12);border:1px solid rgba(13,148,136,.3);font-size:12.5px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.fld-list{margin-top:8px;display:flex;flex-direction:column;gap:5px}
+.fld{display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:8px 10px;border-radius:9px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.03);color:var(--text);font-size:12.5px;cursor:pointer}
+.fld:active{background:rgba(13,148,136,.18)}
+.fld-l{flex-shrink:0;color:var(--hint);font-size:11px;min-width:64px}
+.fld-v{flex:1;min-width:0;overflow-wrap:anywhere;font-weight:600}
+.fld-c{flex-shrink:0;font-size:13px;opacity:.7}
 .seg{display:flex;gap:4px;padding:3px;margin:0 0 10px;border-radius:12px;background:rgba(255,255,255,.06)}
 .seg button{flex:1;padding:8px 6px;border:0;border-radius:9px;background:transparent;color:var(--hint);font-size:12.5px;font-weight:700;cursor:pointer}
 .seg button.on{background:var(--teal);color:#fff}
@@ -664,9 +670,10 @@ body.in-checkout{padding-bottom:100px}
     <div class="sheet-handle"></div>
     <div class="sheet-title" id="delTitle">Deliver</div>
     <div style="padding:0 15px 15px">
-      <div id="delInfo" class="t-meta" style="margin:6px 0 10px;white-space:pre-wrap;overflow-wrap:anywhere"></div>
-      <div style="font-size:12px;color:var(--hint);margin:4px 0">Account details to send to the customer</div>
-      <textarea id="delText" class="cw-input" rows="5" maxlength="3500" placeholder="Username, password, link …" aria-label="Account details"></textarea>
+      <div id="delInfo" class="t-meta" style="margin:6px 0 10px;overflow-wrap:anywhere"></div>
+      <div id="delLabel" style="font-size:12px;color:var(--hint);margin:4px 0">Account details to send to the customer</div>
+      <textarea id="delText" class="cw-input" rows="13" maxlength="3500" placeholder="Username, password, link …" aria-label="Account details" style="font-size:13.5px;line-height:1.45"></textarea>
+      <label id="delNotifyRow" style="display:none;align-items:center;gap:8px;font-size:13px;margin:8px 0 0"><input type="checkbox" id="delNotify" checked> Tell the customer about the change</label>
       <div id="delMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>
       <button class="btn" id="delSend" onclick="sendDeliver()">📤 Send to customer</button>
       <button class="btn sec" style="margin-top:8px" onclick="closeDeliver()">Cancel</button>
@@ -1697,7 +1704,8 @@ async function loadAdminDelivered(reset){
         '<div class="ad-body" style="display:none"><div class="t-body">'+(i.text?escHtml(i.text):'<span style="color:var(--hint)">No text on file for this delivery.</span>')+'</div>'+
         '<div style="display:flex;gap:8px;margin-top:10px">'+
           (i.text?'<button class="tk-btn" onclick="copyAdminText('+n+')">📋 Copy</button>':'')+
-          (i.delivery_id?'<button class="tk-btn" onclick="adminChat(\'editdeliv\','+i.delivery_id+')">✏️ Edit in chat</button>':'')+
+          (i.delivery_id?'<button class="tk-btn" onclick="openEditDelivery('+n+')">✏️ Edit</button>':'')+
+          (i.delivery_id?'<button class="tk-btn" onclick="adminChat(\'editdeliv\','+i.delivery_id+')">💬 In chat</button>':'')+
         '</div></div></div>').join('')+
       (adminDel.items.length<adminDel.total?'<button class="btn sec" style="margin:4px 0 8px" onclick="loadAdminDelivered(false)">Show more</button>':'');
   }catch(e){ if(seq===adminDelSeq) el.innerHTML=failHtml(e); }
@@ -1744,7 +1752,7 @@ function drawAdminPending(){
       o.units.map(i=>
         '<div class="t-card" id="ap-'+i.fid+'"><div class="t-top"><div class="t-title">'+escHtml(i.name)+(i.unit>1?' #'+i.unit:'')+'</div>'+
         '<span class="t-pill '+(i.state==='needs_info'?'open':'ok')+'">'+(i.state==='needs_info'?'⌛ Waiting for customer':'📤 Ready')+'</span></div>'+
-        (i.info?'<div class="t-body" style="font-size:12px;color:var(--hint)">'+escHtml(i.info)+'</div>':'<div class="t-meta">The customer has not sent any details.</div>')+
+        fieldsHtml(i)+
         '<div style="display:flex;gap:8px;margin-top:10px">'+
           (i.imd?'':'<button class="btn" style="margin:0;padding:10px;width:auto;flex:1.4" onclick="openDeliver('+i.fid+')">📤 Deliver</button>')+
           '<button class="tk-btn" style="flex:1;width:auto;white-space:nowrap" onclick="adminChat(\'deliver\','+i.fid+')">'+(i.imd?'🤖 Renew / deliver in chat':'💬 Open in chat')+'</button>'+
@@ -1753,20 +1761,93 @@ function drawAdminPending(){
 let deliverFid=null;
 function openDeliver(fid){
   const i=adminPending.find(x=>x.fid===fid); if(!i) return;
-  deliverFid=fid;
+  deliverFid=fid; editDelivery=null;
   document.getElementById('delTitle').textContent=i.name+' · Order #'+i.order_id;
-  document.getElementById('delInfo').textContent=i.customer+(i.state==='needs_info'?'\nThe customer has not sent their details yet.':'')+(i.info?'\n'+i.info:'');
-  document.getElementById('delText').value=''; document.getElementById('delMsg').textContent='';
+  document.getElementById('delInfo').innerHTML=escHtml(i.customer)+(i.state==='needs_info'?'<br>The customer has not sent their details yet.':'')+((i.fields&&i.fields.length)||i.info?fieldsHtml(i):'');
+  document.getElementById('delLabel').textContent='Account details to send to the customer — fill in what is missing';
+  document.getElementById('delNotifyRow').style.display='none';
+  document.getElementById('delSend').textContent='📤 Send to customer';
+  const box=document.getElementById('delText'); box.value=deliveryTemplate(i); document.getElementById('delMsg').textContent='';
+  document.getElementById('delOverlay').classList.add('on');
+  setTimeout(()=>{ box.focus(); const k=box.value.indexOf('Username:'); const p=k>=0?k+'Username:'.length:box.value.length; try{ box.setSelectionRange(p,p); }catch(e){} box.scrollTop=0; },150);
+}
+// Editing something already delivered (Delivered tab)
+let editDelivery=null;
+function openEditDelivery(n){
+  const i=adminDel.items[n]; if(!i||!i.delivery_id) return;
+  editDelivery={n,id:i.delivery_id}; deliverFid=null;
+  document.getElementById('delTitle').textContent='✏️ Edit · '+i.name+' · Order #'+i.order_id;
+  document.getElementById('delInfo').textContent=i.customer;
+  document.getElementById('delLabel').textContent='Account details the customer received';
+  document.getElementById('delNotifyRow').style.display='flex'; document.getElementById('delNotify').checked=true;
+  document.getElementById('delSend').textContent='💾 Save changes';
+  document.getElementById('delText').value=i.text||''; document.getElementById('delMsg').textContent='';
   document.getElementById('delOverlay').classList.add('on');
   setTimeout(()=>document.getElementById('delText').focus(),150);
 }
-function closeDeliver(){document.getElementById('delOverlay').classList.remove('on'); deliverFid=null;}
+function closeDeliver(){document.getElementById('delOverlay').classList.remove('on'); deliverFid=null; editDelivery=null;}
+
+// Tap a detail to copy just that one
+function copyText(text,okMsg){
+  const fallback=()=>{ try{ const t=document.createElement('textarea'); t.value=text; t.style.position='fixed'; t.style.opacity='0'; document.body.appendChild(t); t.select(); const ok=document.execCommand('copy'); t.remove(); showToast(ok?okMsg:'Select the text and copy it'); }catch(e){ showToast('Select the text and copy it'); } };
+  try{ navigator.clipboard.writeText(text).then(()=>showToast(okMsg)).catch(fallback); }catch(e){ fallback(); }
+}
+function fieldsHtml(i){
+  if(i.fields&&i.fields.length) return '<div class="fld-list">'+i.fields.map((f,k)=>
+    '<button class="fld" onclick="copyField('+i.fid+','+k+')"><span class="fld-l">'+escHtml(f.label)+'</span><span class="fld-v">'+escHtml(f.value)+'</span><span class="fld-c">📋</span></button>').join('')+'</div>';
+  return i.info?'<div class="t-body" style="font-size:12px;color:var(--hint)">'+escHtml(i.info)+'</div>':'<div class="t-meta">The customer has not sent any details.</div>';
+}
+function copyField(fid,k){ const i=adminPending.find(x=>x.fid===fid), f=i&&i.fields&&i.fields[k]; if(f) copyText(f.value,f.label+' copied'); }
+
+// Ready-made delivery message per subscription — the admin fills in what is missing
+const TPL_WARN_APP='❌🛑 STRICTLY , DO NOT USE the account on the browser (web) or try to change the password as this will lead to blocking the account by Uptodate and it cant be restored. Use the account on the mobile app only.';
+const TPL_WARN_WEB='❌🛑 STRICTLY , DO NOT USE the account of the app on the official website or try to change the password as this will lead to blocking the account by Uptodate and it cant be restored. Use the account on the mobile app only.';
+const TPL_UP_RENEW='♦️ Uptodate account we gave you will automatically be disabled after 3 months, and we will automatically renew it for you. You dont have to do anything about it. ';
+const TPL_LOSE='♦️ If you lose access to the account you bought, just contact us to renew your subscription or fix it.';
+const TPL_AMBOSS=['♦️Though the account is personal, You cant change the username or password to keep the license active.',' ','♦️If you face any problems, kindly contact us to fix it.'];
+function deliveryTemplate(i){
+  const date=new Date().toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
+  const dur=i.duration||'1 Year', durl=dur.toLowerCase(), title=i.title||i.name;
+  const guar='♦️Your subscription is guaranteed the whole duration of '+durl+'.';
+  const remarksApp=['Remarks:','',TPL_WARN_APP,'','',TPL_UP_RENEW,'',guar,'',TPL_LOSE];
+  let lines;
+  switch(i.template){
+    case 'uptodate':          // Uptodate (plan not named app / app + web)
+      lines=['Subscription:  '+durl,'Date: '+date,'','Username:','Password:','','',''].concat(remarksApp); break;
+    case 'uptodate_app':      // Uptodate, mobile app only
+      lines=['Subscription: '+title+' - '+durl,'Date: '+date,'','Username:','Password:','','',''].concat(remarksApp); break;
+    case 'uptodate_web':      // Uptodate, app + website
+      lines=['Subscription: '+title,'Date: '+date+' ('+dur+')','','','✅ App credentials: (dont use on website) ','Username: ','Password: ','','',
+        '✅ Website Credentials through utd.libook.xyz ','Username: ','Password: ','','','','Remarks:','',TPL_WARN_WEB,'','',TPL_UP_RENEW,'',guar,'',TPL_LOSE]; break;
+    case 'amboss_premium':
+      lines=['✅ Amboss official '+durl+' full Access','Date: '+date,'','Username:','Password: ',''].concat(TPL_AMBOSS); break;
+    case 'amboss_library':
+      lines=['✅ Amboss Library - '+durl,'Date: '+date,'','Username:','Password: ',''].concat(TPL_AMBOSS); break;
+    default:
+      lines=['Subscription: '+title+' - '+durl,'Date: '+date,'','Username:','Password:','','','','Remarks:','',guar,'',TPL_LOSE];
+  }
+  return lines.join('\n');
+}
 async function sendDeliver(){
   const msg=document.getElementById('delMsg'), btn=document.getElementById('delSend');
   const text=document.getElementById('delText').value.trim();
   const bad=t=>{ msg.style.color='#dc2626'; msg.textContent=t; };
   if(!text) return bad('Type the account details to send.');
+  if(editDelivery) return saveDeliveryEdit(text,msg,btn);
   const fid=deliverFid; if(!fid) return;
+  if(/^Username:[ \t]*$/m.test(text)&&/^Password:[ \t]*$/m.test(text)){ return askConfirm('Username and Password are both still empty. Send anyway?',()=>sendDeliverNow(fid,text,msg,btn)); }
+  sendDeliverNow(fid,text,msg,btn);
+}
+async function saveDeliveryEdit(text,msg,btn){
+  const {n,id}=editDelivery;
+  btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Saving…';
+  try{
+    const d=await adminPost('/api/admin_edit_delivery',{delivery_id:id,text,notify:document.getElementById('delNotify').checked});
+    closeDeliver(); showToast(d.note||'Saved'); loadAdminDelivered(true);
+  }catch(e){ msg.style.color='#dc2626'; msg.textContent=e.message; }
+  finally{ btn.disabled=false; }
+}
+async function sendDeliverNow(fid,text,msg,btn){
   btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Sending…';
   try{
     const resp=await fetch(withAuth('/api/admin_deliver'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fulfilment_id:fid,text})});
