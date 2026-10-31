@@ -1297,6 +1297,18 @@ def db_init():
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS chat_log_user ON chat_log (user_id, id)")
+    # Copy of an order (order, units, deliveries) taken just before it is deleted, so /restoreorder can
+    # bring it back. Kept 90 days.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS deleted_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            deleted_at TEXT NOT NULL
+        )
+        """
+    )
     # Customer messages this bot couldn't handle (a question, text it wasn't waiting for, an
     # answer that doesn't fit the question it asked), for the support chatbot to pick up and
     # answer: see _hand_to_assistant and /api/assist_events.
@@ -1334,6 +1346,7 @@ def db_init():
 
     load_bundled_imd_catalog()
     backfill_imd_years()
+    db_heal_delivered_pending()
 
 
 def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, message_id: int = None) -> int:
@@ -1503,7 +1516,131 @@ def db_delete_fulfilment(fulfilment_id: int):
     return bool(deleted)
 
 
-def db_delete_order(order_id: int):
+ORDER_SNAPSHOT_TABLES = ("orders", "fulfilment", "deliveries")
+DELETED_ORDER_KEEP_DAYS = 90
+
+
+def _read_order_rows(conn, order_id: int) -> dict:
+    """The order's rows from the orders, fulfilment and deliveries tables as {table: [row dict]}."""
+    out = {}
+    for table in ORDER_SNAPSHOT_TABLES:
+        key = "id" if table == "orders" else "order_id"
+        try:
+            cur = conn.execute(f"SELECT * FROM {table} WHERE {key} = ?", (order_id,))
+        except sqlite3.Error:
+            out[table] = []
+            continue
+        names = [c[0] for c in cur.description]
+        out[table] = [dict(zip(names, row)) for row in cur.fetchall()]
+    return out
+
+
+def db_snapshot_order(order_id: int) -> bool:
+    """Saves a copy of the order before it is deleted or loses a unit. Never raises."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = _read_order_rows(conn, order_id)
+        if rows["orders"]:
+            now = datetime.utcnow()
+            conn.execute(
+                "INSERT INTO deleted_orders (order_id, snapshot_json, deleted_at) VALUES (?, ?, ?)",
+                (order_id, json.dumps(rows), now.isoformat(timespec="seconds")),
+            )
+            conn.execute(
+                "DELETE FROM deleted_orders WHERE deleted_at < ?",
+                ((now - timedelta(days=DELETED_ORDER_KEEP_DAYS)).isoformat(timespec="seconds"),),
+            )
+            conn.commit()
+        conn.close()
+        return bool(rows["orders"])
+    except Exception:
+        logger.exception("Couldn't snapshot order #%s before deleting it", order_id)
+        return False
+
+
+def db_latest_order_snapshot(order_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT snapshot_json FROM deleted_orders WHERE order_id = ? ORDER BY id DESC LIMIT 1", (order_id,)
+    ).fetchone()
+    conn.close()
+    return json.loads(row[0]) if row else None
+
+
+def db_restore_order_rows(rows: dict) -> dict:
+    """Puts an order's rows (a snapshot, or read from a backup) back into the live database, keeping their
+    ids. Only columns that exist here are written; a row whose id is taken is skipped. Returns
+    {"orders": n, "fulfilment": n, "deliveries": n} of rows added."""
+    added = {}
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        for table in ORDER_SNAPSHOT_TABLES:
+            live_cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            added[table] = 0
+            for row in rows.get(table) or []:
+                cols = [c for c in row if c in live_cols]
+                if not cols:
+                    continue
+                cur = conn.execute(
+                    f"INSERT OR IGNORE INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
+                    [row[c] for c in cols],
+                )
+                added[table] += cur.rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    return added
+
+
+def db_find_delivery_text_in_chat(user_id: int, since: str):
+    """The latest iMD delivery message the shop bot sent this customer on/after `since` (from the chat
+    log), as (text, sent_at), or None. A body with a hidden password is not usable."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT body, created_at FROM chat_log WHERE user_id = ? AND direction = 'bot' "
+        "AND body LIKE '✅ IMD % Full Access%' AND created_at >= ? ORDER BY id DESC LIMIT 1",
+        (user_id, (since or "")[:10]),
+    ).fetchone()
+    conn.close()
+    if not row or "[hidden]" in row[0]:
+        return None
+    body = row[0].split("\nButtons:")[0].rstrip()
+    return body, row[1]
+
+
+def db_reconcile_restored_order(order_id: int) -> str:
+    """After a restore: if the customer received their iMD login (the chat log has it) but the restored order
+    has no delivery record, rebuild the record and mark the order delivered. Returns a short report line."""
+    conn = sqlite3.connect(DB_PATH)
+    order = conn.execute("SELECT user_id, created_at FROM orders WHERE id = ?", (order_id,)).fetchone()
+    units = conn.execute("SELECT id, item_id, state FROM fulfilment WHERE order_id = ? ORDER BY id", (order_id,)).fetchall()
+    have = conn.execute("SELECT COUNT(*) FROM deliveries WHERE order_id = ?", (order_id,)).fetchone()[0]
+    conn.close()
+    if not order:
+        return "The order wasn't restored."
+    if have or not units:
+        return "Delivery records came back with the order." if have else "The order has no items."
+    imd_units = [u for u in units if u[1] in IMD_TRIGGER_ITEMS]
+    if len(units) != 1 or not imd_units:
+        return "Not delivered yet: send the items from Pending Orders."
+    found = db_find_delivery_text_in_chat(order[0], order[1])
+    if not found:
+        return ("The customer's iMD login isn't in the chat log, so the order is back as pending. "
+                "Use 📤 Send iMD Details Now in Pending Orders.")
+    text, sent_at = found
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO deliveries (order_id, user_id, item_id, message, delivered_at) VALUES (?, ?, ?, ?, ?)",
+        (order_id, order[0], imd_units[0][1], text, sent_at),
+    )
+    conn.execute("UPDATE fulfilment SET state = 'delivered' WHERE id = ?", (imd_units[0][0],))
+    conn.commit()
+    conn.close()
+    db_save_delivery(order_id, text)
+    return "Rebuilt the delivery from the message the customer received, so it shows as delivered again."
+
+
+def db_delete_order(order_id: int, snapshot: bool = True):
     """Deletes an order entirely — the order row itself, any fulfilment
     rows (the Mini App pre-stores registration details before payment, so
     even a rejected/unpaid order can already have some), and any
@@ -1512,6 +1649,8 @@ def db_delete_order(order_id: int):
     deliveries table by user_id alone, with no join back to orders, so
     leaving those rows behind would make a "deleted" order keep showing up
     to the customer as if nothing happened."""
+    if snapshot:
+        db_snapshot_order(order_id)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM fulfilment WHERE order_id = ?", (order_id,))
     conn.execute("DELETE FROM deliveries WHERE order_id = ?", (order_id,))
@@ -1531,6 +1670,7 @@ def db_remove_pending_unit(fulfilment_id: int):
     if not row:
         return None
     _, order_id, user_id, item_id, unit_no, state, info_json = row
+    db_snapshot_order(order_id)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM fulfilment WHERE id = ?", (fulfilment_id,))
     remaining = conn.execute("SELECT COUNT(*) FROM fulfilment WHERE order_id = ?", (order_id,)).fetchone()[0]
@@ -1538,7 +1678,7 @@ def db_remove_pending_unit(fulfilment_id: int):
     conn.commit()
     conn.close()
     if remaining == 0:
-        db_delete_order(order_id)
+        db_delete_order(order_id, snapshot=False)  # the full copy above is the one to keep
         return {"order_id": order_id, "order_deleted": True}
     if order:
         try:
@@ -3510,7 +3650,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_imd_api_url", "imd_saved_token",
     "awaiting_imd_diag_username", "awaiting_imd_diag_password", "imd_diag_username",
     "awaiting_sync_serials_username", "awaiting_sync_serials_password", "sync_serials_username",
-    "awaiting_restore_file", "restore_staged_path",
+    "awaiting_restore_file", "restore_staged_path", "awaiting_restoreorder_file",
     "awaiting_discount_field", "discount_data",
     "awaiting_resend_message_for_fulfilment",
     "awaiting_coworker_add_field", "coworker_add_data",
@@ -14683,17 +14823,47 @@ async def pending_delete_confirm(update: Update, context: ContextTypes.DEFAULT_T
     _, order_id, user_id, item_id, unit_no, state, info_json = row
     name = MENU.get(item_id, (item_id,))[0]
 
+    conn = sqlite3.connect(DB_PATH)
+    units = conn.execute("SELECT COUNT(*) FROM fulfilment WHERE order_id = ?", (order_id,)).fetchone()[0]
+    delivered_rows = conn.execute("SELECT COUNT(*) FROM deliveries WHERE order_id = ?", (order_id,)).fetchone()[0]
+    conn.close()
+    warning = ""
+    if delivered_rows:
+        warning += (
+            "⚠️ The customer ALREADY RECEIVED this (it has a delivery record). Deleting it removes it from "
+            "their My Subscriptions as well.\n\n"
+        )
+    if units == 1:
+        warning += "⚠️ It's the order's only item, so the WHOLE ORDER is deleted (also from the Shop and the statistics).\n\n"
+    buttons = []
+    if delivered_rows:
+        buttons.append([InlineKeyboardButton("✅ Already delivered: just clear it from Pending", callback_data=f"pclear:{fulfilment_id}")])
+    buttons.append([InlineKeyboardButton("🗑 Yes, delete it" if delivered_rows else "✅ Yes, delete it", callback_data=f"pdel_yes:{fulfilment_id}")])
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"apend:{fulfilment_id}")])
     await query.edit_message_text(
         f"Delete {name}{f' #{unit_no}' if unit_no > 1 else ''} from Order #{order_id}?\n\n"
-        "This removes it from Pending Orders permanently — the customer will NOT be notified "
-        "and this can't be undone.",
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("✅ Yes, delete it", callback_data=f"pdel_yes:{fulfilment_id}")],
-                [InlineKeyboardButton("❌ Cancel", callback_data=f"apend:{fulfilment_id}")],
-            ]
-        ),
+        f"{warning}"
+        "This removes it from Pending Orders — the customer will NOT be notified. "
+        "A copy is kept for 90 days (/restoreorder).",
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
+
+
+async def pending_clear_delivered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'Already delivered: just clear it from Pending' — marks the unit delivered, deletes nothing."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    fulfilment_id = int(query.data.split(":", 1)[1])
+    row = db_get_fulfilment(fulfilment_id)
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Pending Orders", callback_data="apend_back")]])
+    if not row:
+        await query.edit_message_text("That item no longer exists.", reply_markup=back)
+        return
+    db_set_fulfilment_state(fulfilment_id, "delivered")
+    await query.edit_message_text(f"✅ Order #{row[1]} cleared from Pending Orders. The delivery stays as it was.", reply_markup=back)
 
 
 async def pending_delete_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -16102,6 +16272,40 @@ async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT
         await finish_imd_collection(update, context, data)
 
 
+def db_imd_unit_for_order(order_id: int):
+    """(fulfilment id, item id) of the order's first iMD unit that isn't delivered yet, or (None, None).
+    Used when the registration data lost track of which unit it belongs to."""
+    conn = sqlite3.connect(DB_PATH)
+    placeholders = ",".join("?" for _ in IMD_TRIGGER_ITEMS)
+    row = conn.execute(
+        f"SELECT id, item_id FROM fulfilment WHERE order_id = ? AND state != 'delivered' "
+        f"AND item_id IN ({placeholders}) ORDER BY id LIMIT 1",
+        (order_id, *IMD_TRIGGER_ITEMS),
+    ).fetchone()
+    conn.close()
+    return (row[0], row[1]) if row else (None, None)
+
+
+def db_heal_delivered_pending() -> int:
+    """Clears units still listed as pending although the customer already received them (order #532: its
+    iMD retry lost the unit it belonged to). Deliberately narrow: only an order with a single unit that
+    has a delivery record, because with several units a re-sent delivery could be mistaken for another
+    unit's. Returns how many units were marked delivered."""
+    conn = sqlite3.connect(DB_PATH)
+    stale = conn.execute(
+        "SELECT f.id FROM fulfilment f WHERE f.state != 'delivered' "
+        "AND (SELECT COUNT(*) FROM fulfilment x WHERE x.order_id = f.order_id) = 1 "
+        "AND EXISTS (SELECT 1 FROM deliveries d WHERE d.order_id = f.order_id)"
+    ).fetchall()
+    for (fid,) in stale:
+        conn.execute("UPDATE fulfilment SET state = 'delivered' WHERE id = ?", (fid,))
+    conn.commit()
+    conn.close()
+    if stale:
+        logger.info("Marked %d pending unit(s) delivered: the customer already had their delivery", len(stale))
+    return len(stale)
+
+
 async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict):
     """Common finish step for both the new-account and renewal collection
     flows. Runs the registration/renewal immediately — no admin tap
@@ -16109,8 +16313,11 @@ async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TY
     order_id = context.user_data.pop("registration_order", None)
     is_renew = context.user_data.pop("registration_is_renew", False)
     duration = context.user_data.pop("registration_duration", None)
-    item_id = context.user_data.pop("registration_item_id", None)
-    fulfilment_id = context.user_data.pop("registration_fulfilment_id", None)
+    item_id = context.user_data.pop("registration_item_id", None) or data.get("item_id")
+    fulfilment_id = context.user_data.pop("registration_fulfilment_id", None) or data.get("fulfilment_id")
+    if order_id and not fulfilment_id:
+        fulfilment_id, found_item = db_imd_unit_for_order(order_id)
+        item_id = item_id or found_item
     context.user_data.pop("awaiting_registration_field", None)
     context.user_data.pop("registration_data", None)
 
@@ -16285,6 +16492,12 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
 
     duration = data.get("duration")
     is_renew = data.get("is_renew")  # the ORIGINAL account type the customer chose
+    if not data.get("fulfilment_id"):
+        # The retry flow once lost this (order #532): without it the delivered unit stayed in Pending Orders.
+        fid, found_item = db_imd_unit_for_order(order_id)
+        if fid:
+            data["fulfilment_id"] = fid
+            data["item_id"] = data.get("item_id") or found_item
 
     # Sanitize in place — the SAME cleaned values must be used both to fill
     # the registration form and to build the delivery message sent to the
@@ -16502,6 +16715,8 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
             customer_data["registration_order"] = order_id
             customer_data["registration_is_renew"] = is_renew
             customer_data["registration_duration"] = duration
+            customer_data["registration_item_id"] = data.get("item_id")
+            customer_data["registration_fulfilment_id"] = data.get("fulfilment_id")
             customer_data["registration_data"] = {k: v for k, v in data.items() if k not in ("is_renew", "duration")}
             customer_data["registration_retry_field"] = retry_field
             customer_data["awaiting_registration_field"] = retry_field
@@ -16526,6 +16741,8 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
             customer_data["registration_order"] = order_id
             customer_data["registration_is_renew"] = is_renew
             customer_data["registration_duration"] = duration
+            customer_data["registration_item_id"] = data.get("item_id")
+            customer_data["registration_fulfilment_id"] = data.get("fulfilment_id")
             customer_data["registration_data"] = {k: v for k, v in data.items() if k not in ("is_renew", "duration")}
             customer_data["registration_retry_field"] = "email"
             customer_data["awaiting_registration_field"] = "email"
@@ -18270,6 +18487,75 @@ async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
+def _order_restore_report(order_id: int, added: dict, source: str) -> str:
+    note = db_reconcile_restored_order(order_id)
+    return (
+        f"♻️ Order #{order_id} restored from {source}: {added.get('orders', 0)} order, "
+        f"{added.get('fulfilment', 0)} item(s), {added.get('deliveries', 0)} delivery record(s).\n\n{note}"
+    )
+
+
+async def restoreorder_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only /restoreorder <number>: brings back a deleted order for the customer. Uses the copy taken
+    when it was deleted; for older deletions it asks for a database backup that still has the order."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    clear_admin_flow_state(context.user_data)
+    try:
+        order_id = int((context.args or [""])[0].lstrip("#"))
+    except ValueError:
+        await update.message.reply_text("Usage: /restoreorder <order number>, e.g. /restoreorder 532")
+        return
+    if db_get_order(order_id):
+        await update.message.reply_text(f"Order #{order_id} exists already, nothing to restore.")
+        return
+    snapshot = db_latest_order_snapshot(order_id)
+    if snapshot:
+        added = db_restore_order_rows(snapshot)
+        await update.message.reply_text(_order_restore_report(order_id, added, "the copy taken when it was deleted"))
+        return
+    context.user_data["awaiting_restoreorder_file"] = order_id
+    await update.message.reply_text(
+        f"No saved copy of Order #{order_id} (it was deleted before copies were kept).\n\n"
+        "Send me a database backup .db file from before it was deleted (the nightly backup posts in your "
+        "backup channel). I take only this one order out of it and leave everything else untouched."
+    )
+
+
+async def restoreorder_file_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    order_id = context.user_data.pop("awaiting_restoreorder_file", None)
+    doc = update.message.document
+    if not order_id or not doc or not (doc.file_name or "").lower().endswith(".db"):
+        await update.message.reply_text("That isn't a .db backup file. Send /restoreorder <number> to start again.")
+        return
+    import shutil
+    import tempfile
+    path = os.path.join(tempfile.mkdtemp(), "backup.db")
+    try:
+        tg_file = await context.bot.get_file(doc.file_id)
+        await tg_file.download_to_drive(path)
+        if not _is_sqlite_file(path):
+            raise ValueError("the file isn't a SQLite database")
+        src = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            rows = _read_order_rows(src, order_id)
+        finally:
+            src.close()
+        if not rows["orders"]:
+            await update.message.reply_text(
+                f"Order #{order_id} isn't in that backup. Try an older one (it has to be from after the order "
+                "was placed and before it was deleted)."
+            )
+            return
+        added = db_restore_order_rows(rows)
+        await update.message.reply_text(_order_restore_report(order_id, added, "that backup"))
+    except Exception as exc:
+        logger.exception("restoreorder failed")
+        await update.message.reply_text(f"❌ Couldn't restore from that file: {exc}. Nothing was changed.")
+    finally:
+        shutil.rmtree(os.path.dirname(path), ignore_errors=True)
+
+
 async def restore_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only /restore: begins the restore flow. The actual file is
     handled by restore_file_received once uploaded."""
@@ -18291,6 +18577,9 @@ async def restore_file_received(update: Update, context: ContextTypes.DEFAULT_TY
     path and asks for explicit confirmation before touching the live
     database at all."""
     if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    if context.user_data.get("awaiting_restoreorder_file"):
+        await restoreorder_file_received(update, context)
         return
     if not context.user_data.get("awaiting_restore_file"):
         # Not restoring a backup — a dbs.db sent at any other time
@@ -18584,6 +18873,7 @@ def main():
     app.add_handler(CommandHandler("coworker", coworker_login_start))
     app.add_handler(CommandHandler("backupdb", backup_db))
     app.add_handler(CommandHandler("restore", restore_start))
+    app.add_handler(CommandHandler("restoreorder", restoreorder_start))
     app.add_handler(CommandHandler("exportimd", export_imd_catalog))
     app.add_handler(CommandHandler("imddiag", imd_diag_start))
     app.add_handler(CommandHandler("syncserials", sync_serials_start))
@@ -18692,6 +18982,7 @@ def main():
     app.add_handler(CallbackQueryHandler(order_lookup_delete_execute, pattern=r"^ordlkdel_yes:"))
     app.add_handler(CallbackQueryHandler(pending_delete_confirm, pattern=r"^pdel:"))
     app.add_handler(CallbackQueryHandler(pending_delete_execute, pattern=r"^pdel_yes:"))
+    app.add_handler(CallbackQueryHandler(pending_clear_delivered, pattern=r"^pclear:"))
     app.add_handler(CallbackQueryHandler(admin_msg_start, pattern=r"^admin_msg:"))
     app.add_handler(CallbackQueryHandler(admin_msg_cancel, pattern=r"^admin_msg_cancel:"))
     app.add_handler(CallbackQueryHandler(customer_reply_start, pattern=r"^cust_reply:"))
