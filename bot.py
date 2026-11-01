@@ -15675,6 +15675,19 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get("imd_manual_cred"):
             await imd_manual_cred_reply(update, context)
             return
+        # A recording is still open but another admin screen was opened meanwhile: nothing else is waiting for
+        # this text, so it's for the recording.
+        if ADMIN_CHAT_ID in _SITE_RECORDERS:
+            context.user_data["recording_site"] = _SITE_RECORDERS[ADMIN_CHAT_ID]["site_id"]
+            await site_record_text(update, context)
+            return
+        if _SITE_INSTRUCTION_RE.match(update.message.text or ""):
+            await update.message.reply_text(
+                "No recording is open, so I didn't do that. Recordings end when the bot restarts (e.g. after an "
+                "update) or after 15 idle minutes.\n\nOpen 🌐 Automation Sites → your site → ➕ Continue recording: "
+                "it replays your saved steps and you carry on from there."
+            )
+            return
 
     # ── 3. Customer collection flows ─────────────────────────────────
     # Receipt/payer-name comes first: once a photo has been uploaded, the
@@ -18524,6 +18537,10 @@ SITE_FIELD_LABELS = {
     "proxy_password": "Proxy password", "login_username": "Site username", "login_password": "Site password",
 }
 SITE_RECORD_IDLE_SECONDS = 15 * 60
+# An admin message that reads like a recording instruction (answered even when no recording is open).
+_SITE_INSTRUCTION_RE = re.compile(
+    r"^\s*(click|tap|fill|type|select|check|press|wait|goto|scroll|done|undo|buttons|fields)\b", re.I
+)
 _SITE_RECORDERS = {}  # admin id -> {"session", "site_id", "steps", "last"}
 
 
