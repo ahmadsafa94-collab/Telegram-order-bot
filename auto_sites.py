@@ -828,13 +828,16 @@ _FIND_FIELD_JS = r"""([t, kind]) => {
   const ok = """ + _FIELD_OK_JS + r""";
   const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
   const want = norm(t);
+  // whole words only: "username field" may mean a field named "username", but a one-letter id like "u" mustn't
+  // match whatever text happens to contain that letter
+  const wantWords = want.split(/[^\p{L}\p{N}_]+/u).filter((w) => w.length > 2);
   const fields = [...document.querySelectorAll('input,textarea,select,[contenteditable],[role=checkbox],[role=textbox]')]
     .filter((e) => ok(e, kind));
   const names = (e) => [e.getAttribute('aria-label'), e.getAttribute('placeholder'), e.getAttribute('name'), e.id,
     e.getAttribute('title'), e.getAttribute('autocomplete'), e.getAttribute('data-testid'),
     e.labels ? [...e.labels].map((l) => l.innerText).join(' ') : ''].map(norm);
   let pick = fields.find((e) => names(e).includes(want)) ||
-             fields.find((e) => names(e).some((n) => n && (n.includes(want) || (want.length > 3 && want.includes(n)))));
+             fields.find((e) => names(e).some((n) => n && (n.includes(want) || wantWords.includes(n))));
   if (!pick) {
     // Text on the page (a label-like element), then the first matching field after it.
     const textEls = [...document.body.querySelectorAll('label,span,div,p,td,th,dt,strong,b,h1,h2,h3,h4,h5,h6')]

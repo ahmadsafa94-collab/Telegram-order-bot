@@ -18791,9 +18791,14 @@ async def _site_record_do(bot, rec: dict, step: dict):
         )
         return
     rec["steps"].append(auto_sites.stored_step(step, session.site))
+    saved = rec["steps"][-1]
+    fixed = ""
+    if saved.get("action") == "fill" and "{" not in (saved.get("value") or ""):
+        fixed = ("\n⚠️ Saved as this exact text for every run. If it changes per customer, tap ↩️ Undo and use "
+                 "{customer_username:" + (saved.get("value") or "test") + "} (or {customer_password:…}).")
     await _site_record_shot(
         bot, rec,
-        f"✅ Step {len(rec['steps'])}: {auto_sites.describe(rec['steps'][-1])}\nNow on: {await session.title()}\n\n"
+        f"✅ Step {len(rec['steps'])}: {auto_sites.describe(saved)}{fixed}\nNow on: {await session.title()}\n\n"
         "What next? (or done <success text>)",
     )
 
@@ -18818,9 +18823,11 @@ async def _site_record_watchdog(bot, rec: dict):
                 pass
 
 
-async def _site_record_start(update: Update, context: ContextTypes.DEFAULT_TYPE, site_id: int, continue_with: dict = None):
+async def _site_record_start(update: Update, context: ContextTypes.DEFAULT_TYPE, site_id: int, continue_with: dict = None,
+                             upto: int = None):
     """Opens the site for recording. With `continue_with` (placeholder values), the saved steps are replayed first
-    and recording carries on after them."""
+    (only the first `upto` with ▶️ Continue from a step) and recording carries on after them; what is recorded then
+    replaces the steps after that point. If a saved step fails to replay, recording carries on from just before it."""
     site = auto_sites.get_site(DB_PATH, site_id)
     if not site:
         return
@@ -18829,12 +18836,17 @@ async def _site_record_start(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     await _site_record_close(context)
     clear_admin_flow_state(context.user_data)
-    await _site_reply(update, f"🎬 Opening {site['label']}…" + (f" and replaying its {len(site['steps'])} saved steps…" if continue_with is not None else ""))
+    replay = site["steps"][:upto] if upto is not None else site["steps"]
+    await _site_reply(update, f"🎬 Opening {site['label']}…" + (f" and replaying {len(replay)} saved step(s)…" if continue_with is not None else ""))
     session = auto_sites.Session(site)
+    failed = None
     try:
         await session.start()
         if continue_with is not None:
-            await session.replay(site["steps"], continue_with)
+            try:
+                await session.replay(replay, continue_with)
+            except auto_sites.StepFailed as exc:
+                failed = exc  # keep the browser where the last working step left it
     except Exception as exc:
         shot = None
         try:
@@ -18848,9 +18860,11 @@ async def _site_record_start(update: Update, context: ContextTypes.DEFAULT_TYPE,
         else:
             await _site_reply(update, text + "\n\nTry 🔌 Test first.")
         return
+    kept = replay[:failed.number - 1] if failed else replay
     rec = {"session": session, "site_id": site_id, "last": time.time(), "grid": "normal",
-           "steps": list(site["steps"]) if continue_with is not None else [], "customer": continue_with or {}}
-    if (continue_with is not None and site.get("success_text")
+           "steps": list(kept) if continue_with is not None else [], "customer": continue_with or {},
+           "replaces_from": len(kept) + 1 if continue_with is not None and len(kept) < len(site["steps"]) else None}
+    if (continue_with is not None and not failed and upto is None and site.get("success_text")
             and not any(s.get("action") == "expect" for s in rec["steps"])):
         # Recorded before checks existed: its success text becomes a check right here (after the renewal), so the
         # steps added now (e.g. logging out) don't hide it.
@@ -18858,9 +18872,19 @@ async def _site_record_start(update: Update, context: ContextTypes.DEFAULT_TYPE,
     _SITE_RECORDERS[ADMIN_CHAT_ID] = rec
     context.user_data["recording_site"] = site_id
     context.application.create_task(_site_record_watchdog(update.get_bot(), rec))
-    where = (f"After your {len(rec['steps'])} saved steps: {await session.title()}" if continue_with is not None
-             else f"Page 1: {await session.title()}")
-    await _site_record_shot(update.get_bot(), rec, f"{where}\n\n{auto_sites.INSTRUCTION_HELP}")
+    total = len(site["steps"])
+    if failed:
+        where = (f"⚠️ Replay stopped at step {failed.number}: {failed}\n\nThe page is where step {failed.number - 1} left it. "
+                 f"What you record now replaces steps {failed.number}–{total} (❌ Cancel keeps them as they are).\n"
+                 f"Now on: {await session.title()}")
+    elif continue_with is not None and rec["replaces_from"]:
+        where = (f"After steps 1–{len(kept)}: {await session.title()}\n"
+                 f"What you record now replaces steps {len(kept) + 1}–{total} (❌ Cancel keeps them as they are).")
+    elif continue_with is not None:
+        where = f"After your {len(rec['steps'])} saved steps: {await session.title()}"
+    else:
+        where = f"Page 1: {await session.title()}"
+    await _site_record_shot(update.get_bot(), rec, f"{where}\n\n{auto_sites.INSTRUCTION_HELP}"[:1024])
 
 
 async def _site_record_finish(update: Update, context: ContextTypes.DEFAULT_TYPE, success_text: str = ""):
@@ -18881,7 +18905,9 @@ async def _site_record_finish(update: Update, context: ContextTypes.DEFAULT_TYPE
     site_id = rec["site_id"]
     await _site_record_close(context)
     steps = "\n".join(f"{i}. {auto_sites.describe(s)}" for i, s in enumerate(rec["steps"], 1)) or "(no steps)"
-    await _site_reply(update, f"✅ Saved {len(rec['steps'])} steps:\n{steps}" + note)
+    if rec.get("replaces_from"):
+        note = f"\n\nSteps from {rec['replaces_from']} on were replaced by what you just recorded." + note
+    await _site_reply(update, f"✅ Saved {len(rec['steps'])} steps:\n{steps}"[:4000] + note)
     await _site_detail(update, site_id)
 
 
@@ -18941,23 +18967,24 @@ def _sites_with_steps() -> list:
 
 
 async def _site_run_ask(update: Update, context: ContextTypes.DEFAULT_TYPE, site_id: int, values: dict,
-                        mode: str = "run", fid: int = None, rid: int = None):
+                        mode: str = "run", fid: int = None, rid: int = None, upto: int = None):
     """Asks for the values a run still needs, one per message, then runs (or continues recording)."""
     site = auto_sites.get_site(DB_PATH, site_id)
     if not site:
         return
-    missing = [n for n in auto_sites.placeholders(site["steps"]) if n not in values]
+    needed = site["steps"][:upto] if upto is not None else site["steps"]
+    missing = [n for n in auto_sites.placeholders(needed) if n not in values]
     if not missing:
         context.user_data.pop("site_run", None)
         if mode == "continue":
-            await _site_record_start(update, context, site_id, continue_with=values)
+            await _site_record_start(update, context, site_id, continue_with=values, upto=upto)
         elif mode == "renewal":
             await _renewal_execute(update, rid, site, values)
         else:
             await _site_run_execute(update, site, values, fid)
         return
     context.user_data["site_run"] = {"site_id": site_id, "values": values, "mode": mode, "fid": fid, "rid": rid,
-                                     "pending": missing}
+                                     "upto": upto, "pending": missing}
     lead = "Before continuing, " if mode == "continue" else ""
     await _site_reply(update, f"{lead}send {auto_sites.placeholder_prompt(missing[0])} ({{{missing[0]}}}):"
                       + ("\nI delete your message right after reading it." if "password" in missing[0] else ""))
@@ -18977,7 +19004,7 @@ async def site_run_value_reply(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
     state["values"][name] = (update.message.text or "").strip()
     await _site_run_ask(update, context, state["site_id"], state["values"], state.get("mode", "run"), state.get("fid"),
-                        state.get("rid"))
+                        state.get("rid"), state.get("upto"))
 
 
 async def _site_run_execute(update: Update, site: dict, values: dict, fid: int = None):
@@ -19135,8 +19162,46 @@ async def site_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if site:
             steps = "\n".join(f"{i}. {auto_sites.describe(s)}" for i, s in enumerate(site["steps"], 1)) or "No steps recorded yet: tap 🎬 Record steps."
             extra = f"\n\nSuccess when the page shows: “{site['success_text']}”" if site.get("success_text") else ""
-            await _site_reply(update, f"📋 {site['label']}\n{steps}{extra}",
-                              InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"asite:open:{arg}")]]))
+            rows = [[InlineKeyboardButton(f"{i}. {auto_sites.describe(s)}"[:60], callback_data=f"asite:step:{arg}:{i}")]
+                    for i, s in enumerate(site["steps"], 1)]
+            rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"asite:open:{arg}")])
+            await _site_reply(update, (f"📋 {site['label']}\n{steps}{extra}"
+                                       + ("\n\nTap a step to change it, delete it, or continue recording from it." if site["steps"] else ""))[:4000],
+                              InlineKeyboardMarkup(rows))
+    elif action in ("step", "stepdel", "stepuser", "steppass", "stepfrom"):
+        site = auto_sites.get_site(DB_PATH, arg)
+        i = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+        if not site or not 1 <= i <= len(site["steps"]):
+            await _site_reply(update, "That step no longer exists.")
+            return
+        step = site["steps"][i - 1]
+        back = InlineKeyboardButton("⬅️ Steps", callback_data=f"asite:steps:{arg}")
+        if action == "step":
+            rows = []
+            if step.get("action") == "fill":
+                rows.append([InlineKeyboardButton("👤 Make it the customer's username", callback_data=f"asite:stepuser:{arg}:{i}")])
+                rows.append([InlineKeyboardButton("🔑 Make it the customer's password", callback_data=f"asite:steppass:{arg}:{i}")])
+            rows.append([InlineKeyboardButton("▶️ Continue recording from here", callback_data=f"asite:stepfrom:{arg}:{i}")])
+            rows.append([InlineKeyboardButton("🗑 Delete this step", callback_data=f"asite:stepdel:{arg}:{i}"), back])
+            await _site_reply(update, f"Step {i} of {len(site['steps'])}: {auto_sites.describe(step)}\n\n"
+                                      "▶️ Continue recording from here replays steps 1–" + str(i - 1) + " and lets you record "
+                                      f"again from this point (it replaces step {i} onwards).", InlineKeyboardMarkup(rows))
+        elif action == "stepfrom":
+            clear_admin_flow_state(context.user_data)
+            await _site_run_ask(update, context, arg, {}, "continue", upto=i - 1)
+        else:
+            steps = list(site["steps"])
+            if action == "stepdel":
+                steps.pop(i - 1)
+                done = f"🗑 Step {i} deleted."
+            else:
+                name = "customer_username" if action == "stepuser" else "customer_password"
+                steps[i - 1] = dict(step, value="{" + name + "}")
+                done = f"✅ Step {i} now types {{{name}}}: the {'username' if name == 'customer_username' else 'password'} you or the order give for each run."
+            had_checks = any(s.get("action") == "expect" for s in site["steps"])
+            auto_sites.save_steps(DB_PATH, arg, steps,
+                                  auto_sites.main_success_text(steps, "" if had_checks else site.get("success_text") or ""))
+            await _site_reply(update, done, InlineKeyboardMarkup([[back]]))
     elif action == "del":
         await _site_reply(update, "Delete this site with its login and recorded steps?", InlineKeyboardMarkup([[
             InlineKeyboardButton("🗑 Yes, delete", callback_data=f"asite:delyes:{arg}"),
