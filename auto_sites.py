@@ -205,6 +205,7 @@ INSTRUCTION_HELP = (
     "• goto https://…\n"
     "• tap 17   (what's in grid square 17, for a button with no text)\n"
     "• buttons   (list what can be clicked here, then tap one)\n"
+    "• fields   (number the typing fields, then: fill #2 = {customer_username:test})\n"
     "• scroll down · scroll up\n"
     "• done You have renewed   (finish; the text shows success)\n"
     "• undo (forget the last step) · cancel"
@@ -436,6 +437,51 @@ class Session:
         finally:
             await page.close()
 
+    async def _field(self, t: str, kind: str, selector: str = None):
+        """The input/dropdown/tick box meant by `t`: its label, placeholder, name or id, or the field inside or
+        right after something showing that text. Never a box or label around the field."""
+        page = self.page
+        if selector:
+            loc = page.locator(selector)
+            if await loc.count() == 1 and await loc.first.evaluate(_FIELD_OK_JS, kind):
+                return loc.first
+        candidates = [page.get_by_label(t), page.get_by_placeholder(t), page.locator(f'[name="{t}"]')]
+        if re.match(r"^[A-Za-z][\w-]*$", t):
+            candidates.append(page.locator(f"#{t}"))
+        for loc in candidates:
+            try:
+                n = await loc.count()
+            except Exception:
+                continue
+            for i in range(min(n, 5)):
+                el = loc.nth(i)
+                try:
+                    if await el.evaluate(_FIELD_OK_JS, kind):
+                        return el
+                    inner = el.locator(_FIELD_SELECTOR)  # a wrapper around the field: use the field in it
+                    for j in range(min(await inner.count(), 3)):
+                        if await inner.nth(j).evaluate(_FIELD_OK_JS, kind):
+                            return inner.nth(j)
+                except Exception:
+                    continue
+        try:
+            if await page.evaluate(_FIND_FIELD_JS, [t, kind]):
+                return page.locator('[data-medic-field="1"]').first
+        except Exception:
+            pass
+        return None
+
+    async def fields(self) -> list:
+        """The typing fields, dropdowns and tick boxes on the visible part of the page, top to bottom:
+        [{n, label, kind, left, top, selector}]."""
+        try:
+            found = await self.page.evaluate(_FIELDS_JS, CLICKABLES_MAX)
+        except Exception:
+            return []
+        for i, f in enumerate(found, 1):
+            f["n"] = i
+        return found
+
     async def _first(self, candidates):
         for loc in candidates:
             try:
@@ -459,12 +505,10 @@ class Session:
             await el.click(timeout=ACTION_TIMEOUT_MS)
         elif a in ("fill", "select", "check"):
             t = step["target"]
-            candidates = [page.get_by_label(t), page.get_by_placeholder(t), page.locator(f'[name="{t}"]')]
-            if re.match(r"^[\w-]+$", t):
-                candidates.append(page.locator(f"#{t}"))
-            el = await self._first(candidates)
+            el = await self._field(t, a, step.get("selector"))
             if not el:
-                raise ValueError(f'no field called "{t}" on the page')
+                raise ValueError(f'no {"dropdown" if a == "select" else "tick box" if a == "check" else "typing field"} '
+                                 f'called "{t}" on the page (type fields to list them)')
             if a == "fill":
                 await el.fill(resolve_value(step.get("value", ""), self.site, customer), timeout=ACTION_TIMEOUT_MS)
             elif a == "select":
@@ -686,4 +730,70 @@ _MARKS_JS = r"""(marks) => {
     g.appendChild(m);
   }
   document.documentElement.appendChild(g);
+}"""
+
+_FIELD_SELECTOR = 'input,textarea,select,[contenteditable=""],[contenteditable="true"],[role=checkbox],[role=textbox]'
+
+_FIELD_OK_JS = r"""(e, kind) => {
+  const r = e.getBoundingClientRect(), st = getComputedStyle(e);
+  if (r.width < 2 || r.height < 2 || st.visibility === 'hidden' || st.display === 'none') return false;
+  if (e.disabled) return false;
+  const tag = e.tagName, type = (e.getAttribute('type') || 'text').toLowerCase();
+  if (kind === 'select') return tag === 'SELECT';
+  if (kind === 'check') return (tag === 'INPUT' && (type === 'checkbox' || type === 'radio')) || e.getAttribute('role') === 'checkbox';
+  if (tag === 'TEXTAREA' || e.isContentEditable || e.getAttribute('role') === 'textbox') return !e.readOnly;
+  return tag === 'INPUT' && !e.readOnly &&
+    !['button', 'submit', 'reset', 'checkbox', 'radio', 'hidden', 'image', 'file', 'range', 'color'].includes(type);
+}"""
+
+_FIND_FIELD_JS = r"""([t, kind]) => {
+  const ok = """ + _FIELD_OK_JS + r""";
+  const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const want = norm(t);
+  const fields = [...document.querySelectorAll('input,textarea,select,[contenteditable],[role=checkbox],[role=textbox]')]
+    .filter((e) => ok(e, kind));
+  const names = (e) => [e.getAttribute('aria-label'), e.getAttribute('placeholder'), e.getAttribute('name'), e.id,
+    e.getAttribute('title'), e.getAttribute('autocomplete'), e.getAttribute('data-testid'),
+    e.labels ? [...e.labels].map((l) => l.innerText).join(' ') : ''].map(norm);
+  let pick = fields.find((e) => names(e).includes(want)) ||
+             fields.find((e) => names(e).some((n) => n && (n.includes(want) || (want.length > 3 && want.includes(n)))));
+  if (!pick) {
+    // Text on the page (a label-like element), then the first matching field after it.
+    const textEls = [...document.body.querySelectorAll('label,span,div,p,td,th,dt,strong,b,h1,h2,h3,h4,h5,h6')]
+      .filter((e) => [...e.childNodes].some((c) => c.nodeType === 3 && norm(c.textContent)))
+      .filter((e) => norm(e.innerText) === want || norm(e.innerText).startsWith(want));
+    for (const le of textEls) {
+      pick = fields.find((f) => le.compareDocumentPosition(f) & Node.DOCUMENT_POSITION_FOLLOWING);
+      if (pick) break;
+    }
+  }
+  document.querySelectorAll('[data-medic-field]').forEach((e) => e.removeAttribute('data-medic-field'));
+  if (!pick) return false;
+  pick.setAttribute('data-medic-field', '1');
+  return true;
+}"""
+
+_FIELDS_JS = r"""(max) => {
+  const W = window.innerWidth, H = window.innerHeight, out = [];
+  const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const esc = (v) => v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  for (const e of document.querySelectorAll('input,textarea,select,[contenteditable],[role=checkbox],[role=textbox]')) {
+    const tag = e.tagName, type = (e.getAttribute('type') || 'text').toLowerCase();
+    if (tag === 'INPUT' && ['button', 'submit', 'reset', 'hidden', 'image', 'file', 'range', 'color'].includes(type)) continue;
+    const r = e.getBoundingClientRect(), st = getComputedStyle(e);
+    if (r.width < 2 || r.height < 2 || st.visibility === 'hidden' || st.display === 'none' || e.disabled) continue;
+    if (r.bottom <= 0 || r.right <= 0 || r.top >= H || r.left >= W) continue;
+    const kind = tag === 'SELECT' ? 'dropdown' : (type === 'checkbox' || type === 'radio' || e.getAttribute('role') === 'checkbox') ? 'tick box'
+               : type === 'password' ? 'password' : 'text';
+    const label = norm(e.labels && e.labels.length ? [...e.labels].map((l) => l.innerText).join(' ') : '') ||
+      norm(e.getAttribute('aria-label')) || norm(e.getAttribute('placeholder')) || norm(e.getAttribute('name')) ||
+      norm(e.id) || norm(e.getAttribute('title')) || '(no label)';
+    let selector = null;
+    if (e.id) selector = '#' + CSS.escape(e.id);
+    else if (e.getAttribute('name')) selector = tag.toLowerCase() + '[name="' + esc(e.getAttribute('name')) + '"]';
+    if (selector && document.querySelectorAll(selector).length !== 1) selector = null;
+    out.push({label: label.slice(0, 40), kind, left: Math.max(Math.round(r.left), 0), top: Math.max(Math.round(r.top), 0), selector});
+  }
+  out.sort((a, b) => (a.top - b.top) || (a.left - b.left));
+  return out.slice(0, max);
 }"""

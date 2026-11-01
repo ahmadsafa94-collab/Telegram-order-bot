@@ -18676,8 +18676,9 @@ def _site_record_buttons(rec: dict = None):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📸 Screenshot", callback_data="asite:recshot"),
          InlineKeyboardButton("🔘 Buttons", callback_data="asite:recbtns"),
-         InlineKeyboardButton(SITE_GRID_BUTTON[size], callback_data="asite:recgrid")],
-        [InlineKeyboardButton("↩️ Undo last", callback_data="asite:recundo"),
+         InlineKeyboardButton("🔤 Fields", callback_data="asite:recfields")],
+        [InlineKeyboardButton(SITE_GRID_BUTTON[size], callback_data="asite:recgrid"),
+         InlineKeyboardButton("↩️ Undo", callback_data="asite:recundo"),
          InlineKeyboardButton("✅ Finish", callback_data="asite:recdone"),
          InlineKeyboardButton("❌ Cancel", callback_data="asite:reccancel")],
     ])
@@ -18718,6 +18719,25 @@ async def _site_record_list_buttons(bot, rec: dict):
         await bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"{caption}\n\n(screenshot failed: {exc})", reply_markup=InlineKeyboardMarkup(rows))
 
 
+async def _site_record_list_fields(bot, rec: dict):
+    """🔤 Fields: a screenshot with every typing field, dropdown and tick box numbered, for `fill #N = …`."""
+    session = rec["session"]
+    found = await session.fields()
+    rec["fields"] = found
+    if not found:
+        await _site_record_shot(bot, rec, "No typing fields on the visible part of the page. Try scroll down.")
+        return
+    lines = [f"{f['n']} · {f['label']} ({f['kind']})" for f in found]
+    caption = ("🔤 Fields on this part of the page:\n" + "\n".join(lines[:25])
+               + ("\n…" if len(lines) > 25 else "")
+               + "\n\nReply e.g. fill #1 = {customer_username:test@x.com} · select #2 = Turkey · check #3")
+    try:
+        shot = await session.screenshot(marks=found)
+        await bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=shot, caption=caption[:1024], reply_markup=_site_record_buttons(rec))
+    except Exception as exc:
+        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"{caption}\n\n(screenshot failed: {exc})", reply_markup=_site_record_buttons(rec))
+
+
 async def _site_record_do(bot, rec: dict, step: dict):
     """Performs one step while recording; keeps it if it worked, and sends the next screenshot either way."""
     session = rec["session"]
@@ -18726,7 +18746,7 @@ async def _site_record_do(bot, rec: dict, step: dict):
     except Exception as exc:
         await _site_record_shot(
             bot, rec,
-            f"❌ Couldn't {auto_sites.describe(step)}: {str(exc).splitlines()[0][:300]}\nNot saved. Try other wording (the exact text on the page).",
+            f"❌ Couldn't {auto_sites.describe(step)}: {str(exc).splitlines()[0][:300]}\nNot saved. Try the exact text on the page, or 🔘 Buttons / 🔤 Fields to pick it.",
         )
         return
     rec["steps"].append(auto_sites.stored_step(step, session.site))
@@ -18839,6 +18859,9 @@ async def site_record_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if word == "buttons":
         await _site_record_list_buttons(context.bot, rec)
         return
+    if word == "fields":
+        await _site_record_list_fields(context.bot, rec)
+        return
     try:
         step = auto_sites.parse_instruction(text, _site_grid(rec) or auto_sites.GRID_SIZES["normal"])
     except ValueError as exc:
@@ -18846,6 +18869,15 @@ async def site_record_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if step["action"] == "tap":
         step = await rec["session"].resolve_tap(step)
+    if step["action"] in ("fill", "select", "check") and re.fullmatch(r"#\d+", step["target"]):
+        n = int(step["target"][1:])
+        field = next((f for f in rec.get("fields") or [] if f["n"] == n), None)
+        if not field:
+            await update.message.reply_text("No field with that number: tap 🔤 Fields (or type fields) first.")
+            return
+        step["target"] = field["label"]
+        if field.get("selector"):
+            step["selector"] = field["selector"]
     await _site_record_do(context.bot, rec, step)
 
 
@@ -19003,6 +19035,13 @@ async def site_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + (f" (grid: tap <1–{grid[0] * grid[1]}>)" if grid else "")
             + "\n\nWhat next?",
         )
+    elif action == "recfields":
+        rec = _SITE_RECORDERS.get(ADMIN_CHAT_ID)
+        if not rec:
+            await _site_reply(update, "No recording is running.")
+            return
+        rec["last"] = time.time()
+        await _site_record_list_fields(context.bot, rec)
     elif action in ("recbtns", "pick"):
         rec = _SITE_RECORDERS.get(ADMIN_CHAT_ID)
         if not rec:
