@@ -195,7 +195,9 @@ INSTRUCTION_HELP = (
     "• click Sign in   (the text on a button or link)\n"
     "• fill Email = {username}   (the field's label or placeholder)\n"
     "• fill Password = {password}\n"
-    "• fill Code = {code:ABC123}   ({code} is asked from the customer later; ABC123 is used only now)\n"
+    "• fill Username = {customer_username:test@x.com}   (the customer's login, taken from their order;\n"
+    "  test@x.com is used only now) · fill Password = {customer_password:Test123}\n"
+    "• fill Code = {code:ABC123}   (any other {name} is asked when it runs)\n"
     "• select Country = Turkey\n"
     "• check I agree\n"
     "• press Enter\n"
@@ -294,6 +296,45 @@ def cell_center(cell: int, grid: tuple = None) -> tuple:
     return round(col * w + w / 2), round(row * h + h / 2)
 
 
+# What the customer filled in for their order (fulfilment info), under the names steps use. A renewal order has
+# login_username/login_password, a new-account order username/password/email.
+CUSTOMER_ALIASES = {
+    "customer_username": ("login_username", "username", "email"),
+    "customer_password": ("login_password", "password"),
+    "customer_email": ("email", "login_username"),
+}
+SITE_LOGIN_PLACEHOLDERS = ("username", "password")
+
+
+def placeholders(steps: list) -> list:
+    """The values a run needs from outside (customer details etc.), in the order the steps use them."""
+    names = []
+    for step in steps:
+        for m in _PLACEHOLDER_RE.finditer(step.get("value") or ""):
+            if m.group(1) not in SITE_LOGIN_PLACEHOLDERS and m.group(1) not in names:
+                names.append(m.group(1))
+    return names
+
+
+def customer_values(info: dict) -> dict:
+    """An order's details as placeholder values: the raw fields plus the customer_* names."""
+    values = {k: str(v) for k, v in (info or {}).items() if v not in (None, "") and not isinstance(v, (dict, list))}
+    for alias, keys in CUSTOMER_ALIASES.items():
+        if alias not in values:
+            found = next((values[k] for k in keys if values.get(k)), None)
+            if found:
+                values[alias] = found
+    return values
+
+
+def placeholder_prompt(name: str) -> str:
+    return {
+        "customer_username": "the customer's username or email on the website",
+        "customer_password": "the customer's password on the website",
+        "customer_email": "the customer's email",
+    }.get(name, name.replace("_", " "))
+
+
 def describe(step: dict) -> str:
     a = step.get("action")
     if a == "tap":
@@ -316,6 +357,44 @@ def describe(step: dict) -> str:
 
 
 # ── browser ──────────────────────────────────────────────────────────
+
+class StepFailed(Exception):
+    def __init__(self, number: int, step: dict, cause: Exception):
+        self.number, self.step, self.cause = number, step, cause
+        super().__init__(f"step {number} ({describe(step)}): {str(cause).splitlines()[0][:300] if str(cause) else cause.__class__.__name__}")
+
+
+async def run_site(site: dict, customer: dict) -> dict:
+    """Runs all of a site's saved steps with this customer's values, through its proxy. Never claims success
+    without seeing the site's success text. Returns {ok, done, total, error, screenshot, title, success_seen}."""
+    steps = site.get("steps") or []
+    session = Session(site)
+    result = {"ok": False, "done": 0, "total": len(steps), "error": "", "screenshot": None, "title": "",
+              "success_seen": False}
+    try:
+        await session.start()
+        result["done"] = await session.replay(steps, customer)
+        if site.get("success_text"):
+            result["success_seen"] = await session.page_has_text(site["success_text"])
+            result["ok"] = result["success_seen"]
+            if not result["ok"]:
+                result["error"] = f"the page doesn't show “{site['success_text']}”"
+        else:
+            result["ok"], result["unverified"] = True, True  # no success text recorded: only the screenshot tells
+    except StepFailed as exc:
+        result["done"], result["error"] = exc.number - 1, str(exc)
+    except Exception as exc:
+        result["error"] = f"couldn't open the site: {str(exc).splitlines()[0][:300] if str(exc) else exc.__class__.__name__}"
+    finally:
+        try:
+            if session.page:
+                result["screenshot"] = await session.screenshot()
+                result["title"] = await session.title()
+        except Exception:
+            pass
+        await session.close()
+    return result
+
 
 class Session:
     """One browser on the site, through its proxy."""
@@ -483,6 +562,15 @@ class Session:
             return (await self.page.title()) or self.page.url
         except Exception:
             return ""
+
+    async def replay(self, steps: list, customer: dict = None) -> int:
+        """Performs saved steps in order. Returns how many were done; raises StepFailed on the first that fails."""
+        for i, step in enumerate(steps, 1):
+            try:
+                await self.perform(step, customer)
+            except Exception as exc:
+                raise StepFailed(i, step, exc) from exc
+        return len(steps)
 
     async def close(self):
         for closer in (self._browser, self._pw):

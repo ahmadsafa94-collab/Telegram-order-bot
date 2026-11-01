@@ -3635,7 +3635,7 @@ ADMIN_LABELS = [
 # must be called at the start of every new admin interactive flow so a
 # stale earlier state never intercepts input meant for the new one.
 ADMIN_FLOW_KEYS = [
-    "awaiting_site_field", "site_draft", "site_edit", "recording_site",
+    "awaiting_site_field", "site_draft", "site_edit", "recording_site", "site_run",
     "awaiting_admin_input",
     "awaiting_comment_for_order",
     "awaiting_reject_comment_for_order",
@@ -14657,6 +14657,8 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     elif state == "awaiting_delivery":
         buttons.append([InlineKeyboardButton("📤 Deliver Manually", callback_data=f"deliver:{fulfilment_id}")])
+    if item_id not in IMD_TRIGGER_ITEMS and _sites_with_steps():
+        buttons.append([InlineKeyboardButton("🤖 Run automation", callback_data=f"asite:runorder:{fulfilment_id}")])
     # Anything that isn't a no-details item (code delivery, manual-access
     # grant, or a book link) actually has credentials a customer could be
     # asked to resend.
@@ -15579,6 +15581,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_CHAT_ID:
         if context.user_data.get("recording_site"):
             await site_record_text(update, context)
+            return
+        if context.user_data.get("site_run"):
+            await site_run_value_reply(update, context)
             return
         if context.user_data.get("awaiting_site_field") or context.user_data.get("site_edit"):
             await site_field_reply(update, context)
@@ -18566,6 +18571,8 @@ async def _site_detail(update: Update, site_id: int):
     rows = [
         [InlineKeyboardButton("🔌 Test", callback_data=f"asite:test:{site_id}"),
          InlineKeyboardButton("🎬 Record steps", callback_data=f"asite:rec:{site_id}")],
+        [InlineKeyboardButton("▶️ Run", callback_data=f"asite:run:{site_id}"),
+         InlineKeyboardButton("➕ Continue recording", callback_data=f"asite:reccont:{site_id}")],
         [InlineKeyboardButton("📋 Steps", callback_data=f"asite:steps:{site_id}"),
          InlineKeyboardButton("✏️ Edit", callback_data=f"asite:editmenu:{site_id}")],
         [InlineKeyboardButton("🗑 Delete", callback_data=f"asite:del:{site_id}"),
@@ -18715,7 +18722,7 @@ async def _site_record_do(bot, rec: dict, step: dict):
     """Performs one step while recording; keeps it if it worked, and sends the next screenshot either way."""
     session = rec["session"]
     try:
-        await session.perform(step)
+        await session.perform(step, rec.get("customer"))
     except Exception as exc:
         await _site_record_shot(
             bot, rec,
@@ -18750,7 +18757,9 @@ async def _site_record_watchdog(bot, rec: dict):
                 pass
 
 
-async def _site_record_start(update: Update, context: ContextTypes.DEFAULT_TYPE, site_id: int):
+async def _site_record_start(update: Update, context: ContextTypes.DEFAULT_TYPE, site_id: int, continue_with: dict = None):
+    """Opens the site for recording. With `continue_with` (placeholder values), the saved steps are replayed first
+    and recording carries on after them."""
     site = auto_sites.get_site(DB_PATH, site_id)
     if not site:
         return
@@ -18759,19 +18768,33 @@ async def _site_record_start(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     await _site_record_close(context)
     clear_admin_flow_state(context.user_data)
-    await _site_reply(update, f"🎬 Opening {site['label']}…")
+    await _site_reply(update, f"🎬 Opening {site['label']}…" + (f" and replaying its {len(site['steps'])} saved steps…" if continue_with is not None else ""))
     session = auto_sites.Session(site)
     try:
         await session.start()
+        if continue_with is not None:
+            await session.replay(site["steps"], continue_with)
     except Exception as exc:
+        shot = None
+        try:
+            shot = await session.screenshot() if session.page else None
+        except Exception:
+            pass
         await session.close()
-        await _site_reply(update, f"❌ Couldn't open the site: {str(exc).splitlines()[0][:300]}\n\nTry 🔌 Test first.")
+        text = f"❌ Couldn't {'replay the saved steps' if continue_with is not None else 'open the site'}: {str(exc).splitlines()[0][:300]}"
+        if shot:
+            await update.get_bot().send_photo(chat_id=ADMIN_CHAT_ID, photo=shot, caption=text[:1024])
+        else:
+            await _site_reply(update, text + "\n\nTry 🔌 Test first.")
         return
-    rec = {"session": session, "site_id": site_id, "steps": [], "last": time.time(), "grid": "normal"}
+    rec = {"session": session, "site_id": site_id, "last": time.time(), "grid": "normal",
+           "steps": list(site["steps"]) if continue_with is not None else [], "customer": continue_with or {}}
     _SITE_RECORDERS[ADMIN_CHAT_ID] = rec
     context.user_data["recording_site"] = site_id
     context.application.create_task(_site_record_watchdog(update.get_bot(), rec))
-    await _site_record_shot(update.get_bot(), rec, f"Page 1: {await session.title()}\n\n{auto_sites.INSTRUCTION_HELP}")
+    where = (f"After your {len(rec['steps'])} saved steps: {await session.title()}" if continue_with is not None
+             else f"Page 1: {await session.title()}")
+    await _site_record_shot(update.get_bot(), rec, f"{where}\n\n{auto_sites.INSTRUCTION_HELP}")
 
 
 async def _site_record_finish(update: Update, context: ContextTypes.DEFAULT_TYPE, success_text: str = ""):
@@ -18826,6 +18849,75 @@ async def site_record_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _site_record_do(context.bot, rec, step)
 
 
+_SITE_RUN_LOCK = asyncio.Lock()  # one automation run at a time (each is a full browser)
+
+
+def _sites_with_steps() -> list:
+    return [s for s in auto_sites.list_sites(DB_PATH) if s["steps"]]
+
+
+async def _site_run_ask(update: Update, context: ContextTypes.DEFAULT_TYPE, site_id: int, values: dict,
+                        mode: str = "run", fid: int = None):
+    """Asks for the values a run still needs, one per message, then runs (or continues recording)."""
+    site = auto_sites.get_site(DB_PATH, site_id)
+    if not site:
+        return
+    missing = [n for n in auto_sites.placeholders(site["steps"]) if n not in values]
+    if not missing:
+        context.user_data.pop("site_run", None)
+        if mode == "continue":
+            await _site_record_start(update, context, site_id, continue_with=values)
+        else:
+            await _site_run_execute(update, site, values, fid)
+        return
+    context.user_data["site_run"] = {"site_id": site_id, "values": values, "mode": mode, "fid": fid, "pending": missing}
+    lead = "Before continuing, " if mode == "continue" else ""
+    await _site_reply(update, f"{lead}send {auto_sites.placeholder_prompt(missing[0])} ({{{missing[0]}}}):"
+                      + ("\nI delete your message right after reading it." if "password" in missing[0] else ""))
+
+
+async def site_run_value_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = context.user_data.get("site_run") or {}
+    pending = state.get("pending") or []
+    if not pending:
+        context.user_data.pop("site_run", None)
+        return
+    name = pending[0]
+    if "password" in name:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+    state["values"][name] = (update.message.text or "").strip()
+    await _site_run_ask(update, context, state["site_id"], state["values"], state.get("mode", "run"), state.get("fid"))
+
+
+async def _site_run_execute(update: Update, site: dict, values: dict, fid: int = None):
+    bot = update.get_bot()
+    where = f" for order #{db_get_fulfilment(fid)[1]}" if fid and db_get_fulfilment(fid) else ""
+    if _SITE_RUN_LOCK.locked():
+        await _site_reply(update, "⏳ Another automation is running; this one starts when it finishes.")
+    async with _SITE_RUN_LOCK:
+        await _site_reply(update, f"▶️ Running {site['label']}{where}: {len(site['steps'])} steps… (up to a few minutes)")
+        result = await auto_sites.run_site(site, values)
+    logger.info("Automation run: site %s%s: %s", site["id"], where, "ok" if result["ok"] else result["error"])
+    if result["ok"] and result.get("unverified"):
+        caption = (f"⚠️ {site['label']}{where}: all {result['total']} steps ran, but no success text is recorded, "
+                   "so check the screenshot. (Add one: ➕ Continue recording, then done <text>.)")
+    elif result["ok"]:
+        caption = f"✅ {site['label']}{where}: done. All {result['total']} steps ran and the page shows “{site['success_text']}”."
+    else:
+        caption = (f"❌ {site['label']}{where}: stopped after {result['done']} of {result['total']} steps.\n"
+                   f"{result['error']}\n\nNothing is marked delivered; check the screenshot.")
+    if fid:
+        caption += "\n\nDeliver to the customer as usual from the order."
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to the order", callback_data=f"apend:{fid}")]]) if fid else None
+    if result.get("screenshot"):
+        await bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=result["screenshot"], caption=caption[:1024], reply_markup=markup)
+    else:
+        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=caption, reply_markup=markup)
+
+
 async def site_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query.from_user.id != ADMIN_CHAT_ID:
@@ -18859,6 +18951,43 @@ async def site_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _site_test(update, arg)
     elif action == "rec":
         await _site_record_start(update, context, arg)
+    elif action in ("run", "reccont"):
+        site = auto_sites.get_site(DB_PATH, arg)
+        if not site:
+            return
+        if not site["steps"]:
+            await _site_reply(update, "No steps recorded yet: tap 🎬 Record steps first.")
+            return
+        if None in (site.get("proxy_password"), site.get("login_password")):
+            await _site_reply(update, "⚠️ A saved password can't be read anymore. Enter it again with ✏️ Edit first.")
+            return
+        clear_admin_flow_state(context.user_data)
+        await _site_run_ask(update, context, arg, {}, "continue" if action == "reccont" else "run")
+    elif action == "runorder":
+        # From Pending Orders: run a site for this order's item with the customer's details from the order.
+        row = db_get_fulfilment(arg)
+        sites = _sites_with_steps()
+        if not row:
+            await _site_reply(update, "That item no longer exists.")
+            return
+        if not sites:
+            await _site_reply(update, "No automation site has recorded steps yet (🌐 Automation Sites).")
+            return
+        rows = [[InlineKeyboardButton(f"🌐 {s['label']}", callback_data=f"asite:runfor:{arg}:{s['id']}")] for s in sites]
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"apend:{arg}")])
+        await _site_reply(update, f"Which site should run for order #{row[1]}?", InlineKeyboardMarkup(rows))
+    elif action == "runfor":
+        row = db_get_fulfilment(arg)
+        site_id = int(parts[3])
+        if not row:
+            await _site_reply(update, "That item no longer exists.")
+            return
+        try:
+            info = json.loads(row[6]) if row[6] else {}
+        except ValueError:
+            info = {}
+        clear_admin_flow_state(context.user_data)
+        await _site_run_ask(update, context, site_id, auto_sites.customer_values(info), "run", fid=arg)
     elif action in ("recshot", "recgrid"):
         rec = _SITE_RECORDERS.get(ADMIN_CHAT_ID)
         if not rec:
