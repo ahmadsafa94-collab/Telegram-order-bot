@@ -47,6 +47,7 @@ import sqlite3
 from datetime import datetime, timedelta, time as dt_time
 
 from sales_excel import build_sales_workbook
+import auto_sites
 
 from telegram import (
     InlineKeyboardButton,
@@ -1347,6 +1348,7 @@ def db_init():
     load_bundled_imd_catalog()
     backfill_imd_years()
     db_heal_delivered_pending()
+    auto_sites.init(DB_PATH)
 
 
 def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, message_id: int = None) -> int:
@@ -3612,6 +3614,7 @@ A_SHOP_LABEL = "🛠 SHOP (edit mode)"
 A_BACKUP = "🗄 Backup"
 A_DISCOUNT_CODES = "🏷 Discount Codes"
 A_COWORKERS = "👥 Coworkers"
+A_SITES = "🌐 Automation Sites"
 
 # Kept as internal labels for the Orders submenu buttons — no longer
 # top-level keyboard buttons, but still used as inline button text and
@@ -3625,13 +3628,14 @@ ADMIN_LABELS = [
     A_SERIALS, A_ORDERS, A_INPUT, A_INBOX, A_BROADCAST,
     A_FIND_CUSTOMER, A_STOCK, A_TICKETS, A_CREDITS,
     A_ADD_SUBSCRIPTION, A_BOOK_REQUESTS, A_IMD_CATALOG, A_CUSTOMER_VIEW,
-    A_BACKUP, A_DISCOUNT_CODES, A_COWORKERS,
+    A_BACKUP, A_DISCOUNT_CODES, A_COWORKERS, A_SITES,
 ]
 
 # Every key the admin's text_state_router uses. clear_admin_flow_state()
 # must be called at the start of every new admin interactive flow so a
 # stale earlier state never intercepts input meant for the new one.
 ADMIN_FLOW_KEYS = [
+    "awaiting_site_field", "site_draft", "site_edit", "recording_site",
     "awaiting_admin_input",
     "awaiting_comment_for_order",
     "awaiting_reject_comment_for_order",
@@ -3984,7 +3988,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [A_STOCK, _badge(A_TICKETS, tickets)],
             [A_CREDITS, A_ADD_SUBSCRIPTION],
             [A_BOOK_REQUESTS],
-            [A_IMD_CATALOG],
+            [A_IMD_CATALOG, A_SITES],
             [A_CUSTOMER_VIEW, A_BACKUP],
             [A_DISCOUNT_CODES, A_COWORKERS],
     ]
@@ -7337,6 +7341,9 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == A_COWORKERS:
         await coworkers_menu(update, context)
+
+    elif text == A_SITES:
+        await sites_menu(update, context)
 
 
 def fulfilment_info_fields(info_json: str) -> list:
@@ -15570,6 +15577,12 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── 2. Admin interactive states (all here, in a single block) ────
     if update.effective_user.id == ADMIN_CHAT_ID:
+        if context.user_data.get("recording_site"):
+            await site_record_text(update, context)
+            return
+        if context.user_data.get("awaiting_site_field") or context.user_data.get("site_edit"):
+            await site_field_reply(update, context)
+            return
         if context.user_data.get("awaiting_admin_message_for_order"):
             await admin_message_reply(update, context)
             return
@@ -18487,6 +18500,341 @@ async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
+# ── Automation sites (stage 1: saved sites + recorded steps; see auto_sites.py) ──
+
+SITE_FIELD_PROMPTS = {
+    "label": "Name for this site (only you see it, e.g. Site A):",
+    "url": "Website link (the page to start from, https://…):",
+    "proxy_server": (
+        "Proxy for this site's country, as host:port from your proxy provider (e.g. 1.2.3.4:8080).\n"
+        "Use an HTTP proxy: the browser can't log in to SOCKS5 proxies. Send - for no proxy."
+    ),
+    "proxy_username": "Proxy username (send - if it has none):",
+    "proxy_password": "Proxy password (send - if none). I delete your message right after saving it.",
+    "login_username": "Your username or email on the website (send - if none):",
+    "login_password": "Your password on the website (send - if none). I delete your message right after saving it.",
+}
+SITE_FIELD_LABELS = {
+    "label": "Name", "url": "Link", "proxy_server": "Proxy", "proxy_username": "Proxy username",
+    "proxy_password": "Proxy password", "login_username": "Site username", "login_password": "Site password",
+}
+SITE_RECORD_IDLE_SECONDS = 15 * 60
+_SITE_RECORDERS = {}  # admin id -> {"session", "site_id", "steps", "last"}
+
+
+async def _site_reply(update: Update, text: str, markup=None):
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text, reply_markup=markup)
+    else:
+        await update.message.reply_text(text, reply_markup=markup)
+
+
+async def sites_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🌐 Automation Sites: the saved sites, and Add."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    clear_admin_flow_state(context.user_data)
+    sites = auto_sites.list_sites(DB_PATH)
+    rows = [[InlineKeyboardButton(f"🌐 {s['label']} · {len(s['steps'])} steps", callback_data=f"asite:open:{s['id']}")] for s in sites]
+    rows.append([InlineKeyboardButton("➕ Add site", callback_data="asite:add")])
+    await _site_reply(
+        update,
+        "🌐 Automation Sites\n\nWebsites the bot will work on for you, each through the proxy for its country. "
+        "Record the steps once (I send a screenshot after each page and you tell me what to do)."
+        + ("" if sites else "\n\nNo sites yet."),
+        InlineKeyboardMarkup(rows),
+    )
+
+
+def _site_text(site: dict) -> str:
+    proxy = site.get("proxy_server") or "none (direct)"
+    lines = [
+        f"🌐 {site['label']}",
+        f"Link: {site['url']}",
+        f"Proxy: {proxy}" + (f" · user {site['proxy_username']} · password {auto_sites.mask(site['proxy_password'])}" if site.get("proxy_username") else ""),
+        f"Site login: {site.get('login_username') or '—'} · password {auto_sites.mask(site['login_password'])}",
+        f"Steps recorded: {len(site['steps'])}" + (f" · success text: “{site['success_text']}”" if site.get("success_text") else ""),
+    ]
+    return "\n".join(lines)
+
+
+async def _site_detail(update: Update, site_id: int):
+    site = auto_sites.get_site(DB_PATH, site_id)
+    if not site:
+        await _site_reply(update, "That site no longer exists.")
+        return
+    rows = [
+        [InlineKeyboardButton("🔌 Test", callback_data=f"asite:test:{site_id}"),
+         InlineKeyboardButton("🎬 Record steps", callback_data=f"asite:rec:{site_id}")],
+        [InlineKeyboardButton("📋 Steps", callback_data=f"asite:steps:{site_id}"),
+         InlineKeyboardButton("✏️ Edit", callback_data=f"asite:editmenu:{site_id}")],
+        [InlineKeyboardButton("🗑 Delete", callback_data=f"asite:del:{site_id}"),
+         InlineKeyboardButton("⬅️ Back", callback_data="asite:list")],
+    ]
+    await _site_reply(update, _site_text(site), InlineKeyboardMarkup(rows))
+
+
+async def site_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """The add-site form (one field per message) and editing one field."""
+    raw = (update.message.text or "").strip()
+    value = "" if raw == "-" else raw
+    edit = context.user_data.get("site_edit")
+    field = edit[1] if edit else context.user_data.get("awaiting_site_field")
+    if field in auto_sites.SECRET_FIELDS:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+    if field == "label" and raw == "-":
+        value = ""
+    problem = auto_sites.validate_field(field, value)
+    if problem:
+        await update.message.reply_text(f"⚠️ {problem}\n\n{SITE_FIELD_PROMPTS[field]}")
+        return
+    if edit:
+        context.user_data.pop("site_edit", None)
+        auto_sites.update_field(DB_PATH, edit[0], field, value)
+        await update.message.reply_text(f"✅ {SITE_FIELD_LABELS[field]} saved.")
+        await _site_detail(update, edit[0])
+        return
+    draft = context.user_data.setdefault("site_draft", {})
+    draft[field] = value
+    order = list(auto_sites.FIELDS)
+    if field in ("proxy_server",) and not value:
+        draft["proxy_username"] = draft["proxy_password"] = ""
+        nxt = "login_username"
+    elif field == "proxy_username" and not value:
+        draft["proxy_password"] = ""
+        nxt = "login_username"
+    elif field == "login_username" and not value:
+        draft["login_password"] = ""
+        nxt = None
+    else:
+        i = order.index(field)
+        nxt = order[i + 1] if i + 1 < len(order) else None
+    if nxt:
+        context.user_data["awaiting_site_field"] = nxt
+        await update.message.reply_text(SITE_FIELD_PROMPTS[nxt])
+        return
+    context.user_data.pop("awaiting_site_field", None)
+    site_id = auto_sites.add_site(DB_PATH, context.user_data.pop("site_draft", {}))
+    await update.message.reply_text("✅ Site saved. Tap 🔌 Test to check the proxy's country and that the site opens.")
+    await _site_detail(update, site_id)
+
+
+async def _site_test(update: Update, site_id: int):
+    site = auto_sites.get_site(DB_PATH, site_id)
+    if not site:
+        return
+    if None in (site.get("proxy_password"), site.get("login_password")):
+        await _site_reply(update, "⚠️ A saved password can't be read anymore (the bot's key changed). Enter it again with ✏️ Edit.")
+        return
+    await _site_reply(update, f"🔌 Testing {site['label']}… (up to a minute)")
+    session = auto_sites.Session(site)
+    try:
+        await session.start(open_url=False)
+        try:
+            ip = await session.exit_ip()
+            where = f"{ip['ip']} · {ip['country']} {ip['city']} · {ip['org']}"
+        except Exception as exc:
+            where = f"couldn't check ({exc.__class__.__name__})"
+        await session.page.goto(site["url"], timeout=60_000)
+        await session.settle()
+        shot = await session.screenshot()
+        title = await session.title()
+        chat_id = update.effective_chat.id
+        await update.get_bot().send_photo(
+            chat_id=chat_id, photo=shot,
+            caption=f"✅ {site['label']} opened.\nExit IP: {where}\nPage: {title}"[:1024],
+        )
+    except Exception as exc:
+        logger.warning("Site test failed for site %s: %s", site_id, exc)
+        await _site_reply(update, f"❌ Test failed: {str(exc).splitlines()[0][:300]}\n\nCheck the proxy and the link with ✏️ Edit.")
+    finally:
+        await session.close()
+
+
+def _site_record_buttons():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("↩️ Undo last", callback_data="asite:recundo"),
+        InlineKeyboardButton("✅ Finish", callback_data="asite:recdone"),
+        InlineKeyboardButton("❌ Cancel", callback_data="asite:reccancel"),
+    ]])
+
+
+async def _site_record_shot(bot, rec: dict, caption: str):
+    try:
+        shot = await rec["session"].screenshot()
+        await bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=shot, caption=caption[:1024], reply_markup=_site_record_buttons())
+    except Exception as exc:
+        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"{caption}\n\n(screenshot failed: {exc})"[:4000], reply_markup=_site_record_buttons())
+
+
+async def _site_record_close(context: ContextTypes.DEFAULT_TYPE):
+    rec = _SITE_RECORDERS.pop(ADMIN_CHAT_ID, None)
+    context.user_data.pop("recording_site", None)
+    if rec:
+        await rec["session"].close()
+
+
+async def _site_record_watchdog(bot, rec: dict):
+    """Closes a recording left idle, so a forgotten browser doesn't keep running."""
+    while _SITE_RECORDERS.get(ADMIN_CHAT_ID) is rec:
+        await asyncio.sleep(60)
+        if _SITE_RECORDERS.get(ADMIN_CHAT_ID) is rec and time.time() - rec["last"] > SITE_RECORD_IDLE_SECONDS:
+            _SITE_RECORDERS.pop(ADMIN_CHAT_ID, None)
+            await rec["session"].close()
+            try:
+                await bot.send_message(chat_id=ADMIN_CHAT_ID, text="⏹ Recording stopped after 15 idle minutes; nothing was saved.")
+            except Exception:
+                pass
+
+
+async def _site_record_start(update: Update, context: ContextTypes.DEFAULT_TYPE, site_id: int):
+    site = auto_sites.get_site(DB_PATH, site_id)
+    if not site:
+        return
+    if None in (site.get("proxy_password"), site.get("login_password")):
+        await _site_reply(update, "⚠️ A saved password can't be read anymore. Enter it again with ✏️ Edit first.")
+        return
+    await _site_record_close(context)
+    clear_admin_flow_state(context.user_data)
+    await _site_reply(update, f"🎬 Opening {site['label']}…")
+    session = auto_sites.Session(site)
+    try:
+        await session.start()
+    except Exception as exc:
+        await session.close()
+        await _site_reply(update, f"❌ Couldn't open the site: {str(exc).splitlines()[0][:300]}\n\nTry 🔌 Test first.")
+        return
+    rec = {"session": session, "site_id": site_id, "steps": [], "last": time.time()}
+    _SITE_RECORDERS[ADMIN_CHAT_ID] = rec
+    context.user_data["recording_site"] = site_id
+    context.application.create_task(_site_record_watchdog(update.get_bot(), rec))
+    await _site_record_shot(update.get_bot(), rec, f"Page 1: {await session.title()}\n\n{auto_sites.INSTRUCTION_HELP}")
+
+
+async def _site_record_finish(update: Update, context: ContextTypes.DEFAULT_TYPE, success_text: str = ""):
+    rec = _SITE_RECORDERS.get(ADMIN_CHAT_ID)
+    if not rec:
+        await _site_reply(update, "No recording is running.")
+        return
+    note = ""
+    if success_text and not await rec["session"].page_has_text(success_text):
+        note = f"\n\n⚠️ “{success_text}” isn't on the current page; check it's the text a successful run shows."
+    auto_sites.save_steps(DB_PATH, rec["site_id"], rec["steps"], success_text)
+    site_id = rec["site_id"]
+    await _site_record_close(context)
+    steps = "\n".join(f"{i}. {auto_sites.describe(s)}" for i, s in enumerate(rec["steps"], 1)) or "(no steps)"
+    await _site_reply(update, f"✅ Saved {len(rec['steps'])} steps:\n{steps}" + note)
+    await _site_detail(update, site_id)
+
+
+async def site_record_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """An instruction while recording: do it on the page, keep it as a step, send the next screenshot."""
+    rec = _SITE_RECORDERS.get(ADMIN_CHAT_ID)
+    if not rec:
+        context.user_data.pop("recording_site", None)
+        await update.message.reply_text("That recording has ended (it closes after 15 idle minutes). Start it again from 🌐 Automation Sites.")
+        return
+    rec["last"] = time.time()
+    text = (update.message.text or "").strip()
+    word = text.split(" ", 1)[0].lower()
+    if word == "done":
+        await _site_record_finish(update, context, text[4:].strip())
+        return
+    if word == "cancel":
+        await _site_record_close(context)
+        await update.message.reply_text("❌ Recording cancelled; nothing was saved.")
+        return
+    if word == "undo":
+        removed = rec["steps"].pop() if rec["steps"] else None
+        await update.message.reply_text(
+            f"↩️ Forgot step: {auto_sites.describe(removed)}. The page stays where it is." if removed else "No steps to undo."
+        )
+        return
+    try:
+        step = auto_sites.parse_instruction(text)
+    except ValueError as exc:
+        await update.message.reply_text(f"⚠️ {exc}")
+        return
+    session = rec["session"]
+    try:
+        await session.perform(step)
+    except Exception as exc:
+        await _site_record_shot(
+            context.bot, rec,
+            f"❌ Couldn't {auto_sites.describe(step)}: {str(exc).splitlines()[0][:300]}\nNot saved. Try other wording (the exact text on the page).",
+        )
+        return
+    rec["steps"].append(auto_sites.stored_step(step, rec["session"].site))
+    await _site_record_shot(
+        context.bot, rec,
+        f"✅ Step {len(rec['steps'])}: {auto_sites.describe(rec['steps'][-1])}\nNow on: {await session.title()}\n\n"
+        "What next? (or done <success text>)",
+    )
+
+
+async def site_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    parts = query.data.split(":")
+    action = parts[1]
+    arg = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+    if action == "list":
+        await sites_menu(update, context)
+    elif action == "add":
+        clear_admin_flow_state(context.user_data)
+        context.user_data["site_draft"] = {}
+        context.user_data["awaiting_site_field"] = "label"
+        await _site_reply(update, SITE_FIELD_PROMPTS["label"])
+    elif action == "open":
+        await _site_detail(update, arg)
+    elif action == "editmenu":
+        rows = [[InlineKeyboardButton(SITE_FIELD_LABELS[f], callback_data=f"asite:edit:{arg}:{f}")] for f in auto_sites.FIELDS]
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"asite:open:{arg}")])
+        await _site_reply(update, "What do you want to change?", InlineKeyboardMarkup(rows))
+    elif action == "edit":
+        field = parts[3]
+        if field not in auto_sites.FIELDS:
+            return
+        clear_admin_flow_state(context.user_data)
+        context.user_data["site_edit"] = (arg, field)
+        await _site_reply(update, SITE_FIELD_PROMPTS[field])
+    elif action == "test":
+        await _site_test(update, arg)
+    elif action == "rec":
+        await _site_record_start(update, context, arg)
+    elif action == "recundo":
+        rec = _SITE_RECORDERS.get(ADMIN_CHAT_ID)
+        removed = rec["steps"].pop() if rec and rec["steps"] else None
+        await _site_reply(update, f"↩️ Forgot step: {auto_sites.describe(removed)}. The page stays where it is." if removed else "No steps to undo.")
+    elif action == "recdone":
+        await _site_record_finish(update, context)
+    elif action == "reccancel":
+        await _site_record_close(context)
+        await _site_reply(update, "❌ Recording cancelled; nothing was saved.")
+    elif action == "steps":
+        site = auto_sites.get_site(DB_PATH, arg)
+        if site:
+            steps = "\n".join(f"{i}. {auto_sites.describe(s)}" for i, s in enumerate(site["steps"], 1)) or "No steps recorded yet: tap 🎬 Record steps."
+            extra = f"\n\nSuccess when the page shows: “{site['success_text']}”" if site.get("success_text") else ""
+            await _site_reply(update, f"📋 {site['label']}\n{steps}{extra}",
+                              InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"asite:open:{arg}")]]))
+    elif action == "del":
+        await _site_reply(update, "Delete this site with its login and recorded steps?", InlineKeyboardMarkup([[
+            InlineKeyboardButton("🗑 Yes, delete", callback_data=f"asite:delyes:{arg}"),
+            InlineKeyboardButton("❌ No", callback_data=f"asite:open:{arg}"),
+        ]]))
+    elif action == "delyes":
+        auto_sites.delete_site(DB_PATH, arg)
+        await _site_reply(update, "🗑 Site deleted.")
+        await sites_menu(update, context)
+
+
 def _order_restore_report(order_id: int, added: dict, source: str) -> str:
     note = db_reconcile_restored_order(order_id)
     return (
@@ -18874,6 +19222,8 @@ def main():
     app.add_handler(CommandHandler("backupdb", backup_db))
     app.add_handler(CommandHandler("restore", restore_start))
     app.add_handler(CommandHandler("restoreorder", restoreorder_start))
+    app.add_handler(CommandHandler("sites", sites_menu))
+    app.add_handler(CallbackQueryHandler(site_callback, pattern=r"^asite:"))
     app.add_handler(CommandHandler("exportimd", export_imd_catalog))
     app.add_handler(CommandHandler("imddiag", imd_diag_start))
     app.add_handler(CommandHandler("syncserials", sync_serials_start))
