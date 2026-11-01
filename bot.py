@@ -18654,20 +18654,23 @@ async def _site_test(update: Update, site_id: int):
         await session.close()
 
 
-def _site_record_buttons():
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("↩️ Undo last", callback_data="asite:recundo"),
-        InlineKeyboardButton("✅ Finish", callback_data="asite:recdone"),
-        InlineKeyboardButton("❌ Cancel", callback_data="asite:reccancel"),
-    ]])
+def _site_record_buttons(rec: dict = None):
+    grid_on = (rec or {}).get("grid", True)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📸 Screenshot", callback_data="asite:recshot"),
+         InlineKeyboardButton("🔢 Grid off" if grid_on else "🔢 Grid on", callback_data="asite:recgrid")],
+        [InlineKeyboardButton("↩️ Undo last", callback_data="asite:recundo"),
+         InlineKeyboardButton("✅ Finish", callback_data="asite:recdone"),
+         InlineKeyboardButton("❌ Cancel", callback_data="asite:reccancel")],
+    ])
 
 
 async def _site_record_shot(bot, rec: dict, caption: str):
     try:
-        shot = await rec["session"].screenshot()
-        await bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=shot, caption=caption[:1024], reply_markup=_site_record_buttons())
+        shot = await rec["session"].screenshot(grid=rec.get("grid", True))
+        await bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=shot, caption=caption[:1024], reply_markup=_site_record_buttons(rec))
     except Exception as exc:
-        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"{caption}\n\n(screenshot failed: {exc})"[:4000], reply_markup=_site_record_buttons())
+        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"{caption}\n\n(screenshot failed: {exc})"[:4000], reply_markup=_site_record_buttons(rec))
 
 
 async def _site_record_close(context: ContextTypes.DEFAULT_TYPE):
@@ -18707,7 +18710,7 @@ async def _site_record_start(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await session.close()
         await _site_reply(update, f"❌ Couldn't open the site: {str(exc).splitlines()[0][:300]}\n\nTry 🔌 Test first.")
         return
-    rec = {"session": session, "site_id": site_id, "steps": [], "last": time.time()}
+    rec = {"session": session, "site_id": site_id, "steps": [], "last": time.time(), "grid": True}
     _SITE_RECORDERS[ADMIN_CHAT_ID] = rec
     context.user_data["recording_site"] = site_id
     context.application.create_task(_site_record_watchdog(update.get_bot(), rec))
@@ -18759,6 +18762,8 @@ async def site_record_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ {exc}")
         return
     session = rec["session"]
+    if step["action"] == "tap":
+        step = await session.resolve_tap(step)
     try:
         await session.perform(step)
     except Exception as exc:
@@ -18808,6 +18813,19 @@ async def site_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _site_test(update, arg)
     elif action == "rec":
         await _site_record_start(update, context, arg)
+    elif action in ("recshot", "recgrid"):
+        rec = _SITE_RECORDERS.get(ADMIN_CHAT_ID)
+        if not rec:
+            await _site_reply(update, "No recording is running.")
+            return
+        rec["last"] = time.time()
+        if action == "recgrid":
+            rec["grid"] = not rec.get("grid", True)
+        await _site_record_shot(
+            context.bot, rec,
+            f"📸 Now on: {await rec['session'].title()}" + (" (grid on: tap <number>)" if rec.get("grid", True) else "")
+            + "\n\nWhat next?",
+        )
     elif action == "recundo":
         rec = _SITE_RECORDERS.get(ADMIN_CHAT_ID)
         removed = rec["steps"].pop() if rec and rec["steps"] else None

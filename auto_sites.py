@@ -21,6 +21,10 @@ from cryptography.fernet import Fernet, InvalidToken
 FIELDS = ("label", "url", "proxy_server", "proxy_username", "proxy_password", "login_username", "login_password")
 SECRET_FIELDS = ("proxy_password", "login_password")
 IP_CHECK_URL = "https://ipinfo.io/json"
+VIEWPORT = {"width": 1280, "height": 900}
+# The numbered grid drawn on recording screenshots, for buttons with no text: `tap 17` clicks square 17's middle.
+GRID_COLS, GRID_ROWS = 16, 12
+SCROLL_PX = 600
 STEP_WAIT_SECONDS_MAX = 30
 ACTION_TIMEOUT_MS = 15_000
 
@@ -194,6 +198,8 @@ INSTRUCTION_HELP = (
     "• press Enter\n"
     "• wait 5   (seconds)\n"
     "• goto https://…\n"
+    "• tap 17   (the middle of grid square 17, for a button with no text)\n"
+    "• scroll down · scroll up\n"
     "• done You have renewed   (finish; the text shows success)\n"
     "• undo (forget the last step) · cancel"
 )
@@ -225,6 +231,15 @@ def parse_instruction(text: str) -> dict:
         except ValueError:
             raise ValueError("Use wait <seconds>, e.g. wait 5")
         return {"action": "wait", "seconds": max(0.0, min(seconds, STEP_WAIT_SECONDS_MAX))}
+    if verb == "tap":
+        if not rest.isdigit() or not 1 <= int(rest) <= GRID_COLS * GRID_ROWS:
+            raise ValueError(f"Use tap <square number>, 1 to {GRID_COLS * GRID_ROWS} (the numbers on the screenshot's grid)")
+        return {"action": "tap", "cell": int(rest)}
+    if verb == "scroll":
+        direction = rest.lower() or "down"
+        if direction not in ("down", "up"):
+            raise ValueError("Use scroll down or scroll up")
+        return {"action": "scroll", "direction": direction}
     if verb == "goto":
         if not re.match(r"^https?://\S+", rest):
             raise ValueError("Use goto https://…")
@@ -266,8 +281,19 @@ def resolve_value(value: str, site: dict, customer: dict = None) -> str:
     return _PLACEHOLDER_RE.sub(sub, value or "")
 
 
+def cell_center(cell: int) -> tuple:
+    """The page position (x, y) of the middle of grid square `cell` (numbered from 1, left to right, top down)."""
+    w, h = VIEWPORT["width"] / GRID_COLS, VIEWPORT["height"] / GRID_ROWS
+    row, col = divmod(cell - 1, GRID_COLS)
+    return round(col * w + w / 2), round(row * h + h / 2)
+
+
 def describe(step: dict) -> str:
     a = step.get("action")
+    if a == "tap":
+        return f"tap {step.get('cell')}" + (f" ({step['what']})" if step.get("what") else "")
+    if a == "scroll":
+        return f"scroll {step.get('direction', 'down')}"
     if a in ("click", "check"):
         return f"{a} {step['target']}"
     if a in ("fill", "select"):
@@ -300,7 +326,7 @@ class Session:
         if proxy:
             launch["proxy"] = proxy
         self._browser = await self._pw.chromium.launch(**launch)
-        self.context = await self._browser.new_context(viewport={"width": 1280, "height": 900})
+        self.context = await self._browser.new_context(viewport=VIEWPORT)
         self.page = await self.context.new_page()
         if open_url:
             await self.page.goto(self.site["url"], timeout=60_000)
@@ -358,6 +384,20 @@ class Session:
                 await el.select_option(label=resolve_value(step.get("value", ""), self.site, customer), timeout=ACTION_TIMEOUT_MS)
             else:
                 await el.check(timeout=ACTION_TIMEOUT_MS)
+        elif a == "tap":
+            el = None
+            if step.get("selector"):
+                loc = page.locator(step["selector"])
+                if await loc.count() == 1 and await loc.first.is_visible():
+                    el = loc.first
+            if el:
+                await el.click(timeout=ACTION_TIMEOUT_MS)
+            else:
+                x, y = (step["x"], step["y"]) if "x" in step else cell_center(step["cell"])
+                await page.mouse.click(x, y)
+        elif a == "scroll":
+            await page.mouse.wheel(0, SCROLL_PX if step.get("direction", "down") == "down" else -SCROLL_PX)
+            await asyncio.sleep(0.5)
         elif a == "press":
             await page.keyboard.press(step["key"])
         elif a == "wait":
@@ -368,8 +408,39 @@ class Session:
             raise ValueError(f"unknown action {a}")
         await self.settle()
 
-    async def screenshot(self) -> bytes:
-        return await self.page.screenshot(type="jpeg", quality=70)
+    async def screenshot(self, grid: bool = False) -> bytes:
+        """The visible part of the page; with `grid`, numbered squares drawn on it for `tap N`."""
+        if not grid:
+            return await self.page.screenshot(type="jpeg", quality=70)
+        try:
+            await self.page.evaluate(_GRID_JS, [GRID_COLS, GRID_ROWS])
+        except Exception:
+            return await self.page.screenshot(type="jpeg", quality=70)
+        try:
+            return await self.page.screenshot(type="jpeg", quality=75)
+        finally:
+            try:
+                await self.page.evaluate("() => { const g = document.getElementById('__medic_grid'); if (g) g.remove(); }")
+            except Exception:
+                pass
+
+    async def resolve_tap(self, step: dict) -> dict:
+        """Turns `tap N` into what to click: the clickable element in that square nearest its middle (or the middle
+        itself), with a unique id/label/name selector when it has one so a later run finds it even if the page
+        shifts a little."""
+        x, y = cell_center(step["cell"])
+        out = {"action": "tap", "cell": step["cell"], "x": x, "y": y}
+        w, h = VIEWPORT["width"] / GRID_COLS, VIEWPORT["height"] / GRID_ROWS
+        try:
+            info = await self.page.evaluate(_ELEMENT_AT_JS, [x - w / 2, y - h / 2, x + w / 2, y + h / 2])
+        except Exception:
+            info = None
+        if info:
+            out["x"], out["y"] = info.get("x", x), info.get("y", y)
+            if info.get("selector") and info.get("unique"):
+                out["selector"] = info["selector"]
+            out["what"] = info.get("text") or info.get("selector") or info.get("tag") or ""
+        return out
 
     async def page_has_text(self, text: str) -> bool:
         try:
@@ -392,3 +463,57 @@ class Session:
                     await closer.close()
             except Exception:
                 pass
+
+
+_GRID_JS = """([cols, rows]) => {
+  const old = document.getElementById('__medic_grid'); if (old) old.remove();
+  const g = document.createElement('div'); g.id = '__medic_grid';
+  g.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none;display:grid;' +
+    `grid-template-columns:repeat(${cols},1fr);grid-template-rows:repeat(${rows},1fr);`;
+  for (let i = 1; i <= cols * rows; i++) {
+    const c = document.createElement('div');
+    c.style.cssText = 'border:1px solid rgba(255,0,80,.35);position:relative;';
+    const n = document.createElement('span'); n.textContent = i;
+    n.style.cssText = 'position:absolute;left:2px;top:1px;font:bold 11px/1 Arial,sans-serif;color:#fff;' +
+      'background:rgba(220,0,70,.75);padding:1px 3px;border-radius:3px;';
+    c.appendChild(n); g.appendChild(c);
+  }
+  document.documentElement.appendChild(g);
+}"""
+
+_ELEMENT_AT_JS = r"""([x0, y0, x1, y1]) => {
+  // The clickable element in this grid square nearest its middle (small icon buttons are rarely right in the
+  // middle), else whatever is at the middle. Returns where to click and how to find it again.
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const sel = 'button,a,[role=button],[role=link],[role=menuitem],[role=tab],input,select,textarea,label,summary,[onclick],[tabindex]';
+  let best = null, bestD = Infinity;
+  for (const el of document.querySelectorAll(sel)) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2 || r.right <= x0 || r.left >= x1 || r.bottom <= y0 || r.top >= y1) continue;
+    const st = getComputedStyle(el);
+    if (st.visibility === 'hidden' || st.display === 'none' || st.pointerEvents === 'none') continue;
+    const dx = Math.max(r.left - cx, 0, cx - r.right), dy = Math.max(r.top - cy, 0, cy - r.bottom);
+    const d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; best = el; }
+  }
+  let el = best, px = cx, py = cy;
+  if (el) {
+    const r = el.getBoundingClientRect();
+    px = Math.round(Math.min(Math.max(r.left + r.width / 2, x0), x1 - 1));
+    py = Math.round(Math.min(Math.max(r.top + r.height / 2, y0), y1 - 1));
+  } else {
+    el = document.elementFromPoint(cx, cy);
+    if (!el) return {x: Math.round(cx), y: Math.round(cy)};
+  }
+  const esc = (v) => v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  let selector = null;
+  if (el.id) selector = '#' + CSS.escape(el.id);
+  else for (const a of ['aria-label', 'title', 'name', 'data-testid', 'alt', 'href']) {
+    const v = el.getAttribute(a);
+    if (v) { selector = el.tagName.toLowerCase() + '[' + a + '="' + esc(v) + '"]'; break; }
+  }
+  const text = ((el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '') + '').trim().slice(0, 40);
+  return {x: px, y: py, selector, clickable: !!best,
+          unique: selector ? document.querySelectorAll(selector).length === 1 : false,
+          tag: el.tagName.toLowerCase(), text};
+}"""
