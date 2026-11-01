@@ -422,10 +422,14 @@ class Session:
         return self
 
     async def settle(self):
-        try:
-            await self.page.wait_for_load_state("networkidle", timeout=10_000)
-        except Exception:
-            pass
+        """Waits for what a step started (e.g. a form being sent) to finish loading, so the next step doesn't cut
+        it off."""
+        await asyncio.sleep(0.3)  # a click's navigation may not have started yet
+        for state, timeout in (("load", 20_000), ("networkidle", 10_000)):
+            try:
+                await self.page.wait_for_load_state(state, timeout=timeout)
+            except Exception:
+                pass
 
     async def exit_ip(self) -> dict:
         """Where this browser's traffic comes out: {ip, country, city, org}."""
@@ -534,7 +538,14 @@ class Session:
         elif a == "wait":
             await asyncio.sleep(step["seconds"])
         elif a == "goto":
-            await page.goto(step["url"], timeout=60_000)
+            try:
+                await page.goto(step["url"], timeout=60_000)
+            except Exception as exc:
+                # Cut off by the previous step's page still loading (ERR_ABORTED / interrupted): try once more.
+                if "ERR_ABORTED" not in str(exc) and "interrupted" not in str(exc):
+                    raise
+                await self.settle()
+                await page.goto(step["url"], timeout=60_000)
         else:
             raise ValueError(f"unknown action {a}")
         await self.settle()
