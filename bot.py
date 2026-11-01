@@ -48,6 +48,7 @@ from datetime import datetime, timedelta, time as dt_time
 
 from sales_excel import build_sales_workbook
 import auto_sites
+import renewals
 
 from telegram import (
     InlineKeyboardButton,
@@ -1349,6 +1350,7 @@ def db_init():
     backfill_imd_years()
     db_heal_delivered_pending()
     auto_sites.init(DB_PATH)
+    renewals.init(DB_PATH)
 
 
 def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, message_id: int = None) -> int:
@@ -3615,6 +3617,7 @@ A_BACKUP = "🗄 Backup"
 A_DISCOUNT_CODES = "🏷 Discount Codes"
 A_COWORKERS = "👥 Coworkers"
 A_SITES = "🌐 Automation Sites"
+A_RENEW_UTD = "🔄 Renew UpToDate"
 
 # Kept as internal labels for the Orders submenu buttons — no longer
 # top-level keyboard buttons, but still used as inline button text and
@@ -3628,14 +3631,14 @@ ADMIN_LABELS = [
     A_SERIALS, A_ORDERS, A_INPUT, A_INBOX, A_BROADCAST,
     A_FIND_CUSTOMER, A_STOCK, A_TICKETS, A_CREDITS,
     A_ADD_SUBSCRIPTION, A_BOOK_REQUESTS, A_IMD_CATALOG, A_CUSTOMER_VIEW,
-    A_BACKUP, A_DISCOUNT_CODES, A_COWORKERS, A_SITES,
+    A_BACKUP, A_DISCOUNT_CODES, A_COWORKERS, A_SITES, A_RENEW_UTD,
 ]
 
 # Every key the admin's text_state_router uses. clear_admin_flow_state()
 # must be called at the start of every new admin interactive flow so a
 # stale earlier state never intercepts input meant for the new one.
 ADMIN_FLOW_KEYS = [
-    "awaiting_site_field", "site_draft", "site_edit", "recording_site", "site_run",
+    "awaiting_site_field", "site_draft", "site_edit", "recording_site", "site_run", "rnw_form", "rnw_search",
     "awaiting_admin_input",
     "awaiting_comment_for_order",
     "awaiting_reject_comment_for_order",
@@ -3989,6 +3992,7 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [A_CREDITS, A_ADD_SUBSCRIPTION],
             [A_BOOK_REQUESTS],
             [A_IMD_CATALOG, A_SITES],
+            [_badge(A_RENEW_UTD, len(renewals.requests(DB_PATH)))],
             [A_CUSTOMER_VIEW, A_BACKUP],
             [A_DISCOUNT_CODES, A_COWORKERS],
     ]
@@ -7344,6 +7348,9 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == A_SITES:
         await sites_menu(update, context)
+
+    elif text == A_RENEW_UTD:
+        await renew_menu(update, context)
 
 
 def fulfilment_info_fields(info_json: str) -> list:
@@ -12735,6 +12742,8 @@ async def start_api_server(application):
     api_app.router.add_get("/api/customer_chat", http_customer_chat)
     api_app.router.add_get("/api/assist_events", http_assist_events)
     api_app.router.add_post("/api/assist_reply", http_assist_reply)
+    api_app.router.add_post("/api/renewal_request", http_renewal_request)
+    api_app.router.add_get("/api/order_logins", http_order_logins)
     api_app.router.add_get("/api/orders", http_all_orders)
     api_app.router.add_post("/api/submit_receipt", http_submit_receipt)
     api_app.router.add_post("/api/create_order", http_create_order)
@@ -15584,6 +15593,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if context.user_data.get("site_run"):
             await site_run_value_reply(update, context)
+            return
+        if context.user_data.get("rnw_form") or context.user_data.get("rnw_search"):
+            await renew_text_reply(update, context)
             return
         if context.user_data.get("awaiting_site_field") or context.user_data.get("site_edit"):
             await site_field_reply(update, context)
@@ -18929,7 +18941,7 @@ def _sites_with_steps() -> list:
 
 
 async def _site_run_ask(update: Update, context: ContextTypes.DEFAULT_TYPE, site_id: int, values: dict,
-                        mode: str = "run", fid: int = None):
+                        mode: str = "run", fid: int = None, rid: int = None):
     """Asks for the values a run still needs, one per message, then runs (or continues recording)."""
     site = auto_sites.get_site(DB_PATH, site_id)
     if not site:
@@ -18939,10 +18951,13 @@ async def _site_run_ask(update: Update, context: ContextTypes.DEFAULT_TYPE, site
         context.user_data.pop("site_run", None)
         if mode == "continue":
             await _site_record_start(update, context, site_id, continue_with=values)
+        elif mode == "renewal":
+            await _renewal_execute(update, rid, site, values)
         else:
             await _site_run_execute(update, site, values, fid)
         return
-    context.user_data["site_run"] = {"site_id": site_id, "values": values, "mode": mode, "fid": fid, "pending": missing}
+    context.user_data["site_run"] = {"site_id": site_id, "values": values, "mode": mode, "fid": fid, "rid": rid,
+                                     "pending": missing}
     lead = "Before continuing, " if mode == "continue" else ""
     await _site_reply(update, f"{lead}send {auto_sites.placeholder_prompt(missing[0])} ({{{missing[0]}}}):"
                       + ("\nI delete your message right after reading it." if "password" in missing[0] else ""))
@@ -18961,7 +18976,8 @@ async def site_run_value_reply(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
     state["values"][name] = (update.message.text or "").strip()
-    await _site_run_ask(update, context, state["site_id"], state["values"], state.get("mode", "run"), state.get("fid"))
+    await _site_run_ask(update, context, state["site_id"], state["values"], state.get("mode", "run"), state.get("fid"),
+                        state.get("rid"))
 
 
 async def _site_run_execute(update: Update, site: dict, values: dict, fid: int = None):
@@ -19130,6 +19146,314 @@ async def site_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         auto_sites.delete_site(DB_PATH, arg)
         await _site_reply(update, "🗑 Site deleted.")
         await sites_menu(update, context)
+
+
+# ── 🔄 Renew UpToDate (renewals numbered R1, R2…; see renewals.py) ──
+
+async def renew_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    clear_admin_flow_state(context.user_data)
+    reqs = renewals.requests(DB_PATH)
+    rows = [
+        [InlineKeyboardButton("➕ New renewal", callback_data="rnw:new")],
+        [InlineKeyboardButton(f"📥 Requests from the chatbot ({len(reqs)})", callback_data="rnw:reqs")],
+        [InlineKeyboardButton("📜 Renewal log", callback_data="rnw:log"),
+         InlineKeyboardButton("🔎 Search", callback_data="rnw:search")],
+    ]
+    await _site_reply(
+        update,
+        "🔄 Renew UpToDate\n\nRenewals run through one of your 🌐 Automation Sites and are numbered R1, R2, … "
+        "(separate from shop orders). You approve each result; customers aren't notified by the bot.",
+        InlineKeyboardMarkup(rows),
+    )
+
+
+def _renewal_list_markup(items: list, back: str = "rnw:menu") -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(renewals.short(r)[:60], callback_data=f"rnw:open:{r['id']}")] for r in items]
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=back)])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _renewal_detail(update: Update, rid: int):
+    r = renewals.get(DB_PATH, rid)
+    if not r:
+        await _site_reply(update, "No such renewal.")
+        return
+    rows = []
+    if r["status"] == "requested":
+        rows.append([InlineKeyboardButton("▶️ Renew (choose site)", callback_data=f"rnw:pick:{rid}"),
+                     InlineKeyboardButton("✋ Not this way", callback_data=f"rnw:decline:{rid}")])
+    elif r["status"] == "awaiting_approval":
+        rows += _renewal_result_rows(rid)
+    else:
+        rows.append([InlineKeyboardButton("▶️ Run again (choose site)", callback_data=f"rnw:pick:{rid}")])
+    shots = []
+    if r.get("screenshot_file_id"):
+        shots.append(InlineKeyboardButton("🖼 Last result", callback_data=f"rnw:shot:{rid}"))
+    if r.get("request_photo_file_id"):
+        shots.append(InlineKeyboardButton("🖼 Customer's screenshot", callback_data=f"rnw:reqphoto:{rid}"))
+    if shots:
+        rows.append(shots)
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="rnw:menu")])
+    await _site_reply(update, renewals.describe(r), InlineKeyboardMarkup(rows))
+
+
+def _renewal_result_rows(rid: int) -> list:
+    return [
+        [InlineKeyboardButton("✅ Approve: renewed", callback_data=f"rnw:ok:{rid}"),
+         InlineKeyboardButton("🔁 Repeat", callback_data=f"rnw:again:{rid}")],
+        [InlineKeyboardButton("🔀 Other site", callback_data=f"rnw:pick:{rid}"),
+         InlineKeyboardButton("❌ Failed", callback_data=f"rnw:fail:{rid}")],
+    ]
+
+
+async def _renewal_pick_site(update: Update, rid: int):
+    sites = _sites_with_steps()
+    if not sites:
+        await _site_reply(update, "No automation site has recorded steps yet: record one in 🌐 Automation Sites first. "
+                                  f"Renewal R{rid} is kept; open it from 📜 Renewal log when ready.")
+        return
+    rows = [[InlineKeyboardButton(f"🌐 {s['label']}", callback_data=f"rnw:site:{rid}:{s['id']}")] for s in sites]
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"rnw:open:{rid}")])
+    r = renewals.get(DB_PATH, rid)
+    await _site_reply(update, f"Renewal R{rid} ({r['utd_username'] if r else ''}): which website should do it?",
+                      InlineKeyboardMarkup(rows))
+
+
+async def _renewal_start(update: Update, context: ContextTypes.DEFAULT_TYPE, rid: int, site_id: int):
+    r = renewals.get(DB_PATH, rid)
+    site = auto_sites.get_site(DB_PATH, site_id)
+    if not r or not site or not site["steps"]:
+        await _site_reply(update, "That renewal or site isn't available anymore.")
+        return
+    if r["utd_password"] is None or None in (site.get("proxy_password"), site.get("login_password")):
+        await _site_reply(update, "⚠️ A saved password can't be read anymore (the bot's key changed). Start a ➕ New renewal, "
+                                  "and re-enter the site's passwords with ✏️ Edit if asked.")
+        return
+    values = {"customer_username": r["utd_username"], "customer_password": r["utd_password"],
+              "customer_email": r["utd_username"]}
+    clear_admin_flow_state(context.user_data)
+    await _site_run_ask(update, context, site_id, values, "renewal", rid=rid)
+
+
+async def _renewal_execute(update: Update, rid: int, site: dict, values: dict):
+    bot = update.get_bot()
+    r = renewals.get(DB_PATH, rid)
+    renewals.update(DB_PATH, rid, status="running", site_id=site["id"], site_label=site["label"],
+                    attempts=(r.get("attempts") or 0) + 1)
+    if _SITE_RUN_LOCK.locked():
+        await _site_reply(update, "⏳ Another automation is running; this one starts when it finishes.")
+    async with _SITE_RUN_LOCK:
+        await _site_reply(update, f"▶️ R{rid}: renewing {r['utd_username']} through {site['label']}… (up to a few minutes)")
+        result = await auto_sites.run_site(site, values)
+    logger.info("Renewal R%s via site %s: %s", rid, site["id"], "ok" if result["ok"] else result["error"])
+    head = f"🔄 R{rid} · {r['utd_username']} · {site['label']}\n"
+    if result["ok"] and not result.get("unverified"):
+        body = "✅ The site confirmed it" + (f": “{result['confirmation']}”" if result.get("confirmation") else ".")
+    elif result["ok"]:
+        body = "⚠️ All steps ran but the site has no success text recorded: check the screenshot."
+    elif result.get("checks_passed"):
+        body = (f"⚠️ The site confirmed it (“{result['confirmation']}”), but a later step failed: {result['error']}. "
+                "You may need to log out on the site yourself.")
+    else:
+        body = f"❌ Stopped after {result['done']} of {result['total']} steps: {result['error']}"
+    caption = head + body + "\n\nApprove only if the screenshot shows it's renewed."
+    markup = InlineKeyboardMarkup(_renewal_result_rows(rid))
+    file_id = None
+    if result.get("screenshot"):
+        sent = await bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=result["screenshot"], caption=caption[:1024], reply_markup=markup)
+        file_id = sent.photo[-1].file_id if sent and sent.photo else None
+    else:
+        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=caption, reply_markup=markup)
+    renewals.update(DB_PATH, rid, status="awaiting_approval", confirmation=result.get("confirmation") or "",
+                    **({"screenshot_file_id": file_id} if file_id else {}))
+
+
+async def renew_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if context.user_data.pop("rnw_search", None):
+        found = renewals.search(DB_PATH, text)
+        await update.message.reply_text(
+            f"🔎 {len(found)} renewal(s) for “{text}”" + ("" if found else ". Search by R-number, UpToDate username, or "
+                                                          "the customer's Telegram ID or @username."),
+            reply_markup=_renewal_list_markup(found),
+        )
+        return
+    form = context.user_data.get("rnw_form") or {}
+    if form.get("step") == "username":
+        if not text:
+            await update.message.reply_text("Send the UpToDate username or email:")
+            return
+        form.update(step="password", username=text)
+        await update.message.reply_text("UpToDate password (I delete your message right after reading it):")
+        return
+    if form.get("step") == "password":
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        context.user_data.pop("rnw_form", None)
+        rid = renewals.create(DB_PATH, "admin", form["username"], text)
+        await update.message.reply_text(f"🔄 Renewal R{rid} created for {form['username']}.")
+        await _renewal_pick_site(update, rid)
+
+
+async def renewal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    parts = query.data.split(":")
+    action = parts[1]
+    rid = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+    if action == "menu":
+        await renew_menu(update, context)
+    elif action == "new":
+        clear_admin_flow_state(context.user_data)
+        context.user_data["rnw_form"] = {"step": "username"}
+        await _site_reply(update, "➕ New UpToDate renewal\n\nSend the UpToDate username or email:")
+    elif action == "reqs":
+        reqs = renewals.requests(DB_PATH)
+        await _site_reply(update, f"📥 {len(reqs)} request(s) from the chatbot waiting for you." if reqs
+                          else "📥 No requests waiting.", _renewal_list_markup(reqs))
+    elif action == "log":
+        await _site_reply(update, "📜 Latest renewals (newest first):", _renewal_list_markup(renewals.recent(DB_PATH)))
+    elif action == "search":
+        clear_admin_flow_state(context.user_data)
+        context.user_data["rnw_search"] = True
+        await _site_reply(update, "🔎 Send a renewal number (R12), an UpToDate username, or the customer's ID or @username:")
+    elif action == "open":
+        await _renewal_detail(update, rid)
+    elif action == "pick":
+        await _renewal_pick_site(update, rid)
+    elif action == "site":
+        await _renewal_start(update, context, rid, int(parts[3]))
+    elif action == "again":
+        r = renewals.get(DB_PATH, rid)
+        if r and r.get("site_id") and auto_sites.get_site(DB_PATH, r["site_id"]):
+            await _renewal_start(update, context, rid, r["site_id"])
+        else:
+            await _renewal_pick_site(update, rid)
+    elif action in ("ok", "fail", "decline"):
+        r = renewals.get(DB_PATH, rid)
+        if not r:
+            return
+        if action == "ok":
+            renewals.update(DB_PATH, rid, status="completed", completed_at=datetime.utcnow().isoformat(timespec="seconds"))
+            who = (f"\nTell the customer: {r.get('customer_label') or ''} (ID {r['customer_user_id']})."
+                   if r["source"] == "chatbot" else "")
+            await _site_reply(update, f"✅ Renewal R{rid} completed ({r['utd_username']} via {r.get('site_label') or '?'}). "
+                                      f"Saved in 📜 Renewal log.{who}")
+        elif action == "fail":
+            renewals.update(DB_PATH, rid, status="failed")
+            await _site_reply(update, f"❌ Renewal R{rid} marked failed. You can run it again from 📜 Renewal log.")
+        else:
+            renewals.update(DB_PATH, rid, status="declined")
+            await _site_reply(update, f"✋ Renewal R{rid} won't be done through the automation. "
+                                      + (f"Let the customer know: {r.get('customer_label') or ''} (ID {r['customer_user_id']})."
+                                         if r["source"] == "chatbot" else ""))
+    elif action in ("shot", "reqphoto"):
+        r = renewals.get(DB_PATH, rid)
+        fid = r and r.get("screenshot_file_id" if action == "shot" else "request_photo_file_id")
+        if fid:
+            await update.get_bot().send_photo(chat_id=ADMIN_CHAT_ID, photo=fid, caption=f"R{rid}")
+        else:
+            await _site_reply(update, "No screenshot saved for that.")
+
+
+async def renewal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/renewal R12 (or a username / customer) — find renewals in the log."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    q = " ".join(context.args or []).strip()
+    if not q:
+        await renew_menu(update, context)
+        return
+    found = renewals.search(DB_PATH, q)
+    if len(found) == 1:
+        await _renewal_detail(update, found[0]["id"])
+    else:
+        await update.message.reply_text(f"🔎 {len(found)} renewal(s) for “{q}”", reply_markup=_renewal_list_markup(found))
+
+
+async def http_renewal_request(request):
+    """The support chatbot hands over a customer's UpToDate renewal request (A2): the admin decides in 🔄 Renew
+    UpToDate. JSON {user_id, customer, utd_username, utd_password, order_id?, note?, screenshot?: base64 photo}.
+    X-Api-Key protected. A repeated request for the same open renewal returns that one."""
+    from aiohttp import web
+    import base64 as _b64
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        body = await request.json()
+        user_id = int(body["user_id"])
+        username = str(body["utd_username"]).strip()
+        password = str(body.get("utd_password") or "").strip()
+        order_id = int(body["order_id"]) if body.get("order_id") not in (None, "", 0) else None
+        photo = _b64.b64decode(body["screenshot"]) if body.get("screenshot") else None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return web.json_response({"error": "invalid request body"}, status=400)
+    if not username or not password:
+        return web.json_response({"error": "the UpToDate username and password are both needed"}, status=400)
+    existing = renewals.open_request_for(DB_PATH, user_id, username)
+    if existing:
+        return web.json_response({"ok": True, "renewal_id": existing["id"], "number": existing["number"], "existing": True})
+    label = str(body.get("customer") or "").strip()[:80]
+    rid = renewals.create(DB_PATH, "chatbot", username, password, customer_user_id=user_id, customer_label=label,
+                          shop_order_id=order_id, note=str(body.get("note") or "")[:500])
+    text = (f"📥 Renewal request R{rid} from the chatbot\nCustomer: {label} (ID {user_id})\nUpToDate account: {username}"
+            + (f"\nShop order: #{order_id}" if order_id else "") + (f"\nNote: {body.get('note')}" if body.get("note") else ""))
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Renew (choose site)", callback_data=f"rnw:pick:{rid}"),
+                                    InlineKeyboardButton("✋ Not this way", callback_data=f"rnw:decline:{rid}")]])
+    bot = request.app["application"].bot
+    try:
+        if photo:
+            sent = await bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=photo, caption=text[:1024], reply_markup=markup)
+            if sent and sent.photo:
+                renewals.update(DB_PATH, rid, request_photo_file_id=sent.photo[-1].file_id)
+        else:
+            await bot.send_message(chat_id=ADMIN_CHAT_ID, text=text, reply_markup=markup)
+    except Exception:
+        logger.exception("renewal_request: couldn't notify the admin about R%s", rid)
+    logger.info("Renewal request R%s from user %s (order %s)", rid, user_id, order_id)
+    return web.json_response({"ok": True, "renewal_id": rid, "number": f"R{rid}"})
+
+
+async def http_order_logins(request):
+    """The logins saved with one of this customer's shop orders (what they entered, and what was delivered), so the
+    chatbot can pass an UpToDate login on for renewal. Only for the order's own customer. X-Api-Key protected."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        user_id = int(request.query["user_id"])
+        order_id = int(request.query["order_id"].lstrip("#"))
+    except (KeyError, ValueError):
+        return web.json_response({"error": "user_id and order_id are needed"}, status=400)
+    order = db_get_order(order_id)
+    if not order or order[1] != user_id:
+        return web.json_response({"error": f"order #{order_id} isn't this customer's"}, status=404)
+    conn = sqlite3.connect(DB_PATH)
+    units = conn.execute("SELECT item_id, info_json FROM fulfilment WHERE order_id = ? ORDER BY id", (order_id,)).fetchall()
+    deliveries = conn.execute("SELECT item_id, message FROM deliveries WHERE order_id = ? ORDER BY id", (order_id,)).fetchall()
+    conn.close()
+    items = []
+    for item_id, info_json in units:
+        try:
+            info = json.loads(info_json) if info_json else {}
+        except ValueError:
+            info = {}
+        items.append({
+            "item": MENU.get(item_id, (item_id,))[0],
+            "username": info.get("login_username") or info.get("username") or info.get("email") or "",
+            "password": info.get("login_password") or info.get("password") or "",
+        })
+    return web.json_response({
+        "order_id": order_id, "status": order[5], "items": items,
+        "deliveries": [{"item": MENU.get(i, (i,))[0] if i else "", "message": m} for i, m in deliveries],
+    })
 
 
 def _order_restore_report(order_id: int, added: dict, source: str) -> str:
@@ -19520,6 +19844,8 @@ def main():
     app.add_handler(CommandHandler("restore", restore_start))
     app.add_handler(CommandHandler("restoreorder", restoreorder_start))
     app.add_handler(CommandHandler("sites", sites_menu))
+    app.add_handler(CommandHandler("renewal", renewal_command))
+    app.add_handler(CallbackQueryHandler(renewal_callback, pattern=r"^rnw:"))
     app.add_handler(CallbackQueryHandler(site_callback, pattern=r"^asite:"))
     app.add_handler(CommandHandler("exportimd", export_imd_catalog))
     app.add_handler(CommandHandler("imddiag", imd_diag_start))
