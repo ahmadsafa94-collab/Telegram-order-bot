@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from datetime import datetime
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -30,6 +31,8 @@ CLICKABLES_MAX = 40  # how many the 🔘 Buttons list offers (the visible part o
 SCROLL_PX = 600
 STEP_WAIT_SECONDS_MAX = 30
 ACTION_TIMEOUT_MS = 15_000
+# How long a step keeps looking for its button / field / success text while the page is still drawing.
+STEP_WAIT_SECONDS = float(os.environ.get("SITE_STEP_WAIT_SECONDS", "15"))
 
 
 def init(db_path: str):
@@ -467,14 +470,44 @@ class Session:
         return self
 
     async def settle(self):
-        """Waits for what a step started (e.g. a form being sent) to finish loading, so the next step doesn't cut
-        it off."""
+        """Waits until the page is fully loaded before the next step: loaded, document complete, network quiet,
+        and its content no longer changing (pages that keep drawing after 'load', like UpToDate's)."""
+        page = self.page
         await asyncio.sleep(0.3)  # a click's navigation may not have started yet
-        for state, timeout in (("load", 20_000), ("networkidle", 10_000)):
+        for state, timeout in (("domcontentloaded", 30_000), ("load", 30_000)):
             try:
-                await self.page.wait_for_load_state(state, timeout=timeout)
+                await page.wait_for_load_state(state, timeout=timeout)
             except Exception:
                 pass
+        try:
+            await page.wait_for_function("document.readyState === 'complete'", timeout=30_000)
+        except Exception:
+            pass
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15_000)
+        except Exception:
+            pass
+        # Content stable: the same amount of text and elements twice in a row, 0.5 s apart (up to 8 s).
+        last, deadline = None, time.monotonic() + 8
+        while time.monotonic() < deadline:
+            try:
+                now = await page.evaluate("[document.body ? document.body.innerText.length : 0, "
+                                          "document.getElementsByTagName('*').length]")
+            except Exception:
+                break  # navigating: the next step's own wait covers it
+            if now == last:
+                break
+            last = now
+            await asyncio.sleep(0.5)
+
+    async def _keep_looking(self, find):
+        """Calls `find` until it returns something or STEP_WAIT_SECONDS pass (the page may still be drawing)."""
+        deadline = time.monotonic() + STEP_WAIT_SECONDS
+        while True:
+            found = await find()
+            if found is not None or time.monotonic() >= deadline:
+                return found
+            await asyncio.sleep(0.5)
 
     async def exit_ip(self) -> dict:
         """Where this browser's traffic comes out: {ip, country, city, org}."""
@@ -541,20 +574,23 @@ class Session:
         return None
 
     async def perform(self, step: dict, customer: dict = None):
-        """Does one step on the current page. Raises with a readable reason when it can't."""
+        """Does one step on the current page once it's fully loaded, waiting up to STEP_WAIT_SECONDS for what the
+        step needs to appear. Raises with a readable reason when it can't."""
         page, a = self.page, step["action"]
+        if a not in ("wait", "goto"):
+            await self.settle()
         if a == "click":
             t = step["target"]
-            el = await self._first([
+            el = await self._keep_looking(lambda: self._first([
                 page.get_by_role("button", name=t), page.get_by_role("link", name=t),
                 page.get_by_text(t, exact=True), page.get_by_text(t), page.get_by_label(t),
-            ])
+            ]))
             if not el:
                 raise ValueError(f'nothing on the page says "{t}"')
             await el.click(timeout=ACTION_TIMEOUT_MS)
         elif a in ("fill", "select", "check"):
             t = step["target"]
-            el = await self._field(t, a, step.get("selector"))
+            el = await self._keep_looking(lambda: self._field(t, a, step.get("selector")))
             if not el:
                 raise ValueError(f'no {"dropdown" if a == "select" else "tick box" if a == "check" else "typing field"} '
                                  f'called "{t}" on the page (type fields to list them)')
@@ -567,9 +603,10 @@ class Session:
         elif a == "tap":
             el = None
             if step.get("selector"):
-                loc = page.locator(step["selector"])
-                if await loc.count() == 1 and await loc.first.is_visible():
-                    el = loc.first
+                async def by_selector():
+                    loc = page.locator(step["selector"])
+                    return loc.first if await loc.count() == 1 and await loc.first.is_visible() else None
+                el = await self._keep_looking(by_selector)
             if el:
                 await el.click(timeout=ACTION_TIMEOUT_MS)
             else:
@@ -579,7 +616,7 @@ class Session:
             await page.mouse.wheel(0, SCROLL_PX if step.get("direction", "down") == "down" else -SCROLL_PX)
             await asyncio.sleep(0.5)
         elif a == "expect":
-            snippet = await self.matching_text(step.get("texts") or [])
+            snippet = await self._keep_looking(lambda: self.matching_text(step.get("texts") or []))
             if snippet is None:
                 raise ValueError("the page doesn't show " + " or ".join(f"“{t}”" for t in step.get("texts") or []))
             self.confirmations.append(snippet)
