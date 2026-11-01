@@ -18654,11 +18654,22 @@ async def _site_test(update: Update, site_id: int):
         await session.close()
 
 
+SITE_GRID_NEXT = {"normal": "fine", "fine": None, None: "normal"}
+SITE_GRID_BUTTON = {"normal": "🔢 Smaller grid", "fine": "🔢 Grid off", None: "🔢 Grid on"}
+
+
+def _site_grid(rec: dict):
+    """The grid on the recording's screenshots as (cols, rows), or None when it's off."""
+    size = (rec or {}).get("grid", "normal")
+    return auto_sites.GRID_SIZES.get(size) if size else None
+
+
 def _site_record_buttons(rec: dict = None):
-    grid_on = (rec or {}).get("grid", True)
+    size = (rec or {}).get("grid", "normal")
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📸 Screenshot", callback_data="asite:recshot"),
-         InlineKeyboardButton("🔢 Grid off" if grid_on else "🔢 Grid on", callback_data="asite:recgrid")],
+         InlineKeyboardButton("🔘 Buttons", callback_data="asite:recbtns"),
+         InlineKeyboardButton(SITE_GRID_BUTTON[size], callback_data="asite:recgrid")],
         [InlineKeyboardButton("↩️ Undo last", callback_data="asite:recundo"),
          InlineKeyboardButton("✅ Finish", callback_data="asite:recdone"),
          InlineKeyboardButton("❌ Cancel", callback_data="asite:reccancel")],
@@ -18667,10 +18678,56 @@ def _site_record_buttons(rec: dict = None):
 
 async def _site_record_shot(bot, rec: dict, caption: str):
     try:
-        shot = await rec["session"].screenshot(grid=rec.get("grid", True))
+        shot = await rec["session"].screenshot(grid=_site_grid(rec))
         await bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=shot, caption=caption[:1024], reply_markup=_site_record_buttons(rec))
     except Exception as exc:
         await bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"{caption}\n\n(screenshot failed: {exc})"[:4000], reply_markup=_site_record_buttons(rec))
+
+
+async def _site_record_list_buttons(bot, rec: dict):
+    """🔘 Buttons: a screenshot with every clickable thing on the visible page numbered, and those numbers as
+    buttons to pick from."""
+    session = rec["session"]
+    found = await session.clickables()
+    rec["choices"] = found
+    if not found:
+        await _site_record_shot(bot, rec, "No clickable buttons or links on the visible part of the page. Try scroll down, or tap <square>.")
+        return
+    rows, row = [], []
+    for c in found:
+        row.append(InlineKeyboardButton(f"{c['n']} · {c['label']}"[:40], callback_data=f"asite:pick:{c['n']}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ Back to the page", callback_data="asite:recshot")])
+    caption = (f"🔘 {len(found)} clickable thing(s) on this part of the page, numbered on the picture. "
+               "Tap one below to click it" + (" (more may be further down: scroll down)" if len(found) >= auto_sites.CLICKABLES_MAX else "") + ".")
+    try:
+        shot = await session.screenshot(marks=found)
+        await bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=shot, caption=caption, reply_markup=InlineKeyboardMarkup(rows))
+    except Exception as exc:
+        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"{caption}\n\n(screenshot failed: {exc})", reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def _site_record_do(bot, rec: dict, step: dict):
+    """Performs one step while recording; keeps it if it worked, and sends the next screenshot either way."""
+    session = rec["session"]
+    try:
+        await session.perform(step)
+    except Exception as exc:
+        await _site_record_shot(
+            bot, rec,
+            f"❌ Couldn't {auto_sites.describe(step)}: {str(exc).splitlines()[0][:300]}\nNot saved. Try other wording (the exact text on the page).",
+        )
+        return
+    rec["steps"].append(auto_sites.stored_step(step, session.site))
+    await _site_record_shot(
+        bot, rec,
+        f"✅ Step {len(rec['steps'])}: {auto_sites.describe(rec['steps'][-1])}\nNow on: {await session.title()}\n\n"
+        "What next? (or done <success text>)",
+    )
 
 
 async def _site_record_close(context: ContextTypes.DEFAULT_TYPE):
@@ -18710,7 +18767,7 @@ async def _site_record_start(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await session.close()
         await _site_reply(update, f"❌ Couldn't open the site: {str(exc).splitlines()[0][:300]}\n\nTry 🔌 Test first.")
         return
-    rec = {"session": session, "site_id": site_id, "steps": [], "last": time.time(), "grid": True}
+    rec = {"session": session, "site_id": site_id, "steps": [], "last": time.time(), "grid": "normal"}
     _SITE_RECORDERS[ADMIN_CHAT_ID] = rec
     context.user_data["recording_site"] = site_id
     context.application.create_task(_site_record_watchdog(update.get_bot(), rec))
@@ -18756,28 +18813,17 @@ async def site_record_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"↩️ Forgot step: {auto_sites.describe(removed)}. The page stays where it is." if removed else "No steps to undo."
         )
         return
+    if word == "buttons":
+        await _site_record_list_buttons(context.bot, rec)
+        return
     try:
-        step = auto_sites.parse_instruction(text)
+        step = auto_sites.parse_instruction(text, _site_grid(rec) or auto_sites.GRID_SIZES["normal"])
     except ValueError as exc:
         await update.message.reply_text(f"⚠️ {exc}")
         return
-    session = rec["session"]
     if step["action"] == "tap":
-        step = await session.resolve_tap(step)
-    try:
-        await session.perform(step)
-    except Exception as exc:
-        await _site_record_shot(
-            context.bot, rec,
-            f"❌ Couldn't {auto_sites.describe(step)}: {str(exc).splitlines()[0][:300]}\nNot saved. Try other wording (the exact text on the page).",
-        )
-        return
-    rec["steps"].append(auto_sites.stored_step(step, rec["session"].site))
-    await _site_record_shot(
-        context.bot, rec,
-        f"✅ Step {len(rec['steps'])}: {auto_sites.describe(rec['steps'][-1])}\nNow on: {await session.title()}\n\n"
-        "What next? (or done <success text>)",
-    )
+        step = await rec["session"].resolve_tap(step)
+    await _site_record_do(context.bot, rec, step)
 
 
 async def site_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -18820,12 +18866,29 @@ async def site_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         rec["last"] = time.time()
         if action == "recgrid":
-            rec["grid"] = not rec.get("grid", True)
+            rec["grid"] = SITE_GRID_NEXT[rec.get("grid", "normal")]
+        grid = _site_grid(rec)
         await _site_record_shot(
             context.bot, rec,
-            f"📸 Now on: {await rec['session'].title()}" + (" (grid on: tap <number>)" if rec.get("grid", True) else "")
+            f"📸 Now on: {await rec['session'].title()}"
+            + (f" (grid: tap <1–{grid[0] * grid[1]}>)" if grid else "")
             + "\n\nWhat next?",
         )
+    elif action in ("recbtns", "pick"):
+        rec = _SITE_RECORDERS.get(ADMIN_CHAT_ID)
+        if not rec:
+            await _site_reply(update, "No recording is running.")
+            return
+        rec["last"] = time.time()
+        if action == "recbtns":
+            await _site_record_list_buttons(context.bot, rec)
+            return
+        choice = next((c for c in rec.get("choices") or [] if c["n"] == arg), None)
+        if not choice:
+            await _site_reply(update, "That list is out of date: tap 🔘 Buttons again.")
+            return
+        rec["choices"] = []  # the page changes once it's clicked
+        await _site_record_do(context.bot, rec, rec["session"].step_from_clickable(choice))
     elif action == "recundo":
         rec = _SITE_RECORDERS.get(ADMIN_CHAT_ID)
         removed = rec["steps"].pop() if rec and rec["steps"] else None

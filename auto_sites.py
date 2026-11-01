@@ -22,8 +22,11 @@ FIELDS = ("label", "url", "proxy_server", "proxy_username", "proxy_password", "l
 SECRET_FIELDS = ("proxy_password", "login_password")
 IP_CHECK_URL = "https://ipinfo.io/json"
 VIEWPORT = {"width": 1280, "height": 900}
-# The numbered grid drawn on recording screenshots, for buttons with no text: `tap 17` clicks square 17's middle.
-GRID_COLS, GRID_ROWS = 16, 12
+# The numbered grid drawn on recording screenshots, for buttons with no text: `tap 17` clicks what is in square 17.
+# "fine" has four times as many smaller squares, for crowded pages.
+GRID_SIZES = {"normal": (16, 12), "fine": (32, 24)}
+GRID_COLS, GRID_ROWS = GRID_SIZES["normal"]
+CLICKABLES_MAX = 40  # how many the 🔘 Buttons list offers (the visible part of the page)
 SCROLL_PX = 600
 STEP_WAIT_SECONDS_MAX = 30
 ACTION_TIMEOUT_MS = 15_000
@@ -198,7 +201,8 @@ INSTRUCTION_HELP = (
     "• press Enter\n"
     "• wait 5   (seconds)\n"
     "• goto https://…\n"
-    "• tap 17   (the middle of grid square 17, for a button with no text)\n"
+    "• tap 17   (what's in grid square 17, for a button with no text)\n"
+    "• buttons   (list what can be clicked here, then tap one)\n"
     "• scroll down · scroll up\n"
     "• done You have renewed   (finish; the text shows success)\n"
     "• undo (forget the last step) · cancel"
@@ -207,7 +211,7 @@ INSTRUCTION_HELP = (
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)(?::([^}]*))?\}")
 
 
-def parse_instruction(text: str) -> dict:
+def parse_instruction(text: str, grid: tuple = None) -> dict:
     """One admin message → a step. Raises ValueError with what's wrong."""
     text = " ".join((text or "").split())
     verb, _, rest = text.partition(" ")
@@ -232,9 +236,10 @@ def parse_instruction(text: str) -> dict:
             raise ValueError("Use wait <seconds>, e.g. wait 5")
         return {"action": "wait", "seconds": max(0.0, min(seconds, STEP_WAIT_SECONDS_MAX))}
     if verb == "tap":
-        if not rest.isdigit() or not 1 <= int(rest) <= GRID_COLS * GRID_ROWS:
-            raise ValueError(f"Use tap <square number>, 1 to {GRID_COLS * GRID_ROWS} (the numbers on the screenshot's grid)")
-        return {"action": "tap", "cell": int(rest)}
+        cols, rows = grid or (GRID_COLS, GRID_ROWS)
+        if not rest.isdigit() or not 1 <= int(rest) <= cols * rows:
+            raise ValueError(f"Use tap <square number>, 1 to {cols * rows} (the numbers on the screenshot's grid)")
+        return {"action": "tap", "cell": int(rest), "grid": [cols, rows]}
     if verb == "scroll":
         direction = rest.lower() or "down"
         if direction not in ("down", "up"):
@@ -281,16 +286,19 @@ def resolve_value(value: str, site: dict, customer: dict = None) -> str:
     return _PLACEHOLDER_RE.sub(sub, value or "")
 
 
-def cell_center(cell: int) -> tuple:
+def cell_center(cell: int, grid: tuple = None) -> tuple:
     """The page position (x, y) of the middle of grid square `cell` (numbered from 1, left to right, top down)."""
-    w, h = VIEWPORT["width"] / GRID_COLS, VIEWPORT["height"] / GRID_ROWS
-    row, col = divmod(cell - 1, GRID_COLS)
+    cols, rows = grid or (GRID_COLS, GRID_ROWS)
+    w, h = VIEWPORT["width"] / cols, VIEWPORT["height"] / rows
+    row, col = divmod(cell - 1, cols)
     return round(col * w + w / 2), round(row * h + h / 2)
 
 
 def describe(step: dict) -> str:
     a = step.get("action")
     if a == "tap":
+        if not step.get("cell"):  # chosen from the 🔘 Buttons list
+            return f"tap {step.get('what') or 'button'}"
         return f"tap {step.get('cell')}" + (f" ({step['what']})" if step.get("what") else "")
     if a == "scroll":
         return f"scroll {step.get('direction', 'down')}"
@@ -393,7 +401,7 @@ class Session:
             if el:
                 await el.click(timeout=ACTION_TIMEOUT_MS)
             else:
-                x, y = (step["x"], step["y"]) if "x" in step else cell_center(step["cell"])
+                x, y = (step["x"], step["y"]) if "x" in step else cell_center(step["cell"], step.get("grid"))
                 await page.mouse.click(x, y)
         elif a == "scroll":
             await page.mouse.wheel(0, SCROLL_PX if step.get("direction", "down") == "down" else -SCROLL_PX)
@@ -408,12 +416,16 @@ class Session:
             raise ValueError(f"unknown action {a}")
         await self.settle()
 
-    async def screenshot(self, grid: bool = False) -> bytes:
-        """The visible part of the page; with `grid`, numbered squares drawn on it for `tap N`."""
-        if not grid:
+    async def screenshot(self, grid: tuple = None, marks: list = None) -> bytes:
+        """The visible part of the page. With `grid` (cols, rows), numbered squares drawn on it for `tap N`; with
+        `marks` (from clickables()), each listed element numbered for the 🔘 Buttons list."""
+        if not grid and not marks:
             return await self.page.screenshot(type="jpeg", quality=70)
         try:
-            await self.page.evaluate(_GRID_JS, [GRID_COLS, GRID_ROWS])
+            if marks:
+                await self.page.evaluate(_MARKS_JS, [[m["n"], m["left"], m["top"]] for m in marks])
+            else:
+                await self.page.evaluate(_GRID_JS, list(grid))
         except Exception:
             return await self.page.screenshot(type="jpeg", quality=70)
         try:
@@ -424,13 +436,31 @@ class Session:
             except Exception:
                 pass
 
+    async def clickables(self) -> list:
+        """What can be clicked on the visible part of the page, top to bottom: [{n, label, x, y, left, top, selector}]
+        (selector only when it finds exactly that element)."""
+        try:
+            found = await self.page.evaluate(_CLICKABLES_JS, CLICKABLES_MAX)
+        except Exception:
+            return []
+        for i, c in enumerate(found, 1):
+            c["n"] = i
+        return found
+
+    def step_from_clickable(self, c: dict) -> dict:
+        step = {"action": "tap", "x": c["x"], "y": c["y"], "what": c["label"]}
+        if c.get("selector"):
+            step["selector"] = c["selector"]
+        return step
+
     async def resolve_tap(self, step: dict) -> dict:
         """Turns `tap N` into what to click: the clickable element in that square nearest its middle (or the middle
         itself), with a unique id/label/name selector when it has one so a later run finds it even if the page
         shifts a little."""
-        x, y = cell_center(step["cell"])
-        out = {"action": "tap", "cell": step["cell"], "x": x, "y": y}
-        w, h = VIEWPORT["width"] / GRID_COLS, VIEWPORT["height"] / GRID_ROWS
+        grid = tuple(step.get("grid") or (GRID_COLS, GRID_ROWS))
+        x, y = cell_center(step["cell"], grid)
+        out = {"action": "tap", "cell": step["cell"], "grid": list(grid), "x": x, "y": y}
+        w, h = VIEWPORT["width"] / grid[0], VIEWPORT["height"] / grid[1]
         try:
             info = await self.page.evaluate(_ELEMENT_AT_JS, [x - w / 2, y - h / 2, x + w / 2, y + h / 2])
         except Exception:
@@ -474,8 +504,8 @@ _GRID_JS = """([cols, rows]) => {
     const c = document.createElement('div');
     c.style.cssText = 'border:1px solid rgba(255,0,80,.35);position:relative;';
     const n = document.createElement('span'); n.textContent = i;
-    n.style.cssText = 'position:absolute;left:2px;top:1px;font:bold 11px/1 Arial,sans-serif;color:#fff;' +
-      'background:rgba(220,0,70,.75);padding:1px 3px;border-radius:3px;';
+    n.style.cssText = 'position:absolute;left:1px;top:1px;font:bold ' + (cols > 20 ? 9 : 11) + 'px/1 Arial,sans-serif;color:#fff;' +
+      'background:rgba(220,0,70,' + (cols > 20 ? '.5' : '.75') + ');padding:1px 3px;border-radius:3px;';
     c.appendChild(n); g.appendChild(c);
   }
   document.documentElement.appendChild(g);
@@ -516,4 +546,56 @@ _ELEMENT_AT_JS = r"""([x0, y0, x1, y1]) => {
   return {x: px, y: py, selector, clickable: !!best,
           unique: selector ? document.querySelectorAll(selector).length === 1 : false,
           tag: el.tagName.toLowerCase(), text};
+}"""
+
+_CLICKABLES_JS = r"""(max) => {
+  const sel = 'button,a[href],[role=button],[role=link],[role=menuitem],[role=tab],[role=checkbox],[role=radio],' +
+    'input[type=submit],input[type=button],input[type=checkbox],input[type=radio],summary,[onclick]';
+  const W = window.innerWidth, H = window.innerHeight, out = [], seen = new Set();
+  const esc = (v) => v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  for (const el of document.querySelectorAll(sel)) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4 || r.bottom <= 0 || r.right <= 0 || r.top >= H || r.left >= W) continue;
+    const st = getComputedStyle(el);
+    if (st.visibility === 'hidden' || st.display === 'none' || st.pointerEvents === 'none' || +st.opacity === 0) continue;
+    if (el.closest('#__medic_grid')) continue;
+    const x = Math.round(Math.min(Math.max(r.left + r.width / 2, 1), W - 1));
+    const y = Math.round(Math.min(Math.max(r.top + r.height / 2, 1), H - 1));
+    const hit = document.elementFromPoint(x, y);
+    if (hit && hit !== el && !el.contains(hit) && !hit.contains(el)) continue;  // covered by something else
+    const key = x + ',' + y;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let label = ((el.innerText || el.value || '') + '').replace(/\s+/g, ' ').trim();
+    const named = el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('alt') || '';
+    if (!label) label = named;
+    else if (named && label.length <= 3 && !label.includes(named)) label = label + ' ' + named;  // "⚙" -> "⚙ Settings"
+    if (!label) { const img = el.querySelector('img[alt],[aria-label],[title]');
+      if (img) label = img.getAttribute('alt') || img.getAttribute('aria-label') || img.getAttribute('title') || ''; }
+    if (!label) label = '(icon, no text)';
+    let selector = null;
+    if (el.id) selector = '#' + CSS.escape(el.id);
+    else for (const a of ['aria-label', 'title', 'name', 'data-testid', 'alt', 'href']) {
+      const v = el.getAttribute(a);
+      if (v) { selector = el.tagName.toLowerCase() + '[' + a + '="' + esc(v) + '"]'; break; }
+    }
+    if (selector && document.querySelectorAll(selector).length !== 1) selector = null;
+    out.push({label: label.slice(0, 40), x, y, left: Math.max(Math.round(r.left), 0), top: Math.max(Math.round(r.top), 0), selector});
+  }
+  out.sort((a, b) => (a.top - b.top) || (a.left - b.left));
+  return out.slice(0, max);
+}"""
+
+_MARKS_JS = r"""(marks) => {
+  const old = document.getElementById('__medic_grid'); if (old) old.remove();
+  const g = document.createElement('div'); g.id = '__medic_grid';
+  g.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none;';
+  for (const [n, left, top] of marks) {
+    const m = document.createElement('span'); m.textContent = n;
+    m.style.cssText = `position:absolute;left:${Math.max(left - 6, 0)}px;top:${Math.max(top - 8, 0)}px;` +
+      'font:bold 13px/1 Arial,sans-serif;color:#fff;background:#0a7cff;padding:2px 5px;border-radius:9px;' +
+      'box-shadow:0 0 0 2px #fff;';
+    g.appendChild(m);
+  }
+  document.documentElement.appendChild(g);
 }"""
