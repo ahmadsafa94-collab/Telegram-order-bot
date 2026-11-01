@@ -154,6 +154,27 @@ def save_steps(db_path: str, site_id: int, steps: list, success_text: str = ""):
     conn.close()
 
 
+def set_success_text(db_path: str, site_id: int, text: str):
+    """Changes what counts as success: the first `expect` step (the renewal's confirmation; later checks, e.g.
+    "logged out", stay as recorded) and the site's success text."""
+    site = get_site(db_path, site_id)
+    if not site:
+        return
+    texts = split_texts(text)
+    steps, done = [], False
+    for step in site["steps"]:
+        if step.get("action") == "expect" and not done:
+            step, done = dict(step, texts=texts), True
+        steps.append(step)
+    save_steps(db_path, site_id, steps, " | ".join(texts))
+
+
+def main_success_text(steps: list, fallback: str = "") -> str:
+    """The success text shown for a site: its first check's texts."""
+    first = next((s for s in steps if s.get("action") == "expect"), None)
+    return " | ".join(first["texts"]) if first else fallback
+
+
 def delete_site(db_path: str, site_id: int) -> bool:
     conn = sqlite3.connect(db_path)
     cur = conn.execute("DELETE FROM auto_sites WHERE id = ?", (site_id,))
@@ -207,11 +228,17 @@ INSTRUCTION_HELP = (
     "• buttons   (list what can be clicked here, then tap one)\n"
     "• fields   (number the typing fields, then: fill #2 = {customer_username:test})\n"
     "• scroll down · scroll up\n"
-    "• done You have renewed   (finish; the text shows success)\n"
+    "• expect Access extended | Erişim uzatıldı   (check the page shows one of these; a run stops if not)\n"
+    "• done Access extended | Erişim uzatıldı   (finish; that text shows success, any of the | options)\n"
     "• undo (forget the last step) · cancel"
 )
 
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)(?::([^}]*))?\}")
+
+
+def split_texts(text: str) -> list:
+    """'A | B' → ['A', 'B']: success texts with alternatives (e.g. the Turkish and English page)."""
+    return [t.strip() for t in (text or "").split("|") if t.strip()]
 
 
 def parse_instruction(text: str, grid: tuple = None) -> dict:
@@ -228,6 +255,11 @@ def parse_instruction(text: str, grid: tuple = None) -> dict:
         if not eq or not target.strip():
             raise ValueError(f"Use {verb} <field> = <value>, e.g. fill Email = {{username}}")
         return {"action": "select" if verb == "select" else "fill", "target": target.strip().strip("\"'"), "value": value.strip()}
+    if verb == "expect":
+        texts = split_texts(rest)
+        if not texts:
+            raise ValueError("Say what the page should show, e.g. expect Access extended | Erişim uzatıldı")
+        return {"action": "expect", "texts": texts}
     if verb == "press":
         if not rest:
             raise ValueError("Say which key, e.g. press Enter")
@@ -338,6 +370,8 @@ def placeholder_prompt(name: str) -> str:
 
 def describe(step: dict) -> str:
     a = step.get("action")
+    if a == "expect":
+        return "expect " + " | ".join(step.get("texts") or [])
     if a == "tap":
         if not step.get("cell"):  # chosen from the 🔘 Buttons list
             return f"tap {step.get('what') or 'button'}"
@@ -367,18 +401,25 @@ class StepFailed(Exception):
 
 async def run_site(site: dict, customer: dict) -> dict:
     """Runs all of a site's saved steps with this customer's values, through its proxy. Never claims success
-    without seeing the site's success text. Returns {ok, done, total, error, screenshot, title, success_seen}."""
+    without seeing a success text: the `expect` steps (checked where they are in the path, e.g. right after the
+    renewal and before logging out), or else the site's success text on the last page.
+    Returns {ok, done, total, error, screenshot, title, confirmation, checks_passed}."""
     steps = site.get("steps") or []
+    has_checks = any(s.get("action") == "expect" for s in steps)
     session = Session(site)
     result = {"ok": False, "done": 0, "total": len(steps), "error": "", "screenshot": None, "title": "",
-              "success_seen": False}
+              "confirmation": "", "checks_passed": 0}
     try:
         await session.start()
         result["done"] = await session.replay(steps, customer)
-        if site.get("success_text"):
-            result["success_seen"] = await session.page_has_text(site["success_text"])
-            result["ok"] = result["success_seen"]
-            if not result["ok"]:
+        if has_checks:
+            result["ok"] = True
+        elif site.get("success_text"):
+            found = await session.matching_text(split_texts(site["success_text"]))
+            result["ok"] = found is not None
+            if found:
+                session.confirmations.append(found)
+            else:
                 result["error"] = f"the page doesn't show “{site['success_text']}”"
         else:
             result["ok"], result["unverified"] = True, True  # no success text recorded: only the screenshot tells
@@ -387,6 +428,9 @@ async def run_site(site: dict, customer: dict) -> dict:
     except Exception as exc:
         result["error"] = f"couldn't open the site: {str(exc).splitlines()[0][:300] if str(exc) else exc.__class__.__name__}"
     finally:
+        result["checks_passed"] = len(session.confirmations)
+        # The first check is the one that matters (the renewal's confirmation, with its date).
+        result["confirmation"] = session.confirmations[0] if session.confirmations else ""
         try:
             if session.page:
                 result["screenshot"] = await session.screenshot()
@@ -403,6 +447,7 @@ class Session:
     def __init__(self, site: dict):
         self.site = site
         self._pw = self._browser = self.context = self.page = None
+        self.confirmations = []  # what each passed `expect` step found on the page
 
     async def start(self, open_url: bool = True):
         from playwright.async_api import async_playwright
@@ -533,6 +578,12 @@ class Session:
         elif a == "scroll":
             await page.mouse.wheel(0, SCROLL_PX if step.get("direction", "down") == "down" else -SCROLL_PX)
             await asyncio.sleep(0.5)
+        elif a == "expect":
+            snippet = await self.matching_text(step.get("texts") or [])
+            if snippet is None:
+                raise ValueError("the page doesn't show " + " or ".join(f"“{t}”" for t in step.get("texts") or []))
+            self.confirmations.append(snippet)
+            return  # nothing changed on the page: no need to wait for it
         elif a == "press":
             await page.keyboard.press(step["key"])
         elif a == "wait":
@@ -607,10 +658,26 @@ class Session:
         return out
 
     async def page_has_text(self, text: str) -> bool:
+        return await self.matching_text(split_texts(text) or [text]) is not None
+
+    async def matching_text(self, texts: list):
+        """The page's line (with the next one) containing the first of `texts` it shows, e.g. the expiry date
+        under "Uzaktan Erişim Uzatıldı"; None if it shows none of them."""
         try:
-            return text.lower() in (await self.page.inner_text("body")).lower()
+            body = await self.page.inner_text("body")
         except Exception:
-            return False
+            return None
+        lines = [" ".join(l.split()) for l in body.splitlines() if l.strip()]
+        for t in texts:
+            want = " ".join(t.split()).casefold()
+            if not want:
+                continue
+            for i, line in enumerate(lines):
+                if want in line.casefold():
+                    return " ".join(lines[i:i + 2])[:300]
+            if want in " ".join(lines).casefold():  # spread over lines
+                return t
+        return None
 
     async def title(self) -> str:
         try:

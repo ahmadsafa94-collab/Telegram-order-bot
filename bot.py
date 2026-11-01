@@ -18531,10 +18531,15 @@ SITE_FIELD_PROMPTS = {
     "proxy_password": "Proxy password (send - if none). I delete your message right after saving it.",
     "login_username": "Your username or email on the website (send - if none):",
     "login_password": "Your password on the website (send - if none). I delete your message right after saving it.",
+    "success_text": (
+        "What the page shows when it worked. Separate alternatives with |, e.g.\n"
+        "Uzaktan Erişim Uzatıldı | Remote Access Extended"
+    ),
 }
 SITE_FIELD_LABELS = {
     "label": "Name", "url": "Link", "proxy_server": "Proxy", "proxy_username": "Proxy username",
     "proxy_password": "Proxy password", "login_username": "Site username", "login_password": "Site password",
+    "success_text": "Success text",
 }
 SITE_RECORD_IDLE_SECONDS = 15 * 60
 # An admin message that reads like a recording instruction (answered even when no recording is open).
@@ -18617,7 +18622,14 @@ async def site_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if edit:
         context.user_data.pop("site_edit", None)
-        auto_sites.update_field(DB_PATH, edit[0], field, value)
+        if field == "success_text":
+            if not auto_sites.split_texts(value):
+                await update.message.reply_text(SITE_FIELD_PROMPTS[field])
+                context.user_data["site_edit"] = edit
+                return
+            auto_sites.set_success_text(DB_PATH, edit[0], value)
+        else:
+            auto_sites.update_field(DB_PATH, edit[0], field, value)
         await update.message.reply_text(f"✅ {SITE_FIELD_LABELS[field]} saved.")
         await _site_detail(update, edit[0])
         return
@@ -18826,6 +18838,11 @@ async def _site_record_start(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     rec = {"session": session, "site_id": site_id, "last": time.time(), "grid": "normal",
            "steps": list(site["steps"]) if continue_with is not None else [], "customer": continue_with or {}}
+    if (continue_with is not None and site.get("success_text")
+            and not any(s.get("action") == "expect" for s in rec["steps"])):
+        # Recorded before checks existed: its success text becomes a check right here (after the renewal), so the
+        # steps added now (e.g. logging out) don't hide it.
+        rec["steps"].append({"action": "expect", "texts": auto_sites.split_texts(site["success_text"])})
     _SITE_RECORDERS[ADMIN_CHAT_ID] = rec
     context.user_data["recording_site"] = site_id
     context.application.create_task(_site_record_watchdog(update.get_bot(), rec))
@@ -18840,9 +18857,15 @@ async def _site_record_finish(update: Update, context: ContextTypes.DEFAULT_TYPE
         await _site_reply(update, "No recording is running.")
         return
     note = ""
-    if success_text and not await rec["session"].page_has_text(success_text):
-        note = f"\n\n⚠️ “{success_text}” isn't on the current page; check it's the text a successful run shows."
-    auto_sites.save_steps(DB_PATH, rec["site_id"], rec["steps"], success_text)
+    texts = auto_sites.split_texts(success_text)
+    if texts:
+        if await rec["session"].matching_text(texts) is None:
+            note = "\n\n⚠️ " + " / ".join(f"“{t}”" for t in texts) + " isn't on the current page; check it's what a successful run shows."
+        # Saved as a check at this point of the path, so steps added later (e.g. logging out) don't hide it.
+        last = rec["steps"][-1] if rec["steps"] else {}
+        if not (last.get("action") == "expect" and last.get("texts") == texts):
+            rec["steps"].append({"action": "expect", "texts": texts})
+    auto_sites.save_steps(DB_PATH, rec["site_id"], rec["steps"], auto_sites.main_success_text(rec["steps"], success_text))
     site_id = rec["site_id"]
     await _site_record_close(context)
     steps = "\n".join(f"{i}. {auto_sites.describe(s)}" for i, s in enumerate(rec["steps"], 1)) or "(no steps)"
@@ -18954,7 +18977,14 @@ async def _site_run_execute(update: Update, site: dict, values: dict, fid: int =
         caption = (f"⚠️ {site['label']}{where}: all {result['total']} steps ran, but no success text is recorded, "
                    "so check the screenshot. (Add one: ➕ Continue recording, then done <text>.)")
     elif result["ok"]:
-        caption = f"✅ {site['label']}{where}: done. All {result['total']} steps ran and the page shows “{site['success_text']}”."
+        caption = f"✅ {site['label']}{where}: done, all {result['total']} steps ran."
+        if result.get("confirmation"):
+            caption += f"\nThe site said: “{result['confirmation']}”"
+    elif result.get("checks_passed"):
+        # The success check passed, then a later step (e.g. logging out) failed.
+        caption = (f"⚠️ {site['label']}{where}: renewed (the site said: “{result['confirmation']}”), but a later step "
+                   f"failed: stopped after {result['done']} of {result['total']} steps.\n{result['error']}\n\n"
+                   "Check the screenshot; you may need to log out on the site yourself.")
     else:
         caption = (f"❌ {site['label']}{where}: stopped after {result['done']} of {result['total']} steps.\n"
                    f"{result['error']}\n\nNothing is marked delivered; check the screenshot.")
@@ -18986,12 +19016,13 @@ async def site_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "open":
         await _site_detail(update, arg)
     elif action == "editmenu":
-        rows = [[InlineKeyboardButton(SITE_FIELD_LABELS[f], callback_data=f"asite:edit:{arg}:{f}")] for f in auto_sites.FIELDS]
+        rows = [[InlineKeyboardButton(SITE_FIELD_LABELS[f], callback_data=f"asite:edit:{arg}:{f}")]
+                for f in auto_sites.FIELDS + ("success_text",)]
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"asite:open:{arg}")])
         await _site_reply(update, "What do you want to change?", InlineKeyboardMarkup(rows))
     elif action == "edit":
         field = parts[3]
-        if field not in auto_sites.FIELDS:
+        if field not in auto_sites.FIELDS + ("success_text",):
             return
         clear_admin_flow_state(context.user_data)
         context.user_data["site_edit"] = (arg, field)
