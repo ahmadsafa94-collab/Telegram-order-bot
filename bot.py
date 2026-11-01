@@ -18609,6 +18609,7 @@ async def _site_detail(update: Update, site_id: int):
          InlineKeyboardButton("➕ Continue recording", callback_data=f"asite:reccont:{site_id}")],
         [InlineKeyboardButton("📋 Steps", callback_data=f"asite:steps:{site_id}"),
          InlineKeyboardButton("✏️ Edit", callback_data=f"asite:editmenu:{site_id}")],
+        [InlineKeyboardButton("🚪 Log out", callback_data=f"asite:logout:{site_id}")],
         [InlineKeyboardButton("🗑 Delete", callback_data=f"asite:del:{site_id}"),
          InlineKeyboardButton("⬅️ Back", callback_data="asite:list")],
     ]
@@ -19202,6 +19203,22 @@ async def site_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             auto_sites.save_steps(DB_PATH, arg, steps,
                                   auto_sites.main_success_text(steps, "" if had_checks else site.get("success_text") or ""))
             await _site_reply(update, done, InlineKeyboardMarkup([[back]]))
+    elif action == "logout":
+        # Runs and tests never keep a login: each uses a new private browser that is deleted (with its cookies) when
+        # it ends. Only an open recording keeps one; close it now.
+        rec = _SITE_RECORDERS.get(ADMIN_CHAT_ID)
+        closed = bool(rec and rec["site_id"] == arg)
+        if closed:
+            await _site_record_close(context)
+        await _site_reply(
+            update,
+            ("🚪 Closed the open recording browser for this site and deleted its cookies; nothing was saved from it.\n\n"
+             if closed else "🚪 No browser is open for this site.\n\n")
+            + "Every run and test uses a new private browser that is deleted with all its cookies when it ends, so no "
+              "login is kept between runs. (Only the site's own Log out ends the session on the website's side; "
+              "otherwise it expires there by itself.)",
+            InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"asite:open:{arg}")]]),
+        )
     elif action == "del":
         await _site_reply(update, "Delete this site with its login and recorded steps?", InlineKeyboardMarkup([[
             InlineKeyboardButton("🗑 Yes, delete", callback_data=f"asite:delyes:{arg}"),
