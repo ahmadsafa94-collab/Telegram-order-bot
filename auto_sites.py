@@ -33,6 +33,19 @@ STEP_WAIT_SECONDS_MAX = 30
 ACTION_TIMEOUT_MS = 15_000
 # How long a step keeps looking for its button / field / success text while the page is still drawing.
 STEP_WAIT_SECONDS = float(os.environ.get("SITE_STEP_WAIT_SECONDS", "15"))
+# After a step, the page counts as finished changing only once no page load has started for this long
+# (a login that redirects after a moment), waiting at most NAV_WAIT_SECONDS_MAX.
+NAV_QUIET_SECONDS = float(os.environ.get("SITE_NAV_QUIET_SECONDS", "2"))
+NAV_WAIT_SECONDS_MAX = 45
+ACTION_REQUEST_WINDOW = 3  # a script's request this soon after a step counts as part of that step
+
+
+def _request_done(req) -> bool:
+    """A request that already got its answer (or failed), even if its event slipped by."""
+    try:
+        return req.failure is not None or (req.redirected_to is not None)
+    except Exception:
+        return False
 
 
 def init(db_path: str):
@@ -462,6 +475,10 @@ class Session:
         self.site = site
         self._pw = self._browser = self.context = self.page = None
         self.confirmations = []  # what each passed `expect` step found on the page
+        self._navs = set()       # main-frame page loads still in flight (a login's POST and its redirects)
+        self._last_nav = 0.0     # when one of those last started or finished
+        self._last_action = 0.0  # when the last step clicked / typed / opened something
+        self._quiet_needed = NAV_QUIET_SECONDS  # how long the page must stay still after the last step
 
     async def start(self, open_url: bool = True):
         from playwright.async_api import async_playwright
@@ -475,16 +492,76 @@ class Session:
         self._browser = await self._pw.chromium.launch(**launch)
         self.context = await self._browser.new_context(viewport=VIEWPORT)
         self.page = await self.context.new_page()
+        self._watch_navigation(self.page)
         if open_url:
             await self.page.goto(self.site["url"], timeout=60_000)
             await self.settle()
         return self
 
-    async def settle(self):
-        """Waits until the page is fully loaded before the next step: loaded, document complete, network quiet,
-        and its content no longer changing (pages that keep drawing after 'load', like UpToDate's)."""
+    def _watch_navigation(self, page):
+        """Keeps track of page loads in the main frame, and of background requests a step sets off (a login
+        checked by a script before it sends the browser on), so a step never starts while the previous step's
+        page change is still under way."""
+        def counts(req):
+            try:
+                if req.frame != page.main_frame:
+                    return False
+                if req.is_navigation_request():
+                    return True
+                # A script's request right after a step (not the page's own polling later on).
+                return (req.resource_type in ("xhr", "fetch")
+                        and time.monotonic() - self._last_action <= ACTION_REQUEST_WINDOW)
+            except Exception:
+                return False
+
+        def started(req):
+            if counts(req):
+                self._navs.add(req)
+                self._last_nav = time.monotonic()
+
+        def ended(req):
+            if req in self._navs:
+                self._navs.discard(req)
+                self._last_nav = time.monotonic()
+
+        def navigated(frame):
+            if frame == page.main_frame:
+                self._last_nav = time.monotonic()
+
+        page.on("request", started)
+        page.on("requestfinished", ended)
+        page.on("requestfailed", ended)
+        page.on("framenavigated", navigated)
+
+    def _quiet_for(self) -> float:
+        return time.monotonic() - max(self._last_nav, self._last_action)
+
+    async def wait_navigation_done(self, quiet: float = NAV_QUIET_SECONDS, limit: float = NAV_WAIT_SECONDS_MAX):
+        """Waits until nothing the last step set off is still loading and nothing new has started for `quiet`
+        seconds (a login that sends the browser on after a moment, or a chain of redirects), up to `limit`."""
+        deadline = time.monotonic() + limit
+        while time.monotonic() < deadline:
+            self._navs = {r for r in self._navs if not _request_done(r)}
+            if not self._navs and self._quiet_for() >= quiet:
+                return
+            await asyncio.sleep(0.2)
+
+    async def settle(self, quiet: float = None):
+        """Waits until the page is fully loaded before the next step: the previous step's page change finished
+        (with its redirects), loaded, document complete, network quiet, and its content no longer changing
+        (pages that keep drawing after 'load', like UpToDate's). Starts over if the page changes meanwhile.
+        The quiet time is NAV_QUIET_SECONDS after a step that can change the page (click, tap, key, goto)."""
+        if quiet is None:
+            quiet = self._quiet_needed
+        for _ in range(4):
+            await asyncio.sleep(0.3)  # a click's navigation may not have started yet
+            await self.wait_navigation_done(quiet)
+            await self._settle_page()
+            if not self._navs and self._quiet_for() >= quiet:
+                return
+
+    async def _settle_page(self):
         page = self.page
-        await asyncio.sleep(0.3)  # a click's navigation may not have started yet
         for state, timeout in (("domcontentloaded", 30_000), ("load", 30_000)):
             try:
                 await page.wait_for_load_state(state, timeout=timeout)
@@ -600,8 +677,10 @@ class Session:
         """Does one step on the current page once it's fully loaded, waiting up to STEP_WAIT_SECONDS for what the
         step needs to appear. Raises with a readable reason when it can't."""
         page, a = self.page, step["action"]
-        if a not in ("wait", "goto"):
+        if a != "wait":
             await self.settle()
+        self._last_action = time.monotonic()  # requests the step sets off count from here
+        self._quiet_needed = NAV_QUIET_SECONDS if a in ("click", "tap", "press", "goto") else 0.3
         if a == "click":
             t = step["target"]
             el = await self._keep_looking(lambda: self._first([
@@ -659,6 +738,7 @@ class Session:
                 await page.goto(step["url"], timeout=60_000)
         else:
             raise ValueError(f"unknown action {a}")
+        self._last_action = time.monotonic()
         await self.settle()
 
     async def screenshot(self, grid: tuple = None, marks: list = None) -> bytes:
