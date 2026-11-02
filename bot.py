@@ -18497,11 +18497,11 @@ async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
-# ── Automation: 🌐 Automation Sites and 🔄 Renew UpToDate live in their own bot now (medic-automation-bot) ──
+# ── Automation: 🌐 Automation Sites and 🔄 Renew UpToDate live in their own bot now (utdreg_bot) ──
 # This bot hands work over to it with the shared X-Api-Key: an order item's "🤖 Run automation", and the support
 # chatbot's renewal requests. The old sites and renewals stay in this database for its one-time copy.
 AUTOMATION_API_URL = os.environ.get("AUTOMATION_API_URL", "").rstrip("/")
-AUTOMATION_MOVED = "🤖 Automation Sites and Renew UpToDate are in the automation bot now."
+AUTOMATION_MOVED = "🤖 Automation Sites and Renew UpToDate are in @Utdreg_bot now."
 
 
 async def _automation_post(path: str, payload: dict):
@@ -18550,9 +18550,9 @@ async def automation_run_callback(update: Update, context: ContextTypes.DEFAULT_
         "item_name": MENU.get(row[3], (row[3],))[0], "info": info,
     })
     if status == 200 and body.get("ok"):
-        await query.message.reply_text(f"🤖 Sent order #{row[1]} to the automation bot: choose the site there.")
+        await query.message.reply_text(f"🤖 Sent order #{row[1]} to @Utdreg_bot: choose the site there.")
     else:
-        await query.message.reply_text(f"⚠️ Couldn't hand order #{row[1]} to the automation bot: "
+        await query.message.reply_text(f"⚠️ Couldn't hand order #{row[1]} to @Utdreg_bot: "
                                        f"{body.get('error') or body.get('reason') or status}")
 
 
