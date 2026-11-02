@@ -16446,6 +16446,15 @@ def _persist_imd2y_step2(fulfilment_id: int, username: str):
 
 _IMD_RUNS_IN_PROGRESS = set()
 
+# How each iMD result reads in the logs.
+IMD_RESULT_WORDS = {
+    "success": "✅ done",
+    "serial_error": "serial rejected by iMD (trying the next one)",
+    "username_error": "username not accepted (customer asked for another)",
+    "email_error": "email not accepted (customer asked for another)",
+    "unknown": "could not confirm (admin asked to check by hand)",
+}
+
 
 async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int):
     """Runs one iMD registration/renewal step for the order; a second call for the same order
@@ -16489,6 +16498,7 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
                 order_id,
             )
         else:
+            logger.warning("iMD result for order #%s: not run, no registration data (details must be collected again)", order_id)
             if ADMIN_CHAT_ID:
                 await context.bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
@@ -16533,6 +16543,7 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
     popped = db_pop_serial(pool_duration)
     if not popped:
         pool_label = "1 Year" if pool_duration == "1y" else "6 Months"
+        logger.warning("iMD result for order #%s (%s): not run, no %s serials in stock", order_id, action_label, pool_label)
         if ADMIN_CHAT_ID:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
@@ -16583,6 +16594,15 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
     # of the per-field customer retry flow.
     if imd2y_step == 2 and status in ("username_error", "email_error"):
         status = "unknown"
+
+    # One log line per result (the admin also gets it in Telegram), so "why didn't order X go through?" can be
+    # answered from the logs. Never the password.
+    _imd_user = data.get("imd2y_username") if imd2y_step == 2 else (data.get("prev_username") if step_is_renew else data.get("username"))
+    logger.info(
+        "iMD result for order #%s (%s, account %r): %s, serial %s. %s",
+        order_id, action_label, _imd_user, IMD_RESULT_WORDS.get(status, status), serial_code,
+        " ".join(str(detail or "").split())[:200],
+    )
 
     order = db_get_order(order_id)
     customer_user_id = order[1] if order else None
@@ -16673,6 +16693,8 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
             )
         else:
             # Pool exhausted — notify admin to add more serials
+            logger.warning("iMD result for order #%s (%s): all %s serials used up, waiting for new ones",
+                           order_id, action_label, pool_duration)
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
                 text=(
