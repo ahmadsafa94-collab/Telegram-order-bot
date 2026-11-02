@@ -15588,11 +15588,12 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── 2. Admin interactive states (all here, in a single block) ────
     if update.effective_user.id == ADMIN_CHAT_ID:
+        # Browser work runs in the background so the bot keeps answering customers meanwhile.
         if context.user_data.get("recording_site"):
-            await site_record_text(update, context)
+            context.application.create_task(site_record_text(update, context), update=update)
             return
         if context.user_data.get("site_run"):
-            await site_run_value_reply(update, context)
+            context.application.create_task(site_run_value_reply(update, context), update=update)
             return
         if context.user_data.get("rnw_form") or context.user_data.get("rnw_search"):
             await renew_text_reply(update, context)
@@ -15691,7 +15692,7 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # this text, so it's for the recording.
         if ADMIN_CHAT_ID in _SITE_RECORDERS:
             context.user_data["recording_site"] = _SITE_RECORDERS[ADMIN_CHAT_ID]["site_id"]
-            await site_record_text(update, context)
+            context.application.create_task(site_record_text(update, context), update=update)
             return
         if _SITE_INSTRUCTION_RE.match(update.message.text or ""):
             await update.message.reply_text(
@@ -18862,7 +18863,7 @@ async def _site_record_start(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await _site_reply(update, text + "\n\nTry 🔌 Test first.")
         return
     kept = replay[:failed.number - 1] if failed else replay
-    rec = {"session": session, "site_id": site_id, "last": time.time(), "grid": "normal",
+    rec = {"session": session, "site_id": site_id, "last": time.time(), "grid": "normal", "lock": asyncio.Lock(),
            "steps": list(kept) if continue_with is not None else [], "customer": continue_with or {},
            "replaces_from": len(kept) + 1 if continue_with is not None and len(kept) < len(site["steps"]) else None}
     if (continue_with is not None and not failed and upto is None and site.get("success_text")
@@ -18913,7 +18914,17 @@ async def _site_record_finish(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def site_record_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """An instruction while recording: do it on the page, keep it as a step, send the next screenshot."""
+    """An instruction while recording: do it on the page, keep it as a step, send the next screenshot. One at a
+    time: a second message waits for the first to finish on the page."""
+    rec = _SITE_RECORDERS.get(ADMIN_CHAT_ID)
+    if rec and rec.get("lock"):
+        async with rec["lock"]:
+            await _site_record_text(update, context)
+    else:
+        await _site_record_text(update, context)
+
+
+async def _site_record_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rec = _SITE_RECORDERS.get(ADMIN_CHAT_ID)
     if not rec:
         context.user_data.pop("recording_site", None)
@@ -19041,12 +19052,31 @@ async def _site_run_execute(update: Update, site: dict, values: dict, fid: int =
         await bot.send_message(chat_id=ADMIN_CHAT_ID, text=caption, reply_markup=markup)
 
 
+_SITE_RECORDING_ACTIONS = {"recshot", "recgrid", "recfields", "recbtns", "pick", "recundo", "recdone", "reccancel"}
+
+
 async def site_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Runs in the background (block=False). Buttons that act on an open recording take its lock, so they never
+    act on the page at the same time as a typed instruction; the tap is answered first so it can't expire."""
     query = update.callback_query
     if query.from_user.id != ADMIN_CHAT_ID:
         await query.answer("Not authorized.", show_alert=True)
         return
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    action = (query.data or "").split(":")[1:2]
+    rec = _SITE_RECORDERS.get(ADMIN_CHAT_ID)
+    if action and action[0] in _SITE_RECORDING_ACTIONS and rec and rec.get("lock"):
+        async with rec["lock"]:
+            await _site_callback(update, context)
+    else:
+        await _site_callback(update, context)
+
+
+async def _site_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
     parts = query.data.split(":")
     action = parts[1]
     arg = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
@@ -19927,8 +19957,9 @@ def main():
     app.add_handler(CommandHandler("restoreorder", restoreorder_start))
     app.add_handler(CommandHandler("sites", sites_menu))
     app.add_handler(CommandHandler("renewal", renewal_command))
-    app.add_handler(CallbackQueryHandler(renewal_callback, pattern=r"^rnw:"))
-    app.add_handler(CallbackQueryHandler(site_callback, pattern=r"^asite:"))
+    # block=False: a run, test or recording step takes minutes in a browser; the bot keeps answering everyone else.
+    app.add_handler(CallbackQueryHandler(renewal_callback, pattern=r"^rnw:", block=False))
+    app.add_handler(CallbackQueryHandler(site_callback, pattern=r"^asite:", block=False))
     app.add_handler(CommandHandler("exportimd", export_imd_catalog))
     app.add_handler(CommandHandler("imddiag", imd_diag_start))
     app.add_handler(CommandHandler("syncserials", sync_serials_start))

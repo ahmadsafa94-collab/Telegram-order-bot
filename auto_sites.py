@@ -396,6 +396,16 @@ def describe(step: dict) -> str:
 
 # ── browser ──────────────────────────────────────────────────────────
 
+def page_address(url: str) -> str:
+    """host/path of a page, without the query string (it can carry session codes)."""
+    from urllib.parse import urlsplit
+    try:
+        u = urlsplit(url or "")
+        return (u.netloc + u.path)[:120] or (url or "")[:120]
+    except ValueError:
+        return ""
+
+
 class StepFailed(Exception):
     def __init__(self, number: int, step: dict, cause: Exception):
         self.number, self.step, self.cause = number, step, cause
@@ -438,6 +448,7 @@ async def run_site(site: dict, customer: dict) -> dict:
             if session.page:
                 result["screenshot"] = await session.screenshot()
                 result["title"] = await session.title()
+                result["address"] = page_address(session.page.url)
         except Exception:
             pass
         await session.close()
@@ -499,6 +510,18 @@ class Session:
                 break
             last = now
             await asyncio.sleep(0.5)
+
+    async def where_and_what(self, kind: str) -> str:
+        """For an error: the page it ended up on and what it does have, so the reason shows at a glance
+        (e.g. a different page, a "verify you're human" check, another language)."""
+        try:
+            title = await self.title()
+            found = await (self.fields() if kind == "fields" else self.clickables())
+        except Exception:
+            return ""
+        labels = ", ".join(dict.fromkeys(f["label"] for f in found if f.get("label")))[:250]
+        what = f"It has {kind}: {labels}" if labels else f"It has no {kind}"
+        return f"This page is “{title[:80]}” ({page_address(self.page.url)}). {what}."
 
     async def _keep_looking(self, find):
         """Calls `find` until it returns something or STEP_WAIT_SECONDS pass (the page may still be drawing)."""
@@ -586,14 +609,14 @@ class Session:
                 page.get_by_text(t, exact=True), page.get_by_text(t), page.get_by_label(t),
             ]))
             if not el:
-                raise ValueError(f'nothing on the page says "{t}"')
+                raise ValueError(f'nothing on the page says "{t}". {await self.where_and_what("buttons")}')
             await el.click(timeout=ACTION_TIMEOUT_MS)
         elif a in ("fill", "select", "check"):
             t = step["target"]
             el = await self._keep_looking(lambda: self._field(t, a, step.get("selector")))
             if not el:
                 raise ValueError(f'no {"dropdown" if a == "select" else "tick box" if a == "check" else "typing field"} '
-                                 f'called "{t}" on the page (type fields to list them)')
+                                 f'called "{t}" on the page. {await self.where_and_what("fields")}')
             if a == "fill":
                 await el.fill(resolve_value(step.get("value", ""), self.site, customer), timeout=ACTION_TIMEOUT_MS)
             elif a == "select":
