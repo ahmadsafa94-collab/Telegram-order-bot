@@ -199,6 +199,37 @@ def delete_site(db_path: str, site_id: int) -> bool:
     return cur.rowcount > 0
 
 
+# ── moving to another bot ────────────────────────────────────────────
+
+def export_all(db_path: str) -> list:
+    """Every site with its passwords readable, for moving it to another bot (which encrypts them with its own key)."""
+    out = []
+    for s in list_sites(db_path):
+        out.append({k: s.get(k) for k in ("id", *FIELDS, "success_text", "created_at", "updated_at")} | {"steps": s["steps"]})
+    return out
+
+
+def import_all(db_path: str, sites: list) -> int:
+    """Adds sites from export_all, keeping their numbers; one already here (same number) is left as it is."""
+    conn = sqlite3.connect(db_path)
+    added = 0
+    for s in sites:
+        if conn.execute("SELECT 1 FROM auto_sites WHERE id = ?", (s["id"],)).fetchone():
+            continue
+        values = [encrypt(s.get(f) or "") if f in SECRET_FIELDS else (s.get(f) or "") for f in FIELDS]
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        conn.execute(
+            f"INSERT INTO auto_sites (id, {', '.join(FIELDS)}, steps_json, success_text, created_at, updated_at) "
+            f"VALUES (?, {', '.join('?' for _ in FIELDS)}, ?, ?, ?, ?)",
+            [s["id"], *values, json.dumps(s.get("steps") or []), s.get("success_text") or "",
+             s.get("created_at") or now, s.get("updated_at") or now],
+        )
+        added += 1
+    conn.commit()
+    conn.close()
+    return added
+
+
 def validate_field(field: str, value: str):
     """Returns an error message, or None. "" (sent as "-") means none for the optional fields."""
     if field == "label" and not value:

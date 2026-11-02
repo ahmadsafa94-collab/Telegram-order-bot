@@ -170,3 +170,31 @@ def describe(r: dict) -> str:
 def short(r: dict) -> str:
     icon = STATUS_LABELS.get(r["status"], "?").split(" ")[0]
     return f"{icon} {r['number']} · {r['utd_username']} · {(r.get('created_at') or '')[:10]}"
+
+
+# ── moving to another bot ────────────────────────────────────────────
+
+# Telegram photo ids belong to the bot that received the photo, so they don't move with a renewal.
+_NOT_MOVED = ("screenshot_file_id", "request_photo_file_id")
+
+
+def export_all(db_path: str) -> list:
+    """Every renewal with its UpToDate password readable, for moving it to another bot."""
+    return [{k: v for k, v in r.items() if k not in _NOT_MOVED} for r in _select(db_path, limit=1_000_000)]
+
+
+def import_all(db_path: str, rows: list) -> int:
+    """Adds renewals from export_all keeping their R-numbers; one already here (same number) is left as it is."""
+    cols = [c for c in COLUMNS if c not in _NOT_MOVED]
+    conn = sqlite3.connect(db_path)
+    added = 0
+    for r in rows:
+        if conn.execute("SELECT 1 FROM renewals WHERE id = ?", (r["id"],)).fetchone():
+            continue
+        values = [auto_sites.encrypt(r.get(c) or "") if c == "utd_password" else r.get(c) for c in cols]
+        conn.execute(f"INSERT INTO renewals (id, {', '.join(cols)}) VALUES (?, {', '.join('?' for _ in cols)})",
+                     [r["id"], *values])
+        added += 1
+    conn.commit()
+    conn.close()
+    return added
