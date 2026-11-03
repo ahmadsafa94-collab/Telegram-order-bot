@@ -16528,7 +16528,8 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
     # registration itself succeeded — which is exactly what happened here.
     for field in ("username", "password", "email", "prev_username"):
         if data.get(field) is not None:
-            data[field] = sanitize_imd_field(data[field])
+            # An existing account's username keeps its spaces ("M. Naeb", order #554); nothing else does.
+            data[field] = sanitize_imd_field(data[field], keep_spaces=(field == "prev_username"))
 
     # For a 2-Year order, step 1 is whatever the customer originally asked
     # for (new account or renewal); step 2 is always a plain renewal of
@@ -16879,7 +16880,7 @@ async def wait_for_challenge(page, attempts: int = 15, interval_ms: int = 3000) 
     return await page.title()
 
 
-def sanitize_imd_field(value: str):
+def sanitize_imd_field(value: str, keep_spaces: bool = False):
     """Strips whitespace AND invisible Unicode format/control characters —
     e.g. the RTL/LTR directional marks (U+200E, U+200F, U+061C, ...) that
     Arabic-locale mobile keyboards commonly insert when switching between
@@ -16894,13 +16895,26 @@ def sanitize_imd_field(value: str):
     contaminated username or password is worse — the account still gets
     created, just with a stored value that silently differs from the
     clean text the customer was actually told, so every later login
-    attempt with the real (clean) credentials fails as 'invalid'."""
+    attempt with the real (clean) credentials fails as 'invalid'.
+
+    keep_spaces=True is for the username of an EXISTING account (a renewal's previous username): such a username
+    can contain ordinary spaces, e.g. "M. Naeb" (order #554: the space was deleted, so iMD answered "Username is
+    not valid" however often the customer sent it). Every kind of space becomes one plain space, runs of spaces
+    become one, and the ends are trimmed; invisible characters are still removed. New accounts' usernames can't
+    contain spaces at all (rejected when they're collected), and passwords/emails never keep them."""
     if not value:
         return value
-    return "".join(
-        ch for ch in value
-        if not ch.isspace() and unicodedata.category(ch) not in ("Cf", "Cc")
-    )
+    out = []
+    for ch in value:
+        if ch.isspace():
+            if keep_spaces:
+                out.append(" ")  # any kind of space (non-breaking, tab …) -> one plain space
+            continue
+        if unicodedata.category(ch) in ("Cf", "Cc"):
+            continue
+        out.append(ch)
+    text = "".join(out)
+    return re.sub(r" +", " ", text).strip(" ") if keep_spaces else text
 
 
 async def attempt_imd_action(url: str, field_map: dict, values: dict, warmup_url: str = None):
