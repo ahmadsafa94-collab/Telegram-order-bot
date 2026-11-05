@@ -631,13 +631,12 @@ CURRENCY_RATES = {
 # recipient names, since that's the only way to confirm it was actually
 # sent to us rather than someone else.
 NO_REFERENCE_REQUIRED_METHODS = {"Jordan"}
-# The CliQ aliases and names offered to customers (see LOCAL_PAYMENT_INSTRUCTIONS["Jordan"]): UWallet (IBOY1300),
-# Orange Money (WKS777), Zain Cash (WKS555) and Safwa Bank (WKS333). The Etihad Bank alias (WKS999) is hidden on
-# purpose, so it isn't listed here; a receipt to Waleed's name still matches through the name.
+# The CliQ aliases and names offered to customers (see LOCAL_PAYMENT_INSTRUCTIONS["Jordan"]): banks Safwa Bank
+# (WKS333) and Etihad Bank (IBOY787), Orange Money (WKS777, WKS666), Zain Cash (WKS555) and UWallet (IBOY1300).
 JORDAN_RECIPIENT_IDENTIFIERS = [
-    "IBOY1300", "IBRAHIM OMAR ALSALAHAT", "IBRAHIM ALSALAHAT", "ALSALAHAT",
+    "IBOY1300", "IBOY787", "IBRAHIM OMAR ALSALAHAT", "IBRAHIM ALSALAHAT", "ALSALAHAT",
     "WKS777", "WKS333", "WALEED SHAQFEH", "WALEED KHALID AHMAD SHAQFEH", "SHAQFEH",
-    "WKS555", "MOHAMMAD SHAMALTI", "MOHAMMAD ISMAIL ABEDELQADER SHAMALTY", "SHAMALTY", "SHAMALTI",
+    "WKS555", "WKS666", "MOHAMMAD SHAMALTI", "MOHAMMAD ISMAIL ABEDELQADER SHAMALTY", "SHAMALTY", "SHAMALTI",
 ]
 
 # KSA (Al Ahli) receipts DO normally show a reference number, so KSA
@@ -732,12 +731,17 @@ LOCAL_PAYMENT_INSTRUCTIONS = {
         "WhishMoney Number: (Tap to copy)\n`81666579`"
     ),
     "Jordan": (
-        # Hidden on purpose (not shown): "CLIQ ALIAS: `WKS999`\n(Etihad Bank)\nName: Waleed Shaqfeh"
         "Choose any CliQ alias below and tap it to copy:\n\n"
-        "CLIQ ALIAS: `IBOY1300`\n(UWallet)\nName: Ibrahim Omar Alsalahat\n\n"
-        "CLIQ ALIAS: `WKS777`\n(Orange Money)\nName: Waleed Shaqfeh\n\n"
-        "CLIQ ALIAS: `WKS555`\n(Zain Cash)\nName: Mohammad Shamalti\n\n"
-        "CLIQ ALIAS: `WKS333`\n(Safwa Bank)\nName: Waleed Shaqfeh"
+        "*🏦 Banks*\n"
+        "CLIQ ALIAS: `WKS333`\n(Safwa Bank)\nName: Waleed Shaqfeh\n\n"
+        "CLIQ ALIAS: `IBOY787`\n(Etihad Bank)\nName: Ibrahim Omar Alsalahat\n\n"
+        "*🍊 Orange Money*\n"
+        "CLIQ ALIAS: `WKS777`\nName: Waleed Shaqfeh\n\n"
+        "CLIQ ALIAS: `WKS666`\nName: Mohammad Shamalti\n\n"
+        "*Zain Cash*\n"
+        "CLIQ ALIAS: `WKS555`\nName: Mohammad Shamalti\n\n"
+        "*UWallet*\n"
+        "CLIQ ALIAS: `IBOY1300`\nName: Ibrahim Alsalahat"
     ),
     "India": (
         "UPI ID (tap to copy)\n`s4005194160889795@slc`\n\n"
@@ -10061,7 +10065,7 @@ async def log_customer_update(update: Update, context: ContextTypes.DEFAULT_TYPE
 # exposed here: customers get those at checkout, where receipts are verified.
 LOCAL_PAYMENT_METHOD_LABELS = {
     "Lebanon": "Whish Money",
-    "Jordan": "CliQ (UWallet, Orange Money, Zain Cash, Safwa Bank)",
+    "Jordan": "CliQ (Safwa Bank, Etihad Bank, Orange Money, Zain Cash, UWallet)",
     "India": "UPI",
     "Ghana": "MTN Mobile Money / Telecel Cash",
     "Pakistan": "HBL bank transfer",
