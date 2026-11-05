@@ -10446,6 +10446,66 @@ def _reply_bot_order_total(user_id: int, order_items: dict) -> float:
     return round(sum(_coworker_unit_price(i, user_id) * q for i, q in order_items.items()), 2)
 
 
+# Payment methods the support chatbot doesn't hand out (on hold at checkout too, see checkout_view).
+CHAT_PAYMENT_METHODS_OFF = {"PayPal"}
+
+
+def _plain_for_chat(text: str) -> str:
+    """The shop's Telegram-Markdown payment text as plain text, for the support chatbot (it sends plain text)."""
+    text = re.sub(r"\((?:tap|tap on the [\w ]+?) to copy\)\n*", "", text or "", flags=re.I)
+    text = re.sub(r"(?im)^tap (?:on )?(?:the )?[\w ]*?to copy:?[ \t]*\n+", "", text)
+    text = re.sub(r"[*`]", "", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+async def http_payment_details(request):
+    """The exact payment details and amount for one product and payment method, as this bot shows them at
+    checkout, so the support chatbot can take an order in its own chat: it sends these to the customer, then
+    creates the order and submits the receipt through /api/create_order and /api/submit_receipt.
+    Query: user_id, item_id, method (a payment method code). X-Api-Key protected. `started` says whether the
+    customer has opened this bot, which an order (and its delivery here) needs."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        user_id = int(request.query["user_id"])
+        item_id = request.query["item_id"].strip()
+        method = request.query["method"].strip()
+    except (KeyError, ValueError):
+        return web.json_response({"error": "user_id, item_id and method are needed"}, status=400)
+    codes = {c.lower(): c for c in reply_bot_payment_method_codes()}
+    if method.lower() not in codes:
+        return web.json_response(
+            {"error": "unknown payment method", "allowed": reply_bot_payment_method_codes()}, status=400
+        )
+    method = codes[method.lower()]
+    if method in CHAT_PAYMENT_METHODS_OFF:
+        return web.json_response({"error": f"{method} isn't offered right now"}, status=409)
+    sellable = set(all_toggleable_items()) | {
+        i for i in MANUAL_ACCESS_ITEMS if not ITEM_OVERRIDES.get(i, (None, None, None, False))[3]
+    }
+    if item_id not in sellable or item_id not in MENU:
+        return web.json_response({"error": f"unknown product: {item_id}"}, status=400)
+    if db_is_out_of_stock(item_id):
+        return web.json_response({"error": f"{MENU[item_id][0]} is out of stock"}, status=409)
+    total = _reply_bot_order_total(user_id, {item_id: 1})  # the same price the order will have
+    if method in USA_APP_INSTRUCTIONS:
+        amount = convert_for_country(total, "USA")
+        text = f"{method}\n\nAmount to pay: {amount}\n\n{USA_APP_INSTRUCTIONS[method]}"
+    elif method == "Cryptocurrency":
+        amount = f"{CURRENCY}{total:.2f}"
+        text = f"Amount to pay: {amount}\n\n{CRYPTO_INSTRUCTIONS}"
+    else:
+        amount = convert_for_country(total, method) if method in LOCAL_PAYMENT_INSTRUCTIONS else f"{CURRENCY}{total:.2f}"
+        text = _mini_app_payment_recap(method, total)
+    if not text:
+        return web.json_response({"error": f"no payment details for {method}"}, status=409)
+    return web.json_response({
+        "method": method, "item_id": item_id, "item": MENU[item_id][0], "amount": amount,
+        "instructions": _plain_for_chat(text), "started": db_user_exists(user_id),
+    })
+
+
 async def http_create_order(request):
     """Creates an order on a customer's behalf when the Mini App's submit
     ("I've Paid ✅") failed and no order was ever created, so the reply bot
@@ -10870,8 +10930,9 @@ async def http_public_catalog(request):
                 "international": INTERNATIONAL_PAYMENT_METHODS,
                 "local": local,
                 "how_to_pay": (
-                    "Place the order in the shop bot, choose a payment method at checkout to see "
-                    "the exact payment details, pay, then tap \"I've Paid\" and upload the receipt."
+                    "Customers can order and pay in the shop bot (see the guide), or the support chat can "
+                    "take the order for them: it gives the exact payment details for the chosen method, then "
+                    "submits the order and the receipt to the shop bot."
                 ),
             },
             "guide": SHOP_GUIDE_FOR_REPLY_BOT,
@@ -12731,6 +12792,7 @@ async def start_api_server(application):
     api_app.router.add_post("/api/assist_reply", http_assist_reply)
     api_app.router.add_post("/api/renewal_request", http_renewal_request)
     api_app.router.add_get("/api/order_logins", http_order_logins)
+    api_app.router.add_get("/api/payment_details", http_payment_details)
     api_app.router.add_get("/api/automation_export", http_automation_export)
     api_app.router.add_get("/api/orders", http_all_orders)
     api_app.router.add_post("/api/submit_receipt", http_submit_receipt)
