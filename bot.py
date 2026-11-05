@@ -37,6 +37,7 @@ import hmac
 import json
 import logging
 import os
+import base64
 import math
 import re
 import sys
@@ -10504,10 +10505,15 @@ async def http_payment_details(request):
         text = _mini_app_payment_recap(method, total)
     if not text:
         return web.json_response({"error": f"no payment details for {method}"}, status=409)
-    return web.json_response({
+    result = {
         "method": method, "item_id": item_id, "item": MENU[item_id][0], "amount": amount,
         "instructions": _plain_for_chat(text), "started": db_user_exists(user_id),
-    })
+    }
+    if method == "India" and os.path.exists(INDIA_QR_PATH):
+        # The same QR image the checkout sends after India's instructions, for the chatbot to send too.
+        with open(INDIA_QR_PATH, "rb") as f:
+            result["qr_image"] = base64.b64encode(f.read()).decode()
+    return web.json_response(result)
 
 
 async def http_create_order(request):
