@@ -107,6 +107,8 @@ def group_of(name: str):
 EXTRA_PRODUCTS = [
     {"name": "AccessMedicine", "group": ("access", "Medicine"),
      "variants": [{"id": "accessmedicine", "months": 12, "label": "1 Year", "price": 20.0, "existing": True}]},
+    {"name": "ACP MKSAP 20 (2026)",
+     "variants": [{"id": "mksap_20", "months": 12, "label": "1 Year", "price": 75.0, "existing": True}]},
 ]
 
 

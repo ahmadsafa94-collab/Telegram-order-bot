@@ -354,6 +354,18 @@
    ]
   },
   {
+   "name": "ACP MKSAP 20 (2026)",
+   "variants": [
+    {
+     "id": "mksap_20",
+     "months": 12,
+     "label": "1 Year",
+     "price": 75.0,
+     "existing": true
+    }
+   ]
+  },
+  {
    "name": "ALtmetrics",
    "variants": [
     {

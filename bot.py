@@ -239,6 +239,7 @@ MENU = {
     "sanford_guide": ("Sanford Guide - 1 Year", 35.00),
     "embase": ("Embase - 1 Year", 35.00),
     "micromedex": ("Micromedex - 1 Year", 20.00),
+    "mksap_20": ("ACP MKSAP 20 (2026) - 1 Year", 75.00),
 
     # Telegram AI bots — no registration details needed; access is granted
     # directly on the relevant Telegram bot after payment.
@@ -256,6 +257,7 @@ DEFAULT_ITEM_COSTS = {
     "up_pathways_app": 10.0,
     "amboss_library": 30.0, "amboss_premium_1y": 35.0, "item4": 35.0,
     "boardvitals": 35.0,
+    "mksap_20": 35.0,
 }
 
 # Order the single-choice items appear in the main menu.
@@ -263,7 +265,7 @@ SINGLE_MAIN_ITEMS = [
     "dynamed", "dynamedex", "bmj_best_practice", "bmj_learning", "visualdx",
     "lexicomp", "accessmedicine", "boardvitals", "clinicalkey", "sciencedirect_noai", "sciencedirect_ai",
     "statdx", "nejm", "jama_evidence", "scopus", "springerlink", "springerlink_journals",
-    "sanford_guide", "embase", "micromedex",
+    "sanford_guide", "embase", "micromedex", "mksap_20",
 ]
 
 # Extra subscriptions imported from the supplier panel (panel_catalog.json,
