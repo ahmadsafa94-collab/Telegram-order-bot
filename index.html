@@ -3720,7 +3720,10 @@ function buildAdBanner(){
     const advance = () => {
       const cur = Math.round(track.scrollLeft / track.clientWidth);
       const next = (cur + 1) % ADS.length;
-      track.scrollTo({ left: next * track.clientWidth, behavior: 'smooth' });
+      const left = next * track.clientWidth;
+      try { track.scrollTo({ left, behavior: 'smooth' }); } catch (e) { track.scrollLeft = left; }
+      // Some in-app browsers ignore a smooth scroll inside a snapping strip: then jump straight there.
+      setTimeout(() => { if (Math.round(track.scrollLeft / track.clientWidth) !== next) track.scrollLeft = left; }, 900);
     };
     const restartAutoTimer = () => { clearInterval(autoTimer); autoTimer = setInterval(advance, 7000); };
 

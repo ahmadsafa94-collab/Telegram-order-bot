@@ -103,9 +103,20 @@ MINI_APP_URL = os.environ.get("MINI_APP_URL", "")
 # Cache-buster for the Mini App URL — Telegram's client caches the Mini App
 # page by URL and does NOT reliably refetch index.html just because GitHub
 # Pages has a newer version, so a query param that only changes when the
-# page's contents change (bumped by hand on every index.html edit) forces
-# a fresh load instead of silently serving a stale cached copy.
-MINI_APP_VERSION = "64"
+# page's contents change forces a fresh load instead of silently serving a
+# stale cached copy. It was bumped by hand on every index.html edit (and got
+# forgotten: still "64" after four edits in Nov 2026); now it's a fingerprint
+# of index.html itself, so every change to the page changes it.
+def _mini_app_version() -> str:
+    try:
+        import hashlib
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html"), "rb") as f:
+            return hashlib.sha1(f.read()).hexdigest()[:10]
+    except OSError:
+        return "64"
+
+
+MINI_APP_VERSION = _mini_app_version()
 
 # HTTP API server for the Mini App to call.
 # Railway sets RAILWAY_PUBLIC_DOMAIN automatically — no manual config needed
