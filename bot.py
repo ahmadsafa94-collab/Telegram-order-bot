@@ -211,8 +211,13 @@ MENU = {
     "up_offline_web": ("Uptodate Online + Offline Access 1 Year - Mobile App + Browser", 45.00),
     "up_pathways_app": ("Uptodate Online + Pathways Access 1 Year - Mobile App", 30.00),
     "up_pathways_web": ("Uptodate Online + Pathways Access 1 Year - Mobile App + Browser", 45.00),
+    # No longer sold on its own (6 Nov 2026: replaced by the Official + Telegram Chat bundle below); kept for old
+    # orders and for its codes pool, which the bundle uses.
     "uptodate_ai_2m": ("Uptodate Expert AI (Telegram Bot) - 3 Months", 10.00),
-    "uptodate_ai_official_3m": ("Uptodate Expert AI (Official App) - 3 Months", 20.00),
+    "uptodate_ai_official_3m": ("Uptodate AI (Official) - 3 Months", 15.00),
+    # The official app account (details collected and delivered like the one above) plus a code for the Uptodate
+    # Telegram chat bot, sent automatically once paid (send_uptodate_ai_bundle_code).
+    "uptodate_ai_bundle_3m": ("Uptodate AI (Official) + Uptodate Telegram Chat - 3 Months", 25.00),
 
     # Amboss — Premium+Library, or Library-only.
     "amboss_premium_1y": ("Amboss Premium (Unlimited Qbanks) + Library - 1 Year", 85.00),
@@ -339,10 +344,13 @@ CATALOG = {
                     "up_pathways_web": {"label": "Mobile App + Browser", "item": "up_pathways_web"},
                 },
             },
-            "uptodate_ai_2m": {"label": "Uptodate Expert AI (Telegram Bot) - 3 Months", "item": "uptodate_ai_2m"},
             "uptodate_ai_official_3m": {
-                "label": "Uptodate Expert AI (Official App) - 3 Months",
+                "label": "Uptodate AI (Official) - 3 Months",
                 "item": "uptodate_ai_official_3m",
+            },
+            "uptodate_ai_bundle_3m": {
+                "label": "Uptodate AI (Official) + Uptodate Telegram Chat - 3 Months",
+                "item": "uptodate_ai_bundle_3m",
             },
         },
     },
@@ -377,6 +385,9 @@ IMD_TRIGGER_ITEMS = {"imd_6m", "imd_1y", "imd_2y"}
 # (📦 Manage Stock → this item → Stock, or the same add/remove flow).
 UPTODATE_AI_TRIGGER_ITEMS = {"uptodate_ai_2m"}
 UPTODATE_AI_CODES_DURATION = "uptodate_ai_2m"
+# Bundles that include the Uptodate Telegram chat: the rest is delivered as usual (details, then the admin), and a
+# code from the same pool is sent as soon as the order is paid.
+UPTODATE_AI_BUNDLE_ITEMS = {"uptodate_ai_bundle_3m"}
 
 # Items that need no customer-entered details at all AND can't be
 # auto-delivered (unlike Uptodate AI's serial pool) — access has to be
@@ -403,7 +414,7 @@ SERIAL_POOL_LABELS = {
 UPTODATE_TICKET_ITEMS = {
     "item1", "item3",  # legacy
     "up_online_app", "up_online_web", "up_offline_app", "up_offline_web",
-    "up_pathways_app", "up_pathways_web", "uptodate_ai_official_3m",
+    "up_pathways_app", "up_pathways_web", "uptodate_ai_official_3m", "uptodate_ai_bundle_3m",
 }
 
 IMD_FORGOT_PASSWORD_URL = "https://en.imedicaldoctor.net/forgot.php"
@@ -15847,6 +15858,9 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
 
     item_name = MENU.get(item_id, (item_id, 0))[0]
 
+    if item_id in UPTODATE_AI_BUNDLE_ITEMS:
+        await send_uptodate_ai_bundle_code(context, order_id, user_id, fulfilment_id)
+
     # Before asking the customer anything, check if credentials were already
     # collected (Mini App Step 2 or any pre-payment collection). If info_json
     # is already set, use it directly — never ask twice.
@@ -16160,6 +16174,56 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Move on to the next item in this order, if any.
     await process_next_in_queue(context, update.effective_user.id, order_id)
+
+
+async def send_uptodate_ai_bundle_code(context: ContextTypes.DEFAULT_TYPE, order_id: int,
+                                       user_id: int, fulfilment_id: int):
+    """The Uptodate Telegram chat part of a bundle: once the order is paid, sends one code from the Uptodate AI pool
+    (once per unit). The official app part carries on as a normal delivery. An empty pool tells the admin instead."""
+    order_row = db_get_order(order_id)
+    if not order_row or order_row[5] not in ("paid", "delivered"):
+        return
+    sent_key = f"bundle_code_sent:{fulfilment_id}"
+    if db_get_meta(sent_key):
+        return
+    serial = db_pop_serial(UPTODATE_AI_CODES_DURATION)
+    if not serial:
+        db_set_meta(sent_key, "pool empty, admin told")
+        if ADMIN_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(
+                        f"⚠️ Order #{order_id} — Uptodate AI (Official) + Telegram Chat sold but the Uptodate AI codes "
+                        "pool is empty, so the Telegram chat code wasn't sent. Add codes (➕ Add Serials → Uptodate AI "
+                        f"3 Months) and send the customer (ID {user_id}) one with: Click @Up2down_bot, type /Redeem <code>."
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to notify admin of empty Uptodate AI codes pool (bundle)")
+        return
+    serial_id, code = serial
+    db_finalize_serial(serial_id, order_id, success=True)
+    db_set_meta(sent_key, code)
+    message = (
+        "✅ Your Uptodate Telegram Chat (part of Uptodate AI (Official) + Uptodate Telegram Chat) is ready!\n\n"
+        "1️⃣ Click on @Up2down_bot\n"
+        f"2️⃣ Type /Redeem {code}\n\n"
+        "Your Uptodate AI (Official) account is sent separately."
+    )
+    db_add_delivery(order_id, user_id, "uptodate_ai_bundle_3m", message)
+    try:
+        await context.bot.send_message(chat_id=user_id, text=message)
+    except Exception:
+        logger.exception("Failed to send the Uptodate Telegram chat code to user %s", user_id)
+    if ADMIN_CHAT_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"✅ Sent Uptodate Telegram chat code {code} — Order #{order_id} (the Official account is still to deliver)",
+            )
+        except Exception:
+            logger.exception("Failed to tell the admin about the bundle code")
 
 
 async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id: int,
