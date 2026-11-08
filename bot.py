@@ -3717,7 +3717,7 @@ def _mini_app_admin_edits() -> tuple:
 COWORKER_TAB_LIMIT = 60
 
 
-def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: bool = False) -> str:
+def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: bool = False, open_view: str = "") -> str:
     """Builds the Mini App URL. When user_id is known, subscription data and
     custom admin-added items are encoded as a base64 query param (?subs=...)
     so the Mini App can display them without any HTTP API call.
@@ -3756,6 +3756,8 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
     # isn't actually logged in as them — see _effective_preview_coworker_id.
     if preview_coworker_id:
         auth_params += f"&previewcw={preview_coworker_id}"
+    if open_view and user_id:
+        auth_params += f"&open={open_view}"  # e.g. "imdsearch": the Mini App opens that view straight away
 
     # Always include custom catalog items so the Mini App catalog stays in sync.
     # Name/price come from MENU so 📦 Manage Stock → Edit applies to them too,
@@ -4060,6 +4062,10 @@ def referral_link(bot_username: str, user_id: int) -> str:
     return f"https://t.me/{bot_username}?start=ref_{user_id}"
 
 
+# /start payload of the shareable link that opens the Mini App on the iMD resource search.
+IMD_SEARCH_START_ARG = "imdsearch"
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /start is the universal "reset me" — a customer stuck in any
     # half-finished flow (e.g. an iMD registration retry with no cancel
@@ -4082,6 +4088,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db_set_referred_by(user_id, referrer_id)
         except ValueError:
             pass
+
+    # https://t.me/<bot>?start=imdsearch (shared by the owner): one tap opens the Mini App on its
+    # "What does iMD include?" search. Telegram doesn't let a bot open a Mini App by itself, so this
+    # button is as direct as it gets.
+    if deep_link_arg == IMD_SEARCH_START_ARG:
+        url = _shop_url(user_id, open_view="imdsearch")
+        if url:
+            await update.message.reply_text(
+                "🔬 Search what iMD includes: tap below and type a book, journal or resource name.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔬 What does iMD include?", web_app=WebAppInfo(url=url))]]
+                ),
+            )
+            if update.effective_user.id != ADMIN_CHAT_ID:
+                await update.message.reply_text(
+                    "You can also open the Shop any time with the button below.",
+                    reply_markup=main_menu_keyboard(update.effective_user.id),
+                )
+            return
 
     if update.effective_user.id == ADMIN_CHAT_ID:
         await update.message.reply_text(

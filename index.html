@@ -3729,6 +3729,11 @@ function buildAdBanner(){
 // ── Init ──────────────────────────────────────────────────────────────
 buildCatalog();
 buildAdBanner();
+// Opened from the shareable link (t.me/<bot>?start=imdsearch -> the bot's button adds &open=imdsearch):
+// go straight to iMD and its "What does iMD include?" search.
+if (_qs.get('open') === 'imdsearch') {
+  try { switchCat('imd'); imdWhatsIncluded(); } catch(e) {}
+}
 document.getElementById('landingImg').src=LOGOS.landing;
 document.getElementById('headerLogo').src=LOGOS.landing;
 
