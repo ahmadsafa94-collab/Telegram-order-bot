@@ -489,6 +489,7 @@ body:has(.floating-checkout.vis) .az-strip{bottom:calc(var(--tabh) + 86px)}
 #durList .card{margin-bottom:6px}
 .panel-row .az-av{display:none}   /* the letter heading above says it already */
 .solo.panel-row{padding:11px 13px}
+body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on short categories */
 </style>
 </head>
 <body>
@@ -2917,6 +2918,9 @@ function switchCat(id){
 // first subscriptions show below them (it used to jump to the very top, under the banner).
 // Instant, not smooth: an ad's goToItem scrolls again right after this.
 function scrollToCategories(){
+  // The list under the tiles is always at least a screen tall once a category is picked, so a short
+  // category (iMD, Amboss) can scroll as far as a long one and the tiles stay put (they used to jump).
+  document.body.classList.add('cat-picked');
   const tiles=document.getElementById('tabs'), hdr=document.querySelector('.hdr');
   if(!tiles){ window.scrollTo(0,0); return; }
   const y=tiles.getBoundingClientRect().top+window.scrollY-(hdr?hdr.offsetHeight:0)-8;
