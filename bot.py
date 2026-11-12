@@ -3438,7 +3438,35 @@ def db_coworker_purchase_history(coworker_id: int):
         "year": _bucket(year_start),
         "lifetime": _bucket("0000-01-01T00:00:00"),
     }
+    # Per subscription (12 Nov 2026): units sold and amount for each period. An order with several
+    # products has its total shared out by each product's regular price × quantity.
+    rows = conn.execute(
+        f"SELECT items_json, total, created_at FROM orders WHERE coworker_id = ? AND status NOT IN ({placeholders})",
+        (coworker_id, *UNPAID_EXCLUDED_STATUSES),
+    ).fetchall()
     conn.close()
+    periods = {"day": day_start, "month": month_start, "year": year_start, "lifetime": ""}
+    by_item = {k: {} for k in periods}
+    for items_json, total, created in rows:
+        try:
+            items = {i: int(q) for i, q in (json.loads(items_json) or {}).items() if int(q) > 0}
+        except (TypeError, ValueError):
+            continue
+        weights = {i: float(MENU.get(i, (i, 0))[1] or 0) * q for i, q in items.items()}
+        wsum = sum(weights.values())
+        for item_id, qty in items.items():
+            share = (weights[item_id] / wsum) if wsum else 1 / len(items)
+            amount = float(total or 0) * share
+            for key, since in periods.items():
+                if (created or "") >= since:
+                    e = by_item[key].setdefault(item_id, {"item": item_id, "name": MENU.get(item_id, (item_id,))[0],
+                                                          "qty": 0, "total": 0.0})
+                    e["qty"] += qty
+                    e["total"] += amount
+    result["by_item"] = {
+        k: sorted(({**e, "total": round(e["total"], 2)} for e in v.values()), key=lambda e: (-e["qty"], -e["total"]))
+        for k, v in by_item.items()
+    }
     return result
 
 
