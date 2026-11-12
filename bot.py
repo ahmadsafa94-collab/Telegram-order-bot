@@ -12905,6 +12905,7 @@ async def start_api_server(application):
     api_app.router.add_get("/api/assist_events", http_assist_events)
     api_app.router.add_post("/api/assist_reply", http_assist_reply)
     api_app.router.add_post("/api/renewal_request", http_renewal_request)
+    api_app.router.add_get("/api/renewal_updates", http_renewal_updates)
     api_app.router.add_get("/api/order_logins", http_order_logins)
     api_app.router.add_get("/api/payment_details", http_payment_details)
     api_app.router.add_get("/api/automation_export", http_automation_export)
@@ -18780,6 +18781,34 @@ async def _automation_post(path: str, payload: dict):
     except Exception as exc:
         logger.warning("automation bot %s: %s", path, exc)
         return 502, {"error": f"couldn't reach the automation bot ({exc.__class__.__name__})"}
+
+
+async def _automation_get(path: str, params: dict):
+    """GETs from the automation bot. Returns (status, json body or {"error": reason})."""
+    import httpx
+    if not AUTOMATION_API_URL or not CATALOG_API_KEY:
+        return 503, {"error": "the automation bot isn't connected (AUTOMATION_API_URL)"}
+    try:
+        async with httpx.AsyncClient(timeout=30) as http:
+            resp = await http.get(AUTOMATION_API_URL + path, params=params, headers={"X-Api-Key": CATALOG_API_KEY})
+        try:
+            return resp.status_code, resp.json()
+        except ValueError:
+            return resp.status_code, {"error": f"automation bot answered {resp.status_code}"}
+    except Exception as exc:
+        logger.warning("automation bot %s: %s", path, exc)
+        return 502, {"error": f"couldn't reach the automation bot ({exc.__class__.__name__})"}
+
+
+async def http_renewal_updates(request):
+    """GET ?after=<id> (X-Api-Key) — passed on to the automation bot: chatbot renewals the admin completed, so the
+    support chatbot can tell those customers it's done (12 Nov 2026)."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    params = {"after": request.query["after"]} if request.query.get("after") not in (None, "") else {}
+    status, answer = await _automation_get("/api/renewal_updates", params)
+    return web.json_response(answer, status=status)
 
 
 async def automation_moved(update: Update, context: ContextTypes.DEFAULT_TYPE):
