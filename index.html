@@ -456,6 +456,18 @@ body:has(.floating-checkout.vis) .toast{bottom:calc(var(--tabh) + 86px)}
 :root[data-theme="light"] .t-pill.ok,:root[data-theme="light"] .via.ok{color:#15803d}
 :root[data-theme="light"] .t-pill.open,:root[data-theme="light"] .via.owed{color:#b45309}
 :root[data-theme="light"] .t-pill.new{color:#dc2626}
+/* − 2 + stepper once an item is in the basket (replaces the ✓) */
+.qty-step{display:none;align-items:center;gap:2px;flex-shrink:0;margin-left:8px;padding:3px;border-radius:99px;background:rgba(var(--acc-rgb),.14)}
+.add-btn.in:not(.oos){display:none}
+.add-btn.in+.qty-step,.ci .qty-step{display:inline-flex}
+.qs-btn{width:30px;height:30px;border-radius:50%;border:none;background:var(--teal);color:#fff;font-size:18px;font-weight:700;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+.qs-btn.minus{background:transparent;color:var(--teal2)}
+.qs-btn:active{transform:scale(.9)}
+.qs-n{min-width:24px;text-align:center;font-weight:700;font-size:14px;color:var(--teal2);font-variant-numeric:tabular-nums}
+.ci .qty-step{margin-left:0}
+/* with a sheet open (basket, payment …) messages show at the top, clear of the sheet's buttons */
+body:has(.overlay.on) .toast{bottom:auto;top:calc(env(safe-area-inset-top,0px) + 12px);transform:translateX(-50%) translateY(-120px)}
+body:has(.overlay.on) .toast.on{transform:translateX(-50%) translateY(0)}
 </style>
 </head>
 <body>
@@ -1359,14 +1371,32 @@ const cartTotal=()=>{
 };
 const cartSize =()=>Object.values(cart).reduce((s,i)=>s+i.qty,0);
 
+const MAX_QTY=20;   // per subscription in one order
 function addItem(id){
   const itm=IMAP[id]; if(!itm) return;
+  if(cart[id]&&cart[id].qty>=MAX_QTY){showToast('Up to '+MAX_QTY+' at a time');return;}
   cart[id]=cart[id]?{...cart[id],qty:cart[id].qty+1}:{name:itm.fullname||itm.name,price:itm.price,qty:1};
   // A matched item can be showing in both the search results and its
   // normal category tab at once (the tab stays in the DOM, just
   // hidden) — update every button for this id, not just the first.
   document.querySelectorAll('#ab-'+id).forEach(btn=>{btn.textContent='✓';btn.classList.add('in');});
-  syncBasket(); showToast('Added · $'+itm.price);
+  syncBasket(); if(document.getElementById('basketOverlay').classList.contains('on')) renderBasket();
+  showToast(cart[id].qty>1?cart[id].qty+' × in basket':'Added · $'+itm.price);
+}
+// The − / + stepper that replaces ✓ once an item is in the basket (catalog rows and the basket sheet).
+// − at 1 takes the item out.
+function stepQty(id,d){
+  if(!cart[id]) return;
+  if(d>0){ addItem(id); return; }
+  if(cart[id].qty<=1){ removeItem(id); return; }
+  cart[id]={...cart[id],qty:cart[id].qty-1};
+  syncBasket(); renderBasket();
+}
+function syncQtySteppers(){
+  document.querySelectorAll('.add-btn').forEach(b=>{
+    const s=b.nextElementSibling; if(!s||!s.classList.contains('qty-step')) return;
+    const q=cart[b.id.slice(3)]; s.querySelector('.qs-n').textContent=q?q.qty:1;
+  });
 }
 function removeItem(id){
   delete cart[id];
@@ -1389,6 +1419,7 @@ function removeDetailItem(id){
 }
 
 function syncBasket(){
+  syncQtySteppers();
   const n=cartSize();
   const bc=document.getElementById('bc');
   bc.textContent=n; bc.classList.toggle('vis',n>0);
@@ -1740,7 +1771,8 @@ function renderBasket(){
   }
   el.innerHTML=items.map(([id,{name,price,qty}])=>
     `<div class="ci">
-      <div class="ci-name">${name}${qty>1?` ×${qty}`:''}</div>
+      <div class="ci-name">${name}</div>
+      <span class="qty-step"><button class="qs-btn minus" type="button" aria-label="One less" onclick="stepQty('${id}',-1)">−</button><span class="qs-n">${qty}</span><button class="qs-btn" type="button" aria-label="One more" onclick="stepQty('${id}',1)">+</button></span>
       <div class="ci-price">$${((hasCoworkerDiscount(id)?coworkerPrice(price,id):price)*qty).toFixed(2)}</div>
       <button class="rm" onclick="removeItem('${id}')">×</button>
     </div>`
@@ -2677,7 +2709,7 @@ function makePanelRow(p){
       <div class="rn" onclick="this.classList.toggle('full')">${escHtml(p.title)}</div><div class="rs">${panelSubHtml(d,p)}</div></div>
     <div class="pr-bot">
       <div class="dur-anchor"><button class="dur-btn${several?' multi':' one'}" onclick="toggleDurations(this)"></button><div class="dur-menu"></div></div>
-      <button class="add-btn" id="ab-${sel.id}" onclick="addPanelSelected(this)">${cart[sel.id]?'✓':'+'}</button>
+      <button class="add-btn" id="ab-${sel.id}" onclick="addPanelSelected(this)">${cart[sel.id]?'✓':'+'}</button><span class="qty-step"><button class="qs-btn minus" type="button" aria-label="One less" onclick="event.stopPropagation();stepQty(this.parentElement.previousElementSibling.id.slice(3),-1)">−</button><span class="qs-n">${cart[sel.id]?cart[sel.id].qty:1}</span><button class="qs-btn" type="button" aria-label="One more" onclick="event.stopPropagation();stepQty(this.parentElement.previousElementSibling.id.slice(3),1)">+</button></span>
     </div>`;
   const add=d.querySelector('.add-btn'); add.classList.toggle('in',!!cart[sel.id]);
   const btn=d.querySelector('.dur-btn'); btn.textContent=durBtnText(d,false);
@@ -2737,7 +2769,7 @@ function pickDuration(el,id){
   // the row's + now adds this duration, and shows ✓ if it is already in the basket
   const add=row.querySelector('.add-btn');
   add.id='ab-'+id;
-  add.textContent=cart[id]?'✓':'+'; add.classList.toggle('in',!!cart[id]);
+  add.textContent=cart[id]?'✓':'+'; add.classList.toggle('in',!!cart[id]); syncQtySteppers();
   const p=panelOf(row); if(p) row.querySelector('.rs').innerHTML=panelSubHtml(row,p);
   closeAllDurations();
   row.querySelector('.dur-btn').textContent=durBtnText(row,false);
@@ -2773,7 +2805,7 @@ function makeRow(itm,solo){
   d.innerHTML=`${solo?`<div style="font-size:21px">${itm.e||'📦'}</div>`:''}
     <div class="ri"><div class="rn">${escHtml(itm.name)}</div><div class="rs">${itm.sub||''}</div></div>
     <div class="rp">${priceHtml}</div>
-    <button class="add-btn${oos?' oos':''}" id="ab-${itm.id}" ${oos?'disabled':''} onclick="${oos?"event.stopPropagation();showToast('Out of stock')":`addItem('${itm.id}')`}">${oos?'✕':'+'}</button>`;
+    <button class="add-btn${oos?' oos':(cart[itm.id]?' in':'')}" id="ab-${itm.id}" ${oos?'disabled':''} onclick="${oos?"event.stopPropagation();showToast('Out of stock')":`addItem('${itm.id}')`}">${oos?'✕':(cart[itm.id]?'✓':'+')}</button>${oos?'':`<span class="qty-step"><button class="qs-btn minus" type="button" aria-label="One less" onclick="event.stopPropagation();stepQty(this.parentElement.previousElementSibling.id.slice(3),-1)">−</button><span class="qs-n">${cart[itm.id]?cart[itm.id].qty:1}</span><button class="qs-btn" type="button" aria-label="One more" onclick="event.stopPropagation();stepQty(this.parentElement.previousElementSibling.id.slice(3),1)">+</button></span>`}`;
   return d;
 }
 
