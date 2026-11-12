@@ -25,7 +25,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   background:var(--bg);color:var(--text);min-height:100vh;padding-bottom:calc(var(--tabh) + 90px)}
 
 /* ── Header ─────────────────── */
-.hdr{background:var(--bg2);border-bottom:1px solid rgba(255,255,255,.07);
+.hdr{background:var(--bg2);border-bottom:1px solid rgba(var(--fg-rgb),.07);
   position:sticky;top:0;z-index:200}
 .hdr-top{display:flex;align-items:center;gap:8px;padding:12px 13px 8px}
 .logo{width:36px;height:36px;border-radius:10px;flex-shrink:0;
@@ -38,11 +38,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .hdr-icons{display:flex;gap:8px;flex-shrink:0}
 .ico-btn{
   position:relative;width:40px;height:40px;border-radius:12px;border:none;
-  background:rgba(255,255,255,.08);color:var(--text);font-size:18px;
+  background:rgba(var(--fg-rgb),.08);color:var(--text);font-size:18px;
   display:flex;align-items:center;justify-content:center;cursor:pointer;
   transition:background .15s;flex-shrink:0;
 }
-.ico-btn:active{background:rgba(255,255,255,.15)}
+.ico-btn:active{background:rgba(var(--fg-rgb),.15)}
 .ico-badge{
   position:absolute;top:-5px;right:-5px;
   background:var(--red);color:#fff;border-radius:99px;
@@ -52,7 +52,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 }
 .ico-badge.vis{opacity:1}
 .ico-btn.acc{background:var(--acc)}
-.credits-btn{height:40px;padding:0 11px;border-radius:12px;border:1.5px solid rgba(45,212,191,.5);background:rgba(13,148,136,.12);
+.credits-btn{height:40px;padding:0 11px;border-radius:12px;border:1.5px solid rgba(var(--acc2-rgb),.5);background:rgba(var(--acc-rgb),.12);
   color:var(--teal2);font-size:12px;font-weight:700;white-space:nowrap;cursor:pointer;flex-shrink:0}
 .hdr-title h1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media (max-width:370px){.hdr-title p{display:none}.credits-btn{padding:0 8px;font-size:11px}}
@@ -70,16 +70,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .tabs::-webkit-scrollbar{display:none}
 .tabs+.tabs{padding-top:0}
 .tab{flex-shrink:0;padding:9px 16px;border-radius:99px;
-  border:1.5px solid rgba(255,255,255,.12);font-size:14px;font-weight:600;
+  border:1.5px solid rgba(var(--fg-rgb),.12);font-size:14px;font-weight:600;
   color:var(--hint);cursor:pointer;background:transparent;transition:all .15s}
-.tab.active{border-color:var(--teal);background:rgba(13,148,136,.15);color:var(--teal2)}
+.tab.active{border-color:var(--teal);background:rgba(var(--acc-rgb),.15);color:var(--teal2)}
 .tab-logo{height:26px;width:auto;object-fit:contain;vertical-align:-9px;border-radius:5px;background:#fff;padding:2px;box-sizing:border-box}
 
 /* ── Floating checkout bar (catalog page, shown once basket has items) ── */
 .floating-checkout{display:none;align-items:center;justify-content:space-between;gap:12px;
   position:fixed;left:0;right:0;bottom:var(--tabh);z-index:150;
   padding:11px 15px 11px;
-  background:var(--bg2);border-top:1px solid rgba(255,255,255,.08);
+  background:var(--bg2);border-top:1px solid rgba(var(--fg-rgb),.08);
   box-shadow:0 -8px 22px rgba(0,0,0,.35)}
 .floating-checkout.vis{display:flex}
 .floating-checkout .fc-info{display:flex;flex-direction:column;line-height:1.3;min-width:0}
@@ -107,19 +107,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .ad-slide .ad-title{color:#fff;font-size:12.5px;font-weight:700;line-height:1.32}
 .ad-slide .ad-desc{color:rgba(255,255,255,.86);font-size:10.5px;margin-top:3px;line-height:1.35}
 .ad-dots{display:flex;justify-content:center;gap:5px;margin-top:7px}
-.ad-dot{width:5.5px;height:5.5px;border-radius:50%;background:rgba(255,255,255,.22);transition:background .15s}
+.ad-dot{width:5.5px;height:5.5px;border-radius:50%;background:rgba(var(--fg-rgb),.22);transition:background .15s}
 .ad-dot.active{background:var(--teal2)}
 
 /* ── Search ──────────────── */
 .search-wrap{position:relative;margin-top:2px}
-.search-wrap input{width:100%;background:var(--bg2);border:1.5px solid rgba(255,255,255,.1);
+.search-wrap input{width:100%;background:var(--bg2);border:1.5px solid rgba(var(--fg-rgb),.1);
   border-radius:12px;padding:11px 34px 11px 34px;color:var(--text);font-size:13px;
   outline:none;transition:border-color .15s}
 .search-wrap input:focus{border-color:var(--teal)}
 .search-wrap .search-ico{position:absolute;left:12px;top:50%;transform:translateY(-50%);
   font-size:13px;opacity:.55;pointer-events:none}
 .search-wrap .search-clear{position:absolute;right:6px;top:50%;transform:translateY(-50%);
-  width:22px;height:22px;border-radius:50%;border:none;background:rgba(255,255,255,.1);
+  width:22px;height:22px;border-radius:50%;border:none;background:rgba(var(--fg-rgb),.1);
   color:var(--hint);font-size:11px;cursor:pointer;display:none;align-items:center;justify-content:center}
 .search-empty{text-align:center;padding:28px 16px;color:var(--hint);font-size:13px}
 
@@ -132,14 +132,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .qr-img{display:block;max-width:220px;width:65%;margin:10px auto;border-radius:14px;box-shadow:0 6px 18px rgba(0,0,0,.3)}
 
 /* ── "What does iMD include?" banner ─── */
-.imd-whatsin{display:flex;align-items:center;gap:8px;background:rgba(13,148,136,.12);
-  border:1.5px solid rgba(13,148,136,.35);border-radius:var(--r);padding:12px 14px;
+.imd-whatsin{display:flex;align-items:center;gap:8px;background:rgba(var(--acc-rgb),.12);
+  border:1.5px solid rgba(var(--acc-rgb),.35);border-radius:var(--r);padding:12px 14px;
   margin-bottom:12px;cursor:pointer;font-size:13px;font-weight:600;color:var(--teal2)}
 .imd-whatsin .chev{margin-left:auto;color:var(--hint);font-size:16px}
 
 /* ── Item rows ──────────────── */
-.card{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);margin-bottom:10px;overflow:hidden}
-.row{display:flex;align-items:center;gap:10px;padding:11px 13px;border-bottom:1px solid rgba(255,255,255,.05)}
+.card{background:var(--bg2);border:1px solid rgba(var(--fg-rgb),.07);border-radius:var(--r);margin-bottom:10px;overflow:hidden}
+.row{display:flex;align-items:center;gap:10px;padding:11px 13px;border-bottom:1px solid rgba(var(--fg-rgb),.05)}
 .row:last-child{border-bottom:none}
 .ri{flex:1;min-width:0}
 .rn{font-size:13px;font-weight:500;line-height:1.3;overflow-wrap:anywhere}
@@ -156,7 +156,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .cw-danger{color:#ef4444!important;border-color:rgba(239,68,68,.45)!important}
 .admin-add{display:none;width:100%;margin:10px 0 2px;padding:10px;border:1.5px dashed var(--teal2);border-radius:12px;background:transparent;color:var(--teal2);font-size:13px;font-weight:700;cursor:pointer}
 .undo-bar{display:none;position:fixed;left:12px;right:12px;bottom:calc(var(--tabh) + 76px);z-index:400;align-items:center;gap:10px;
-  background:#111827;color:#fff;border:1px solid rgba(255,255,255,.15);border-radius:12px;padding:10px 12px;font-size:13px;box-shadow:0 8px 22px rgba(0,0,0,.45)}
+  background:#111827;color:#fff;border:1px solid rgba(var(--fg-rgb),.15);border-radius:12px;padding:10px 12px;font-size:13px;box-shadow:0 8px 22px rgba(0,0,0,.45)}
 .undo-bar.on{display:flex}
 .undo-bar span{flex:1;min-width:0;overflow-wrap:anywhere}
 .undo-bar button{background:none;border:none;color:var(--teal2);font-weight:700;font-size:13px;cursor:pointer;padding:4px 6px}
@@ -172,7 +172,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 /* a small shine sweeping across the button says "tap me, there are options" */
 .dur-btn.multi{position:relative;overflow:hidden}
 .dur-btn.multi::after{content:"";position:absolute;top:0;bottom:0;left:-60%;width:38%;pointer-events:none;
-  background:linear-gradient(100deg,transparent,rgba(45,212,191,.42),transparent);transform:skewX(-20deg);
+  background:linear-gradient(100deg,transparent,rgba(var(--acc2-rgb),.42),transparent);transform:skewX(-20deg);
   animation:durShine 3.4s ease-in-out infinite;animation-delay:var(--sd,0s)}
 @keyframes durShine{0%,60%{left:-60%}100%{left:135%}}
 .dur-anchor.open .dur-btn.multi::after{display:none}
@@ -182,9 +182,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   box-shadow:0 8px 22px rgba(0,0,0,.4)}
 .dur-anchor.open .dur-menu{display:block}
 .dur-opt{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:9px 8px;font-size:11.5px;
-  cursor:pointer;border-bottom:1px solid rgba(255,255,255,.07);white-space:nowrap}
+  cursor:pointer;border-bottom:1px solid rgba(var(--fg-rgb),.07);white-space:nowrap}
 .dur-opt:last-child{border-bottom:none}
-.dur-opt.sel{background:rgba(45,212,191,.16)}
+.dur-opt.sel{background:rgba(var(--acc2-rgb),.16)}
 .dur-opt .lbl{font-weight:600}
 .panel-from{color:var(--teal2)}.ri{min-width:0}
 .dur-opt .rp{font-size:11.5px}
@@ -194,25 +194,25 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   cursor:pointer;flex-shrink:0;margin-left:8px;transition:all .15s}
 .add-btn:active{transform:scale(.88)}
 .add-btn.in{background:var(--teal)}
-.add-btn.oos{background:rgba(255,255,255,.15);cursor:not-allowed}
+.add-btn.oos{background:rgba(var(--fg-rgb),.15);cursor:not-allowed}
 .solo{display:flex;align-items:center;gap:10px;padding:11px 13px;
-  background:var(--bg2);border:1px solid rgba(255,255,255,.07);
+  background:var(--bg2);border:1px solid rgba(var(--fg-rgb),.07);
   border-radius:var(--r);margin-bottom:7px}
 /* A family of products (e.g. Access MhMedical): one row that opens to the products inside it. */
 .pgroup-head{cursor:pointer;margin-bottom:7px}
 .pgroup-head .chev{flex-shrink:0;color:var(--hint);font-size:20px;line-height:1;transition:transform .15s}
 .pgroup.open>.pgroup-head .chev{transform:rotate(90deg)}
 .pgroup.open>.pgroup-head{border-color:var(--teal2)}
-.pgroup-body{display:none;margin:0 0 9px 10px;padding-left:8px;border-left:2px solid rgba(45,212,191,.4)}
+.pgroup-body{display:none;margin:0 0 9px 10px;padding-left:8px;border-left:2px solid rgba(var(--acc2-rgb),.4)}
 .pgroup.open>.pgroup-body{display:block}
 .cw-link{background:none;border:none;color:var(--hint);font-size:12px;padding:6px 0 0;cursor:pointer;text-decoration:underline}
 
 /* ── Detail forms ───────────── */
-.dblock{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);margin-bottom:12px;overflow:hidden}
-.dheader{padding:11px 13px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;align-items:center}
+.dblock{background:var(--bg2);border:1px solid rgba(var(--fg-rgb),.07);border-radius:var(--r);margin-bottom:12px;overflow:hidden}
+.dheader{padding:11px 13px;border-bottom:1px solid rgba(var(--fg-rgb),.06);display:flex;align-items:center}
 .dheader .rm{margin-left:8px;flex-shrink:0}
 .ptag{margin-left:auto;color:var(--teal2);font-size:13px;font-weight:700;flex-shrink:0}
-.toggle{display:flex;border-radius:12px;overflow:hidden;border:1.5px solid rgba(255,255,255,.12);margin:11px 13px 4px}
+.toggle{display:flex;border-radius:12px;overflow:hidden;border:1.5px solid rgba(var(--fg-rgb),.12);margin:11px 13px 4px}
 .tbtn{flex:1;border:none;background:transparent;color:var(--hint);padding:8px;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s}
 .tbtn.active{background:var(--acc);color:var(--atxt)}
 .fields{padding:0 13px 13px}
@@ -227,28 +227,28 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 
 /* ── Payment ─────────────────── */
 .pm-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px}
-.pm{background:var(--bg2);border:2px solid rgba(255,255,255,.08);border-radius:var(--r);
+.pm{background:var(--bg2);border:2px solid rgba(var(--fg-rgb),.08);border-radius:var(--r);
   padding:9px 7px;text-align:center;cursor:pointer;transition:all .15s}
-.pm.sel{border-color:var(--acc);background:rgba(59,130,246,.08)}
+.pm.sel{border-color:var(--acc);background:rgba(var(--acc-rgb),.08)}
 .pm .ico{font-size:14px;margin-bottom:3px}
 .pm-logo{height:28px;width:auto;max-width:100%;object-fit:contain;border-radius:5px;background:#fff;padding:3px 6px;box-sizing:border-box}
 .pm .lbl{font-size:10px;font-weight:600}
 .pm .sub{font-size:9px;color:var(--hint);margin-top:1px}
-.pdtl{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-radius:var(--r);
+.pdtl{background:var(--bg2);border:1px solid rgba(var(--fg-rgb),.07);border-radius:var(--r);
   padding:13px;margin-bottom:10px;line-height:1.8;font-size:12px;display:none}
 .pdtl.on{display:block}
 .pdtl strong{color:var(--teal2)}
-.mono{font-family:'SF Mono',Consolas,monospace;background:rgba(255,255,255,.08);
+.mono{font-family:'SF Mono',Consolas,monospace;background:rgba(var(--fg-rgb),.08);
   padding:2px 6px;border-radius:5px;cursor:pointer;user-select:all;transition:background .15s}
-.mono:active{background:rgba(13,148,136,.3)}
+.mono:active{background:rgba(var(--acc-rgb),.3)}
 .cg{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:10px}
-.cb{background:var(--bg2);border:2px solid rgba(255,255,255,.08);
+.cb{background:var(--bg2);border:2px solid rgba(var(--fg-rgb),.08);
   border-radius:11px;padding:9px;text-align:center;cursor:pointer;font-size:12px;transition:all .15s}
 .cb.sel{border-color:var(--acc)}
 
 /* ── Summary ─────────────────── */
 .sumrow{display:flex;justify-content:space-between;align-items:center;
-  padding:9px 13px;border-bottom:1px solid rgba(255,255,255,.05);font-size:13px}
+  padding:9px 13px;border-bottom:1px solid rgba(var(--fg-rgb),.05);font-size:13px}
 .sumrow:last-child{border-bottom:none;font-weight:700;font-size:14px}
 .sumrow .r{color:var(--teal2)}
 
@@ -257,7 +257,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   border-radius:var(--r);padding:13px;font-size:14px;font-weight:700;
   cursor:pointer;transition:opacity .15s;margin-top:8px}
 .btn:active{opacity:.82}
-.btn.sec{background:transparent;color:var(--hint);border:1.5px solid rgba(255,255,255,.12)}
+.btn.sec{background:transparent;color:var(--hint);border:1.5px solid rgba(var(--fg-rgb),.12)}
 .btn.teal{background:var(--teal)}
 
 /* ── Slide-up sheets ─────────── */
@@ -266,14 +266,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .overlay.on{display:flex}
 .sheet{background:var(--bg2);border-radius:20px 20px 0 0;width:100%;
   max-height:84vh;overflow-y:auto;padding:0 0 32px}
-.sheet-handle{width:38px;height:4px;background:rgba(255,255,255,.18);
+.sheet-handle{width:38px;height:4px;background:rgba(var(--fg-rgb),.18);
   border-radius:99px;margin:10px auto 14px}
 .sheet-title{font-size:16px;font-weight:700;padding:0 15px 11px;overflow-wrap:anywhere;
-  border-bottom:1px solid rgba(255,255,255,.07)}
+  border-bottom:1px solid rgba(var(--fg-rgb),.07)}
 
 /* Basket items */
 .ci{display:flex;align-items:center;padding:10px 15px;gap:10px;
-  border-bottom:1px solid rgba(255,255,255,.05)}
+  border-bottom:1px solid rgba(var(--fg-rgb),.05)}
 .ci-name{flex:1;font-size:13px;line-height:1.4}
 .ci-price{font-size:13px;font-weight:700;color:var(--teal2);flex-shrink:0}
 .rm{width:26px;height:26px;border-radius:50%;border:none;
@@ -286,9 +286,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 
 /* Subscription rows */
 .sub-row{display:flex;align-items:flex-start;gap:10px;padding:11px 15px;
-  border-bottom:1px solid rgba(255,255,255,.05);cursor:pointer;transition:background .12s}
+  border-bottom:1px solid rgba(var(--fg-rgb),.05);cursor:pointer;transition:background .12s}
 .sub-row:last-child{border-bottom:none}
-.sub-row:active{background:rgba(255,255,255,.04)}
+.sub-row:active{background:rgba(var(--fg-rgb),.04)}
 .sub-row.no-tap{cursor:default}
 .sub-row.no-tap:active{background:transparent}
 .sub-info{flex:1;min-width:0}
@@ -303,7 +303,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 /* Credentials detail panel */
 .cred-panel{
   display:none;padding:11px 15px 13px;
-  border-top:1px solid rgba(255,255,255,.07);
+  border-top:1px solid rgba(var(--fg-rgb),.07);
   background:rgba(0,0,0,.12);
 }
 .cred-panel.open{display:block}
@@ -312,11 +312,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .cred-text{font-family:'SF Mono',Consolas,monospace;font-size:12px;
   line-height:1.9;color:var(--text);white-space:pre-wrap;word-break:break-all}
 .cred-copy{
-  margin-top:9px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.1);
+  margin-top:9px;background:rgba(var(--fg-rgb),.08);border:1px solid rgba(var(--fg-rgb),.1);
   border-radius:8px;padding:7px 14px;font-size:12px;font-weight:600;
   color:var(--teal2);cursor:pointer;width:100%;transition:background .15s;
 }
-.cred-copy:active{background:rgba(13,148,136,.2)}
+.cred-copy:active{background:rgba(var(--acc-rgb),.2)}
 
 /* Pending action button */
 .pend-action{
@@ -326,13 +326,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 }
 .pend-action:active{opacity:.82}
 .pend-action.teal{background:var(--teal)}
-.tk-btn{display:block;width:100%;padding:9px 12px;border-radius:10px;border:1.5px solid rgba(255,255,255,.14);background:transparent;
+.tk-btn{display:block;width:100%;padding:9px 12px;border-radius:10px;border:1.5px solid rgba(var(--fg-rgb),.14);background:transparent;
   color:var(--hint);font-size:12.5px;font-weight:700;cursor:pointer;text-align:center}
 .tk-btn:active{opacity:.8}
 
 /* ── Bottom tab bar ───────────── */
 .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:160;display:flex;background:var(--bg2);
-  border-top:1px solid rgba(255,255,255,.1);padding-bottom:env(safe-area-inset-bottom,0px)}
+  border-top:1px solid rgba(var(--fg-rgb),.1);padding-bottom:env(safe-area-inset-bottom,0px)}
 .tabbar .tb{flex:1;min-width:0;height:58px;background:none;border:none;color:var(--hint);cursor:pointer;
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
   font-size:10px;font-weight:600;line-height:1.1;text-align:center;padding:0 2px;position:relative}
@@ -346,7 +346,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .tabbar .tb .tb-dot.vis{display:block}
 .contact-row .ci-dot{width:10px;height:10px;border-radius:50%;background:var(--red);flex-shrink:0;display:none}
 .contact-row .ci-dot.vis{display:block}
-.t-card{background:var(--bg2);border:1px solid rgba(255,255,255,.08);border-radius:var(--r);padding:12px 13px;margin-bottom:9px}
+.t-card{background:var(--bg2);border:1px solid rgba(var(--fg-rgb),.08);border-radius:var(--r);padding:12px 13px;margin-bottom:9px}
 .t-top{display:flex;align-items:flex-start;gap:10px}
 .t-title{flex:1;min-width:0;font-size:13px;font-weight:600;overflow-wrap:anywhere}
 .t-pill{font-size:11px;font-weight:700;padding:3px 9px;border-radius:99px;white-space:nowrap;flex-shrink:0}
@@ -355,38 +355,38 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .t-pill.new{background:rgba(239,68,68,.16);color:#f87171}
 .t-meta{font-size:11px;color:var(--hint);margin-top:3px}
 .t-body{font-size:12.5px;line-height:1.55;margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere}
-.t-answer{margin-top:8px;padding:9px 11px;border-radius:10px;background:rgba(13,148,136,.12);border:1px solid rgba(13,148,136,.3);font-size:12.5px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.t-answer{margin-top:8px;padding:9px 11px;border-radius:10px;background:rgba(var(--acc-rgb),.12);border:1px solid rgba(var(--acc-rgb),.3);font-size:12.5px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
 .via{display:inline-block;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:99px;margin:0 5px 0 0;white-space:nowrap}
-.via.direct{background:rgba(255,255,255,.08);color:var(--hint)}
-.via.cw{background:rgba(13,148,136,.2);color:var(--teal2)}
+.via.direct{background:rgba(var(--fg-rgb),.08);color:var(--hint)}
+.via.cw{background:rgba(var(--acc-rgb),.2);color:var(--teal2)}
 .via.owed{background:rgba(245,158,11,.16);color:#fbbf24}
 .via.ok{background:rgba(34,197,94,.15);color:#4ade80}
 .fld-list{margin-top:8px;display:flex;flex-direction:column;gap:5px}
-.fld{display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:8px 10px;border-radius:9px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.03);color:var(--text);font-size:12.5px;cursor:pointer}
-.fld:active{background:rgba(13,148,136,.18)}
+.fld{display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:8px 10px;border-radius:9px;border:1px solid rgba(var(--fg-rgb),.1);background:rgba(var(--fg-rgb),.03);color:var(--text);font-size:12.5px;cursor:pointer}
+.fld:active{background:rgba(var(--acc-rgb),.18)}
 .fld-l{flex-shrink:0;color:var(--hint);font-size:11px;min-width:64px}
 .fld-v{flex:1;min-width:0;overflow-wrap:anywhere;font-weight:600}
 .fld-c{flex-shrink:0;font-size:13px;opacity:.7}
-.seg{display:flex;gap:4px;padding:3px;margin:0 0 10px;border-radius:12px;background:rgba(255,255,255,.06)}
+.seg{display:flex;gap:4px;padding:3px;margin:0 0 10px;border-radius:12px;background:rgba(var(--fg-rgb),.06)}
 .seg button{flex:1;padding:8px 6px;border:0;border-radius:9px;background:transparent;color:var(--hint);font-size:12.5px;font-weight:700;cursor:pointer}
 .seg button.on{background:var(--teal);color:#fff}
 .pool-hd{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:14px 0 6px;font-size:13px;font-weight:700}
-.code-chip{display:flex;align-items:center;gap:8px;padding:7px 8px 7px 11px;margin-bottom:5px;border-radius:9px;border:1px solid rgba(255,255,255,.1);font-size:12.5px;font-family:ui-monospace,Menlo,monospace}
+.code-chip{display:flex;align-items:center;gap:8px;padding:7px 8px 7px 11px;margin-bottom:5px;border-radius:9px;border:1px solid rgba(var(--fg-rgb),.1);font-size:12.5px;font-family:ui-monospace,Menlo,monospace}
 .code-chip span{flex:1;min-width:0;overflow-wrap:anywhere}
 .code-chip button{border:0;background:transparent;color:#f87171;font-size:16px;padding:2px 6px;cursor:pointer}
 .code-chip.bad span{color:#f87171}
-.ref-balance{text-align:center;padding:14px;border-radius:var(--r);background:rgba(13,148,136,.12);border:1px solid rgba(13,148,136,.3);margin-bottom:12px}
+.ref-balance{text-align:center;padding:14px;border-radius:var(--r);background:rgba(var(--acc-rgb),.12);border:1px solid rgba(var(--acc-rgb),.3);margin-bottom:12px}
 .ref-balance .n{font-size:30px;font-weight:800;color:var(--teal2);line-height:1.1}
 .ref-link{display:block;width:100%;padding:11px 12px;border-radius:10px;border:1.5px solid var(--field-border);background:transparent;color:var(--text);font-size:12.5px;overflow-wrap:anywhere;text-align:left;user-select:all}
 body.in-checkout .tabbar{display:none}
 body.in-checkout{padding-bottom:100px}
 /* Request a book */
 .book-btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin:10px 0 2px;padding:11px;
-  border:1.5px solid rgba(45,212,191,.45);border-radius:12px;background:rgba(13,148,136,.1);color:var(--teal2);
+  border:1.5px solid rgba(var(--acc2-rgb),.45);border-radius:12px;background:rgba(var(--acc-rgb),.1);color:var(--teal2);
   font-size:13px;font-weight:700;cursor:pointer}
 /* Contact us */
 .contact-row{display:flex;align-items:center;gap:13px;width:100%;text-align:left;margin-bottom:9px;padding:14px;
-  background:var(--bg2);border:1px solid rgba(255,255,255,.08);border-radius:var(--r);color:var(--text);cursor:pointer}
+  background:var(--bg2);border:1px solid rgba(var(--fg-rgb),.08);border-radius:var(--r);color:var(--text);cursor:pointer}
 .contact-row .ci-i{font-size:24px;flex-shrink:0}
 .contact-row .ci-t{flex:1;min-width:0}
 .contact-row .ci-n{font-size:14px;font-weight:700}
@@ -396,10 +396,66 @@ body.in-checkout{padding-bottom:100px}
 /* ── Toast ───────────────────── */
 .toast{position:fixed;bottom:calc(var(--tabh) + 14px);left:50%;
   transform:translateX(-50%) translateY(calc(var(--tabh) + 100px));
-  background:rgba(13,148,136,.92);color:#fff;padding:8px 15px;
+  background:rgba(var(--acc-rgb),.92);color:#fff;padding:8px 15px;
   border-radius:99px;font-size:12px;font-weight:600;white-space:nowrap;
   transition:transform .25s cubic-bezier(.34,1.56,.64,1);z-index:999;pointer-events:none}
 .toast.on{transform:translateX(-50%) translateY(0)}
+/* ══ Restyle (Nov 2026): shared layout and navigation ══ */
+:root{--fg-rgb:255,255,255;--acc-rgb:13,148,136;--acc2-rgb:45,212,191}
+:root[data-theme="light"]{--fg-rgb:0,0,0}
+body{-webkit-font-smoothing:antialiased;letter-spacing:-.005em}
+/* categories: logo tiles instead of two rows of pills */
+#tabs,#tabsMore{display:grid;gap:8px;overflow:visible;padding:12px 0 0}
+#tabs{grid-template-columns:repeat(3,1fr)}
+#tabsMore{grid-template-columns:1fr 1fr;padding-top:8px}
+#tabs .tab{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px 6px 10px;font-size:13px;line-height:1.1}
+#tabs .tab-logo{height:34px;vertical-align:0}
+#tabsMore .tab{display:flex;align-items:center;justify-content:center;gap:6px;padding:11px 8px;font-size:13px}
+#catLanding{padding:22px 16px 6px}
+#catLanding img{max-width:150px;width:42%}
+.landing-hint{margin-bottom:14px}
+/* Request a Book: a quieter row, so the categories come first */
+.book-btn{margin:10px 0 0;padding:10px;font-size:12.5px}
+/* the toast sits above the checkout bar instead of on its button */
+body:has(.floating-checkout.vis) .toast{bottom:calc(var(--tabh) + 86px)}
+.sheet-handle{width:42px;height:5px}
+.sheet{border-radius:24px 24px 0 0}
+.overlay{backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+.tabbar .tb .tb-i{font-size:21px}
+.toast{opacity:0;transition:transform .25s cubic-bezier(.34,1.56,.64,1),opacity .2s}
+.toast.on{opacity:1}
+
+/* ══ Option A · Fresh Clinic: one teal colour, soft raised cards ══ */
+:root{--acc:#0d9488;--atxt:#fff;--teal:#0d9488;--teal2:#14b8a6;--acc-rgb:13,148,136;--acc2-rgb:20,184,166;--r:18px;
+  --card-sh:0 1px 2px rgba(0,0,0,.18),0 6px 18px rgba(0,0,0,.14)}
+:root[data-theme="light"]{--teal2:#0f766e;--acc2-rgb:15,118,110;--card-sh:0 1px 2px rgba(15,23,42,.06),0 6px 18px rgba(15,23,42,.07)}
+.hdr{background:var(--bg);border-bottom:none;box-shadow:0 1px 0 rgba(var(--fg-rgb),.06)}
+.logo{border-radius:12px}
+.hdr-title h1{font-size:16px;font-weight:800}
+.ico-btn{border-radius:14px}
+.ico-btn.acc{background:linear-gradient(135deg,#0d9488,#0891b2);box-shadow:0 4px 14px rgba(13,148,136,.35)}
+.credits-btn{border-radius:14px;border:none;background:rgba(var(--acc-rgb),.14)}
+.search-wrap input{border-radius:16px;border:1.5px solid transparent;background:var(--bg2);padding:13px 36px;box-shadow:var(--card-sh)}
+.card,.solo,.dblock,.contact-row,.t-card,.pm,.cb,.pdtl{border:none;box-shadow:var(--card-sh)}
+.tab{border:none;background:var(--bg2);color:var(--text);box-shadow:var(--card-sh);border-radius:16px}
+.tab.active{background:rgba(var(--acc-rgb),.16);color:var(--teal2);box-shadow:inset 0 0 0 2px var(--teal)}
+.book-btn{border:none;background:transparent;text-decoration:underline;text-underline-offset:3px}
+.imd-whatsin{border:none;background:linear-gradient(135deg,rgba(var(--acc-rgb),.16),rgba(8,145,178,.12))}
+.add-btn{width:32px;height:32px;background:var(--teal);box-shadow:0 3px 10px rgba(13,148,136,.35)}
+.add-btn.in{background:#16a34a}
+.btn{border-radius:16px;padding:15px;background:linear-gradient(135deg,#0d9488,#0891b2);box-shadow:0 6px 18px rgba(13,148,136,.28)}
+.btn.sec{background:transparent;box-shadow:none}
+.pm.sel{border-color:var(--teal);box-shadow:0 0 0 2px var(--teal)}
+.tbtn.active,.seg button.on{background:var(--teal)}
+.floating-checkout{margin:0 10px 8px;border-radius:20px;left:0;right:0;border:none;box-shadow:0 10px 30px rgba(0,0,0,.28)}
+.tabbar{background:var(--bg);border-top:none;box-shadow:0 -1px 0 rgba(var(--fg-rgb),.07)}
+.tabbar .tb.on::before{left:50%;right:auto;width:56px;height:32px;top:6px;transform:translateX(-50%);border-radius:16px;background:rgba(var(--acc-rgb),.16);z-index:-1}
+.tabbar .tb{isolation:isolate}
+.sl{color:var(--teal2);opacity:.9}
+
+:root[data-theme="light"] .t-pill.ok,:root[data-theme="light"] .via.ok{color:#15803d}
+:root[data-theme="light"] .t-pill.open,:root[data-theme="light"] .via.owed{color:#b45309}
+:root[data-theme="light"] .t-pill.new{color:#dc2626}
 </style>
 </head>
 <body>
@@ -513,7 +569,7 @@ body.in-checkout{padding-bottom:100px}
 <!-- Page 2: Details -->
 <div class="page" id="p2">
   <div class="sl">Account Details</div>
-  <div id="detNotice" style="background:rgba(13,148,136,.12);border:1px solid rgba(13,148,136,.3);
+  <div id="detNotice" style="background:rgba(var(--acc-rgb),.12);border:1px solid rgba(var(--acc-rgb),.3);
     border-radius:12px;padding:11px 13px;margin-bottom:12px;font-size:12px;
     line-height:1.6;color:var(--text)">
     ℹ️ These credentials will be used to register your account after your payment is confirmed.
@@ -527,9 +583,9 @@ body.in-checkout{padding-bottom:100px}
 <!-- Page 3: Payment -->
 <div class="page" id="p3">
   <div class="sl" id="payTitle">Choose Payment Method</div>
-  <div id="discountBox" style="background:var(--bg2);border:1px solid rgba(255,255,255,.08);border-radius:var(--r);padding:10px 12px;margin-bottom:12px">
+  <div id="discountBox" style="background:var(--bg2);border:1px solid rgba(var(--fg-rgb),.08);border-radius:var(--r);padding:10px 12px;margin-bottom:12px">
     <div style="display:flex;gap:8px">
-      <input id="discountInput" type="text" placeholder="Discount code (optional)" style="flex:1;background:transparent;border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:8px 10px;color:var(--text);font-size:13px">
+      <input id="discountInput" type="text" placeholder="Discount code (optional)" style="flex:1;background:transparent;border:1px solid rgba(var(--fg-rgb),.15);border-radius:8px;padding:8px 10px;color:var(--text);font-size:13px">
       <button class="btn" style="width:auto;padding:8px 14px;font-size:13px" onclick="applyDiscountCode()">Apply</button>
     </div>
     <div id="discountMsg" style="font-size:12px;margin-top:6px"></div>
@@ -631,7 +687,7 @@ body.in-checkout{padding-bottom:100px}
       <div id="cwPriceMsg" style="font-size:12px;margin-top:6px;min-height:16px"></div>
       <button class="btn" id="cwPriceSave" onclick="saveCwPrice(false)">Save</button>
       <button class="btn sec" id="cwPriceReset" style="margin-top:8px" onclick="saveCwPrice(true)">↩️ Use their default price</button>
-      <div id="cwDeleteBox" style="display:none;margin-top:14px;padding-top:12px;border-top:1px solid rgba(255,255,255,.08)">
+      <div id="cwDeleteBox" style="display:none;margin-top:14px;padding-top:12px;border-top:1px solid rgba(var(--fg-rgb),.08)">
         <button class="btn sec cw-danger" id="cwDelDur" type="button" onclick="deleteItems(false)">🗑 Delete this subscription</button>
         <button class="btn sec cw-danger" id="cwDelAll" type="button" style="margin-top:8px;display:none" onclick="deleteItems(true)">🗑 Delete all its durations</button>
       </div>
@@ -816,7 +872,7 @@ tg.ready(); tg.expand();
 // setHeaderColor needs Bot API 6.1+ — on an older Telegram client it's
 // missing entirely, and calling it unguarded would throw here and halt
 // this whole script before the catalog/ads/search below ever run.
-try { tg.setHeaderColor && tg.setHeaderColor('secondary_bg_color'); } catch(e) {}
+try { tg.setHeaderColor && tg.setHeaderColor('bg_color'); } catch(e) {}
 
 // Drives --field-border (see :root[data-theme="light"] above): black
 // outline on Telegram's light theme, white on dark — tg.colorScheme is
@@ -1393,7 +1449,7 @@ function renderOrders(){
       <div class="eico">📋</div>
       <div style="margin-bottom:4px;font-size:14px;font-weight:600;color:var(--text)">Subscription data not loaded</div>
       <div style="font-size:12px;line-height:1.7;margin-bottom:18px">
-        Send <code style="background:rgba(255,255,255,.1);padding:2px 6px;border-radius:5px">/start</code>
+        Send <code style="background:rgba(var(--fg-rgb),.1);padding:2px 6px;border-radius:5px">/start</code>
         in the bot chat to refresh, then reopen the Shop and come back here.
         <br><br>Or tap below to load your subscriptions in the chat right now:
       </div>
@@ -1479,7 +1535,7 @@ function renderPending(){
     el.innerHTML=`<div class="empty-sheet">
       <div class="eico">⏳</div>
       <div style="margin-bottom:4px;font-size:14px;font-weight:600;color:var(--text)">Order data not loaded</div>
-      <div style="font-size:12px;line-height:1.7">Send <code style="background:rgba(255,255,255,.1);padding:2px 6px;border-radius:5px">/start</code> in the bot chat to refresh, then reopen the Shop.</div>
+      <div style="font-size:12px;line-height:1.7">Send <code style="background:rgba(var(--fg-rgb),.1);padding:2px 6px;border-radius:5px">/start</code> in the bot chat to refresh, then reopen the Shop.</div>
     </div>`;
     return;
   }
@@ -2293,7 +2349,7 @@ async function drawCoworkerStats(id,period,tab){
     const d=await apiGet('/api/admin_coworker_stats?id='+id+'&period='+cwStatsPeriod);
     document.getElementById('cwmTitle').textContent='📊 '+d.name;
     const seg=[['today','Today'],['week','Week'],['month','Month'],['overall','Overall']].map(x=>'<button class="'+(cwStatsPeriod===x[0]?'on':'')+'" onclick="drawCoworkerStats('+id+',\''+x[0]+'\')">'+x[1]+'</button>').join('');
-    const stat=(label,val)=>'<div style="flex:1;min-width:0;padding:10px;border-radius:12px;background:rgba(255,255,255,.05);text-align:center"><div style="font-size:11px;color:var(--hint)">'+label+'</div><div style="font-size:16px;font-weight:800;margin-top:2px">'+val+'</div></div>';
+    const stat=(label,val)=>'<div style="flex:1;min-width:0;padding:10px;border-radius:12px;background:rgba(var(--fg-rgb),.05);text-align:center"><div style="font-size:11px;color:var(--hint)">'+label+'</div><div style="font-size:16px;font-weight:800;margin-top:2px">'+val+'</div></div>';
     el.innerHTML=cwTabs(id,cw)+'<div class="seg">'+seg+'</div>'+
       '<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">Bought · '+escHtml(d.label)+'</div><div class="n">'+money(d.revenue)+'</div><div style="font-size:12px;color:var(--hint);margin-top:2px">'+d.accounts+' account'+(d.accounts===1?'':'s')+' · '+d.orders+' order'+(d.orders===1?'':'s')+(d.orders?' · avg '+money(d.avg_order):'')+'</div></div>'+
       '<div style="display:flex;gap:8px;margin-bottom:10px">'+stat('Costs',money(d.costs))+stat('Profit',money(d.profit))+stat('Pending',d.pending)+'</div>'+
@@ -2371,7 +2427,7 @@ async function drawCoworkerLedger(id,state){
       body='<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">To be paid by '+escHtml(d.name)+'</div><div class="n">'+money(d.owed_total)+'</div><div style="font-size:12px;color:var(--hint);margin-top:2px">'+d.owed_orders+' delivered order'+(d.owed_orders===1?'':'s')+'</div></div>'+
         '<div style="display:flex;gap:8px;margin-bottom:8px"><button class="tk-btn" style="flex:1;width:auto" onclick="toggleUnpaidReport()">📄 Show unpaid report</button>'+
         '<button class="btn" style="margin:0;flex:1;width:auto;padding:9px" '+(d.owed_orders?'':'disabled ')+'onclick="markAllPaid('+id+','+d.owed_orders+','+d.owed_total+')">✅ Mark all as paid</button></div>'+
-        '<div id="cwReport" style="display:none;margin-bottom:10px"><pre id="cwReportText" style="white-space:pre-wrap;overflow-wrap:anywhere;margin:0 0 6px;padding:11px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.12);font-size:12.5px;line-height:1.5;font-family:inherit">'+escHtml(d.report)+'</pre>'+
+        '<div id="cwReport" style="display:none;margin-bottom:10px"><pre id="cwReportText" style="white-space:pre-wrap;overflow-wrap:anywhere;margin:0 0 6px;padding:11px 12px;border-radius:10px;border:1px solid rgba(var(--fg-rgb),.12);font-size:12.5px;line-height:1.5;font-family:inherit">'+escHtml(d.report)+'</pre>'+
         '<button class="tk-btn" onclick="copyText(document.getElementById(\'cwReportText\').textContent,\'Report copied\')">📋 Copy report</button></div>'+
         (d.waiting_orders?'<div class="t-meta" style="margin:0 0 6px">⏳ '+d.waiting_orders+' order'+(d.waiting_orders===1?'':'s')+' ('+money(d.waiting_total)+') still being delivered — they become payable once everything is delivered.</div>':'')+
         (d.items.length?d.items.map(order).join(''):'<div class="empty-sheet"><div class="eico">✅</div>No unpaid orders.</div>');
@@ -3760,7 +3816,7 @@ if (SUBS_DATA && SUBS_DATA.oos && SUBS_DATA.oos.length) {
     if (btn) {
       btn.disabled = true;
       btn.textContent = '✕';
-      btn.style.background = 'rgba(255,255,255,.15)';
+      btn.style.background = 'rgba(var(--fg-rgb),.15)';
       btn.style.cursor = 'not-allowed';
       btn.onclick = (e) => { e.stopPropagation(); showToast('Out of stock'); };
     }
