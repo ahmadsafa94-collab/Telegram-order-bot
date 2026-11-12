@@ -490,6 +490,8 @@ body:has(.floating-checkout.vis) .az-strip{bottom:calc(var(--tabh) + 86px)}
 .panel-row .az-av{display:none}   /* the letter heading above says it already */
 .solo.panel-row{padding:11px 13px}
 body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on short categories */
+.stats-btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin:0 0 10px;padding:11px;border:none;
+  border-radius:14px;background:rgba(var(--acc-rgb),.14);color:var(--teal2);font-size:13.5px;font-weight:700;cursor:pointer}
 </style>
 </head>
 <body>
@@ -541,6 +543,7 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
 
 <!-- Tab: My Subscriptions (delivered) -->
 <div class="page" id="pSubs">
+  <button class="stats-btn" id="statsBtn" style="display:none" onclick="openPurchaseHistory()">📊 Statistics</button>
   <div class="search-wrap" style="margin:0 0 10px">
     <span class="search-ico">🔍</span>
     <input id="subsSearchInput" style="border:1.5px solid var(--field-border)" type="text" placeholder="Search order #, name, username, password" oninput="subsSearchInput(this.value)">
@@ -771,7 +774,7 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
 <div class="overlay" id="historyOverlay" onclick="if(event.target===this)closePurchaseHistory()">
   <div class="sheet">
     <div class="sheet-handle"></div>
-    <div class="sheet-title">📊 Purchase History</div>
+    <div class="sheet-title" id="historyTitle">📊 Purchase History</div>
     <div id="historyContent" style="padding:0 15px 15px"></div>
   </div>
 </div>
@@ -1792,6 +1795,13 @@ if(ADMIN_EDIT){
 if(IS_COWORKER){
   document.querySelector('.credits-btn').style.display='none';
   document.getElementById('freeRow').style.display='none';
+  // Coworkers (12 Nov 2026): Pending Orders comes first, then "Delivered Orders" (was My Subscriptions)
+  // with a 📊 Statistics button; the 📦 My Orders header button is gone.
+  const bar=document.getElementById('tabbar');
+  bar.insertBefore(bar.querySelector('.tb[data-tab=pending]'), bar.querySelector('.tb[data-tab=subs]'));
+  document.querySelector('.tb[data-tab=subs] span:nth-child(2)').textContent='Delivered Orders';
+  document.getElementById('statsBtn').style.display='';
+  document.getElementById('historyTitle').textContent='📊 Statistics';
 }
 
 // ── Basket sheet ──────────────────────────────────────────────────────
@@ -1826,7 +1836,7 @@ function showPage(id){
 }
 // ── Bottom tabs ───────────────────────────────────────────────────────
 const TAB_PAGES={catalog:'p1',subs:'pSubs',pending:'pPending',contact:'pContact'};
-const TAB_TITLES={catalog:'Medic SalesBot',subs:ADMIN_EDIT?'Delivered Subscriptions':'My Subscriptions',pending:'Pending Orders',contact:'Support'};
+const TAB_TITLES={catalog:'Medic SalesBot',subs:ADMIN_EDIT?'Delivered Subscriptions':(IS_COWORKER?'Delivered Orders':'My Subscriptions'),pending:'Pending Orders',contact:'Support'};
 function switchTab(name){
   if(!TAB_PAGES[name]) name='catalog';
   showPage(TAB_PAGES[name]);
@@ -3328,8 +3338,23 @@ async function openPurchaseHistory(){
     }
     const row=(label,bucket)=>'<div class="sumrow"><div>'+label+'</div><div class="r">'+
       bucket.count+' order'+(bucket.count!==1?'s':'')+' · $'+bucket.total.toFixed(2)+'</div></div>';
-    content.innerHTML = row('Today', data.day) + row('This Month', data.month) +
+    const sales = row('Today', data.day) + row('This Month', data.month) +
       row('This Year', data.year) + row('Lifetime', data.lifetime);
+    if(!data.postpaid){ content.innerHTML = sales; return; }
+    // Postpaid coworker: a second tab with what is still unpaid; orders leave it once the admin marks them paid.
+    const pp=data.postpaid, money=n=>'$'+Number(n||0).toFixed(2);
+    const list=pp.items.map(o=>`<div class="t-card"><div class="t-top"><div class="t-title">Order #${o.id} · ${escHtml(o.items)}</div>
+        <span class="t-pill ${o.delivered?'open':'new'}">${o.delivered?'Unpaid':'Being delivered'}</span></div>
+        <div class="t-meta">${escHtml(o.date)} · ${money(o.total)}</div></div>`).join('');
+    const unpaid = `<div class="ref-balance"><div class="t-meta">Unpaid</div><div class="n">${money(pp.owed_total)}</div>
+        <div class="t-meta">${pp.owed_orders} delivered order${pp.owed_orders===1?'':'s'} to pay</div></div>`
+      + (pp.waiting_orders?`<div class="t-meta" style="margin:-4px 0 10px;text-align:center">+ ${money(pp.waiting_total)} for ${pp.waiting_orders} order${pp.waiting_orders===1?'':'s'} still being delivered</div>`:'')
+      + (list||'<div class="search-empty">Nothing to pay. ✅</div>');
+    content.innerHTML = `<div class="seg" id="statsSeg" style="margin-top:12px"><button class="on" data-v="sales">Sales</button><button data-v="unpaid">Unpaid · ${money(pp.owed_total)}</button></div><div id="statsBody">${sales}</div>`;
+    content.querySelectorAll('#statsSeg button').forEach(b=>b.onclick=()=>{
+      content.querySelectorAll('#statsSeg button').forEach(x=>x.classList.toggle('on',x===b));
+      document.getElementById('statsBody').innerHTML = b.dataset.v==='unpaid' ? unpaid : sales;
+    });
   }catch(e){
     content.innerHTML='<div class="search-empty">Could not load your history: '+escHtml(e.message||String(e))+'</div>';
   }
@@ -3943,10 +3968,8 @@ if (_qs.get('open') === 'imdsearch') {
 document.getElementById('landingImg').src=LOGOS.landing;
 document.getElementById('headerLogo').src=LOGOS.landing;
 
-// My Orders is a coworker-only feature — hidden for regular customers.
-if (SUBS_DATA && SUBS_DATA.cwid) {
-  document.getElementById('myOrdersBtn').style.display='';
-}
+// The 📦 My Orders header button stays hidden: coworkers have Pending Orders and Delivered Orders
+// (with 📊 Statistics) in the tab bar instead (12 Nov 2026).
 
 // Mark out-of-stock built-in items (from oos list in SUBS_DATA)
 if (SUBS_DATA && SUBS_DATA.oos && SUBS_DATA.oos.length) {

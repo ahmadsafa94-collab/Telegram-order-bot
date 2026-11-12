@@ -12827,6 +12827,19 @@ async def http_my_purchase_history(request):
         db_coworker_purchase_history(coworker_id) if coworker_id
         else db_user_purchase_history(user_id)
     )
+    # A postpaid coworker also sees what they still owe (the "Unpaid" tab of their statistics): the
+    # same orders as the admin's ledger, gone once the admin marks them as paid (12 Nov 2026).
+    if coworker_id and db_get_coworker_mode(coworker_id) == "postpaid":
+        unpaid = [o for o in _ledger_orders(coworker_id) if not o["settled"]]
+        names = lambda o: ", ".join(f"{q} × {MENU.get(i, (i,))[0]}" for i, q in o["items"].items())[:160]
+        billable = [o for o in unpaid if o["delivered"]]
+        waiting = [o for o in unpaid if not o["delivered"]]
+        history["postpaid"] = {
+            "owed_total": round(sum(o["total"] for o in billable), 2), "owed_orders": len(billable),
+            "waiting_total": round(sum(o["total"] for o in waiting), 2), "waiting_orders": len(waiting),
+            "items": [{"id": o["id"], "date": o["date"], "total": o["total"], "items": names(o),
+                       "delivered": o["delivered"]} for o in billable + waiting],
+        }
     return web.json_response(history, headers=_imd_search_cors_headers())
 
 
