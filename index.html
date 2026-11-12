@@ -468,6 +468,7 @@ body:has(.floating-checkout.vis) .toast{bottom:calc(var(--tabh) + 86px)}
 /* with a sheet open (basket, payment …) messages show at the top, clear of the sheet's buttons */
 body:has(.overlay.on) .toast{bottom:auto;top:calc(env(safe-area-inset-top,0px) + 12px);transform:translateX(-50%) translateY(-120px)}
 body:has(.overlay.on) .toast.on{transform:translateX(-50%) translateY(0)}
+#catSec>div>.sl:first-child{margin-top:14px}   /* space between the category tiles and the first heading */
 </style>
 </head>
 <body>
@@ -2817,7 +2818,16 @@ function switchCat(id){
   CATALOG.forEach(c=>{const el=document.getElementById('cat-'+c.id); if(el) el.style.display='none';});
   document.querySelectorAll('.tabs .tab').forEach(t=>t.classList.toggle('active',t.dataset.catid===id));
   const el=document.getElementById('cat-'+id); if(el) el.style.display='block';
-  window.scrollTo(0,0);
+  scrollToCategories();
+}
+// After a category is picked, scroll so the category tiles sit just under the header and the
+// first subscriptions show below them (it used to jump to the very top, under the banner).
+// Instant, not smooth: an ad's goToItem scrolls again right after this.
+function scrollToCategories(){
+  const tiles=document.getElementById('tabs'), hdr=document.querySelector('.hdr');
+  if(!tiles){ window.scrollTo(0,0); return; }
+  const y=tiles.getBoundingClientRect().top+window.scrollY-(hdr?hdr.offsetHeight:0)-8;
+  window.scrollTo(0,Math.max(0,y));
 }
 
 // ── Orders tab ───────────────────────────────────────────────────────
