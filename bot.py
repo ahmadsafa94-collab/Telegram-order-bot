@@ -1492,6 +1492,16 @@ def db_add_fulfilment_items(order_id: int, user_id: int, items: dict):
     conn.close()
 
 
+def db_order_needs_details(order_id: int) -> bool:
+    """Will the customer still have to send account details for this order? True when a unit
+    is waiting for them, or when the order has no units yet (an order made by the support
+    chatbot gets them, all waiting for details, once its payment is approved)."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT state FROM fulfilment WHERE order_id = ?", (order_id,)).fetchall()
+    conn.close()
+    return not rows or any(state == "needs_info" for (state,) in rows)
+
+
 def db_next_needs_info(order_id: int):
     """The next unit in this order still waiting on customer details.
     Returns (fulfilment_id, item_id) or None. iMD units come first
@@ -10426,7 +10436,8 @@ async def http_submit_receipt(request):
     if status not in ("awaiting_payment", "awaiting_receipt"):
         return web.json_response(
             {"error": "this order isn't waiting for a payment", "status": status,
-             "status_meaning": ORDER_STATUS_MEANINGS.get(status, status)},
+             "status_meaning": ORDER_STATUS_MEANINGS.get(status, status),
+             "needs_details": db_order_needs_details(order_id)},
             status=409,
         )
 
@@ -10479,7 +10490,10 @@ async def http_submit_receipt(request):
     _record_receipt_submission(order_id, items, payer_name)
     context = CallbackContext(application, chat_id=user_id, user_id=user_id)
     application.create_task(_verify_submitted_receipts(context, order, items, payer_name))
-    return web.json_response({"ok": True, "order_id": order_id, "status": "awaiting_confirmation"})
+    # needs_details: the support chatbot tells the customer the shop bot will ask for their
+    # account details after the payment is confirmed, instead of "nothing else to do".
+    return web.json_response({"ok": True, "order_id": order_id, "status": "awaiting_confirmation",
+                              "needs_details": db_order_needs_details(order_id)})
 
 
 # Payment-method values an order can be created with via /api/create_order:
