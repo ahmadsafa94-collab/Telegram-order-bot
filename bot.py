@@ -10857,6 +10857,126 @@ def _clean_register_info(kind: str, info: dict):
     return clean, None
 
 
+# ── The support chatbot corrects account details a customer submitted (12 Nov 2026) ──
+# What a customer may call a field → the keys it can be stored under (first one present wins).
+EDIT_FIELD_KEYS = {
+    "email": ["email", "login_username"],
+    "username": ["username", "login_username", "prev_username"],
+    "password": ["password", "login_password"],
+    "first_name": ["first_name"], "last_name": ["last_name"],
+    "prev_username": ["prev_username"], "login_username": ["login_username"], "login_password": ["login_password"],
+}
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
+
+
+def _edit_problem(kind: str, info: dict, key: str, value: str):
+    """Why `value` can't be stored under `key` for this unit (None when it can). Same rules as the forms."""
+    if not value:
+        return "the new value is empty"
+    if key == "email" and not _EMAIL_RE.match(value):
+        return f"“{value}” isn't an email address"
+    if info.get("account_type") == "new" and kind == "generic":
+        if key == "username":
+            problem = validate_generic_username(value)
+            return re.split(r"\s*Please choose", problem)[0].strip() if problem else None
+        if key == "password":
+            problem = validate_generic_password(value)
+            return re.split(r"\s*Please choose", problem)[0].strip() if problem else None
+    if kind == "imd" and key == "username" and re.search(r"\s", value):
+        return "the username can't contain spaces"
+    return None
+
+
+async def http_edit_order_details(request):
+    """The support chatbot corrects account details the customer submitted for one of THEIR orders (a typo in the
+    email, a different username), when the customer asked for it or confirmed the exact new value. Only items not
+    delivered yet; only fields the item already has. The admin is told what changed. X-Api-Key protected.
+
+    JSON {user_id, order_id, item?: product id or part of its name, unit?: unit number, changes: {field: value}}."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        body = await request.json()
+        user_id = int(body["user_id"])
+        order_id = int(str(body["order_id"]).lstrip("#"))
+        wanted = str(body.get("item") or "").strip().lower()
+        unit_no = int(body["unit"]) if body.get("unit") not in (None, "") else None
+        changes = {str(k).strip().lower(): str(v).strip() for k, v in (body.get("changes") or {}).items()}
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return web.json_response({"error": "invalid request body"}, status=400)
+    unknown = [k for k in changes if k not in EDIT_FIELD_KEYS]
+    if not changes or unknown:
+        return web.json_response({"error": "nothing to change" if not changes else f"can't change {', '.join(unknown)}",
+                                  "fields": sorted(EDIT_FIELD_KEYS)}, status=400)
+    order = db_get_order(order_id)
+    if not order or order[1] != user_id:
+        return web.json_response({"error": f"order #{order_id} isn't this customer's"}, status=404)
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT id, item_id, unit_no, state, info_json FROM fulfilment WHERE order_id = ? ORDER BY id",
+                        (order_id,)).fetchall()
+    conn.close()
+    units = []
+    for fid, item_id, no, state, info_json in rows:
+        try:
+            info = json.loads(info_json) if info_json else {}
+        except ValueError:
+            info = {}
+        name = MENU.get(item_id, (item_id,))[0]
+        if wanted and wanted != item_id.lower() and wanted not in name.lower():
+            continue
+        if unit_no is not None and no != unit_no:
+            continue
+        units.append({"id": fid, "item_id": item_id, "name": name, "unit_no": no, "state": state,
+                      "info": info if isinstance(info, dict) else {}})
+    open_units = [u for u in units if u["state"] != "delivered" and u["info"]]
+    if not open_units:
+        delivered = bool(units) and all(u["state"] == "delivered" for u in units)
+        return web.json_response(
+            {"error": (f"order #{order_id} is already delivered, so its details can't be changed here" if delivered
+                       else f"order #{order_id} has no submitted details to change" + (" for that product" if wanted else "")),
+             "delivered": delivered}, status=409)
+    if len(open_units) > 1:
+        return web.json_response(
+            {"error": f"order #{order_id} has {len(open_units)} items with details; say which one (item and unit)",
+             "units": [{"item": u["name"], "unit": u["unit_no"]} for u in open_units]}, status=409)
+    unit = open_units[0]
+    info, kind = dict(unit["info"]), _register_kind(unit["item_id"]) or "generic"
+    def label(k):
+        shown = fulfilment_info_fields(json.dumps({k: "x"}))
+        return shown[0][0] if shown else k
+    changed = []
+    for field, value in changes.items():
+        key = next((k for k in EDIT_FIELD_KEYS[field] if k in info), None)
+        if key is None:
+            return web.json_response({"error": f"{unit['name']} in order #{order_id} has no {field.replace('_', ' ')}",
+                                      "fields": [label(k) for k in info if k != "account_type"]}, status=400)
+        problem = _edit_problem(kind, info, key, value)
+        if problem:
+            return web.json_response({"error": problem}, status=400)
+        if str(info.get(key) or "") != value:
+            changed.append({"field": label(key), "key": key, "old": str(info.get(key) or ""), "new": value})
+            info[key] = value
+    if not changed:
+        return web.json_response({"ok": True, "order_id": order_id, "item_name": unit["name"], "changed": [],
+                                  "note": "already set that way"})
+    db_set_fulfilment_info(unit["id"], info)
+    logger.info("edit_order_details: order #%s unit %s (%s): %s changed through the support chat", order_id, unit["id"],
+                unit["item_id"], ", ".join(c["key"] for c in changed))
+    if ADMIN_CHAT_ID:
+        lines = "\n".join(f"{c['field']}: {c['old'] or '(empty)'} → {c['new']}" for c in changed)
+        try:
+            await request.app["application"].bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(f"✏️ Order #{order_id} · {unit['name']}: the customer corrected their details through the "
+                      f"support chat.\n{lines}"
+                      + ("\n\n(This item is waiting for delivery: use the new details.)" if unit["state"] == "awaiting_delivery" else "")))
+        except Exception:
+            logger.exception("edit_order_details: couldn't tell the admin about order #%s", order_id)
+    return web.json_response({"ok": True, "order_id": order_id, "item_name": unit["name"], "state": unit["state"],
+                              "changed": [{k: c[k] for k in ("field", "key", "new")} for c in changed]})
+
+
 def _register_kind(item_id: str):
     if item_id in IMD_TRIGGER_ITEMS:
         return "imd"
@@ -12905,6 +13025,7 @@ async def start_api_server(application):
     api_app.router.add_get("/api/assist_events", http_assist_events)
     api_app.router.add_post("/api/assist_reply", http_assist_reply)
     api_app.router.add_post("/api/renewal_request", http_renewal_request)
+    api_app.router.add_post("/api/edit_order_details", http_edit_order_details)
     api_app.router.add_get("/api/renewal_updates", http_renewal_updates)
     api_app.router.add_get("/api/order_logins", http_order_logins)
     api_app.router.add_get("/api/payment_details", http_payment_details)
