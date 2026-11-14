@@ -10902,6 +10902,9 @@ async def http_edit_order_details(request):
         order_id = int(str(body["order_id"]).lstrip("#"))
         wanted = str(body.get("item") or "").strip().lower()
         unit_no = int(body["unit"]) if body.get("unit") not in (None, "") else None
+        # skip_missing: fields this item doesn't have are left out instead of refusing (the chatbot sends everything
+        # the customer gave when they re-send their details, 14 Nov 2026, order #614).
+        skip_missing = bool(body.get("skip_missing"))
         changes = {str(k).strip().lower(): str(v).strip() for k, v in (body.get("changes") or {}).items()}
     except (ValueError, KeyError, TypeError, AttributeError):
         return web.json_response({"error": "invalid request body"}, status=400)
@@ -10945,9 +10948,17 @@ async def http_edit_order_details(request):
     def label(k):
         shown = fulfilment_info_fields(json.dumps({k: "x"}))
         return shown[0][0] if shown else k
-    changed = []
+    changed, applicable = [], 0
     for field, value in changes.items():
-        key = next((k for k in EDIT_FIELD_KEYS[field] if k in info), None)
+        keys = EDIT_FIELD_KEYS[field]
+        if skip_missing and field in info:
+            keys = [field]                       # everything the customer re-sent: each field to its own place
+        elif skip_missing and field == "email":
+            keys = ["email"]                     # never an email over a renewal's login (it may have both)
+        key = next((k for k in keys if k in info), None)
+        if key is None and skip_missing:
+            continue
+        applicable += 1
         if key is None:
             return web.json_response({"error": f"{unit['name']} in order #{order_id} has no {field.replace('_', ' ')}",
                                       "fields": [label(k) for k in info if k != "account_type"]}, status=400)
@@ -10957,6 +10968,9 @@ async def http_edit_order_details(request):
         if str(info.get(key) or "") != value:
             changed.append({"field": label(key), "key": key, "old": str(info.get(key) or ""), "new": value})
             info[key] = value
+    if not applicable:
+        return web.json_response({"error": f"{unit['name']} in order #{order_id} has none of those fields",
+                                  "fields": [label(k) for k in info if k != "account_type"]}, status=400)
     if not changed:
         return web.json_response({"ok": True, "order_id": order_id, "item_name": unit["name"], "changed": [],
                                   "note": "already set that way"})
