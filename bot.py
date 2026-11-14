@@ -10888,6 +10888,13 @@ def _edit_problem(kind: str, info: dict, key: str, value: str):
 
 
 async def http_edit_order_details(request):
+    resp = await _edit_order_details(request)
+    if resp.status != 200:
+        logger.info("edit_order_details refused (%s): %s", resp.status, resp.body.decode("utf-8", "replace")[:400])
+    return resp
+
+
+async def _edit_order_details(request):
     """The support chatbot corrects account details the customer submitted for one of THEIR orders (a typo in the
     email, a different username), when the customer asked for it or confirmed the exact new value. Only items not
     delivered yet; only fields the item already has. The admin is told what changed. X-Api-Key protected.
@@ -10905,6 +10912,9 @@ async def http_edit_order_details(request):
         # skip_missing: fields this item doesn't have are left out instead of refusing (the chatbot sends everything
         # the customer gave when they re-send their details, 14 Nov 2026, order #614).
         skip_missing = bool(body.get("skip_missing"))
+        # add_missing: the owner's own instruction (/instruct): every field named is set, a field the item doesn't
+        # have yet is added under its own name (14 Nov 2026, order #614). Only account details, never the item.
+        add_missing = bool(body.get("add_missing"))
         changes = {str(k).strip().lower(): str(v).strip() for k, v in (body.get("changes") or {}).items()}
     except (ValueError, KeyError, TypeError, AttributeError):
         return web.json_response({"error": "invalid request body"}, status=400)
@@ -10951,11 +10961,15 @@ async def http_edit_order_details(request):
     changed, applicable = [], 0
     for field, value in changes.items():
         keys = EDIT_FIELD_KEYS[field]
+        if add_missing and field in ("email", "first_name", "last_name"):
+            keys = [field]                       # the owner's own field, never a renewal's login
         if skip_missing and field in info:
             keys = [field]                       # everything the customer re-sent: each field to its own place
         elif skip_missing and field == "email":
             keys = ["email"]                     # never an email over a renewal's login (it may have both)
         key = next((k for k in keys if k in info), None)
+        if key is None and add_missing:
+            key = field                          # not there yet: added as the owner asked
         if key is None and skip_missing:
             continue
         applicable += 1
