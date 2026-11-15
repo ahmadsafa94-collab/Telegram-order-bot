@@ -128,12 +128,17 @@ def _a1(tab: str, rng: str) -> str:
 
 
 _tabs = {}   # title -> numeric sheetId
+_cols = {}   # title -> number of columns the tab has
 
 
 async def _tab_ids() -> dict:
     resp = await _call("GET", f"{SHEETS_API}/{sheet_id()}", params={"fields": "sheets.properties"})
     _tabs.clear()
-    _tabs.update({s["properties"]["title"]: s["properties"]["sheetId"] for s in resp.json().get("sheets", [])})
+    _cols.clear()
+    for s in resp.json().get("sheets", []):
+        p = s["properties"]
+        _tabs[p["title"]] = p["sheetId"]
+        _cols[p["title"]] = int((p.get("gridProperties") or {}).get("columnCount") or 26)
     return _tabs
 
 
@@ -145,13 +150,21 @@ async def _ensure_tab(tab: str) -> int:
         resp = await _call("POST", f"{SHEETS_API}/{sheet_id()}:batchUpdate",
                            json={"requests": [{"addSheet": {"properties": {"title": tab}}}]})
         _tabs[tab] = resp.json()["replies"][0]["addSheet"]["properties"]["sheetId"]
+        _cols[tab] = 26
         await _call("PUT", f"{SHEETS_API}/{sheet_id()}/values/{_a1(tab, 'A1:M1')}",
                     params={"valueInputOption": "RAW"}, json={"values": [HEADER]})
+    # Google refuses ranges past a tab's last column (the owner's Sheet1 came from Excel with only A–L), so the
+    # tab gets the missing columns first.
+    if _cols.get(tab, 26) < len(HEADER):
+        await _call("POST", f"{SHEETS_API}/{sheet_id()}:batchUpdate", json={"requests": [{"appendDimension": {
+            "sheetId": _tabs[tab], "dimension": "COLUMNS", "length": len(HEADER) - _cols[tab]}}]})
+        _cols[tab] = len(HEADER)
     return _tabs[tab]
 
 
 async def _ensure_header(tab: str):
     """Columns I–M get their titles if the header row doesn't have them yet (the owner's sheet had A–H)."""
+    await _ensure_tab(tab)
     resp = await _call("GET", f"{SHEETS_API}/{sheet_id()}/values/{_a1(tab, 'A1:M1')}")
     row = (resp.json().get("values") or [[]])[0]
     if len(row) < len(HEADER) or any(not str(v).strip() for v in row[8:]):
@@ -176,6 +189,7 @@ async def _append_pink(tab: str, row: list) -> int:
 
 async def read_tab(tab: str) -> list:
     """All rows of a tab as text, as the sheet shows them (the owner's edits included)."""
+    await _ensure_tab(tab)
     resp = await _call("GET", f"{SHEETS_API}/{sheet_id()}/values/{_a1(tab, 'A1:M')}",
                        params={"valueRenderOption": "FORMATTED_VALUE"})
     return [[str(v) for v in r] for r in resp.json().get("values", [])]
