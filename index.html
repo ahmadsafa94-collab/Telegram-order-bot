@@ -585,6 +585,9 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
     <button class="contact-row" onclick="openAdminSerials()">
       <span class="ci-i">🔑</span><span class="ci-t"><div class="ci-n">Serials</div><div class="ci-s">Add, view and remove serial codes</div></span><span class="ci-c">›</span>
     </button>
+    <button class="contact-row" onclick="openSheet()">
+      <span class="ci-i">📑</span><span class="ci-t"><div class="ci-n">Excel sheet</div><div class="ci-s">Delivered subscriptions, with search (password)</div></span><span class="ci-c">›</span>
+    </button>
     <button class="contact-row" onclick="openAdminCoworkers()">
       <span class="ci-i">🤝</span><span class="ci-t"><div class="ci-n">Coworkers</div><div class="ci-s">Add, edit percentages, logins, delete</div></span><span class="ci-c">›</span>
     </button>
@@ -787,6 +790,10 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
     <div class="sheet-title" id="delTitle">Deliver</div>
     <div style="padding:0 15px 15px">
       <div id="delInfo" class="t-meta" style="margin:6px 0 10px;overflow-wrap:anywhere"></div>
+      <div id="delAccessBox">
+        <div style="font-size:12px;color:var(--hint);margin:4px 0">Access (column H of your delivered sheet; the customer doesn't see it)</div>
+        <input id="delAccess" class="cw-input" type="text" maxlength="100" placeholder="e.g. Mexico udg, Istanbul, Zimb" aria-label="Access" autocomplete="off" style="margin-bottom:10px">
+      </div>
       <div id="delLabel" style="font-size:12px;color:var(--hint);margin:4px 0">Account details to send to the customer</div>
       <textarea id="delText" class="cw-input" rows="13" maxlength="3500" placeholder="Username, password, link …" aria-label="Account details" style="font-size:13.5px;line-height:1.45"></textarea>
       <label id="delNotifyRow" style="display:none;align-items:center;gap:8px;font-size:13px;margin:8px 0 0"><input type="checkbox" id="delNotify" checked> Tell the customer about the change</label>
@@ -853,6 +860,15 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
     <div class="sheet-title" id="admTitle"></div>
     <div id="admContent" style="padding:12px 15px 6px"></div>
     <div style="padding:0 15px"><button class="btn sec" onclick="closeAdm()">Close</button></div>
+  </div>
+</div>
+<!-- Admin: the delivered-subscriptions sheet (password) -->
+<div class="overlay" id="sheetOverlay" onclick="if(event.target===this)closeSheet()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">📑 Delivered subscriptions</div>
+    <div id="sheetContent" style="padding:12px 15px 6px"></div>
+    <div style="padding:0 15px"><button class="btn sec" onclick="closeSheet()">Close</button></div>
   </div>
 </div>
 <!-- Admin: serials -->
@@ -1968,6 +1984,7 @@ function openDeliver(fid){
   document.getElementById('delInfo').innerHTML=escHtml(i.customer)+'<div style="margin:5px 0">'+viaTag(i.via)+'</div>'+(i.state==='needs_info'?'<br>The customer has not sent their details yet.':'')+((i.fields&&i.fields.length)||i.info?fieldsHtml(i):'');
   document.getElementById('delLabel').textContent='Account details to send to the customer — fill in what is missing';
   document.getElementById('delNotifyRow').style.display='none';
+  document.getElementById('delAccessBox').style.display=''; document.getElementById('delAccess').value='';
   document.getElementById('delSend').textContent='📤 Send to customer';
   const box=document.getElementById('delText'); box.value=deliveryTemplate(i); document.getElementById('delMsg').textContent='';
   document.getElementById('delOverlay').classList.add('on');
@@ -1981,6 +1998,7 @@ function openEditDelivery(n){
   document.getElementById('delTitle').textContent='✏️ Edit · '+i.name+' · Order #'+i.order_id;
   document.getElementById('delInfo').textContent=i.customer;
   document.getElementById('delLabel').textContent='Account details the customer received';
+  document.getElementById('delAccessBox').style.display='none';
   document.getElementById('delNotifyRow').style.display='flex'; document.getElementById('delNotify').checked=true;
   document.getElementById('delSend').textContent='💾 Save changes';
   document.getElementById('delText').value=i.text||''; document.getElementById('delMsg').textContent='';
@@ -2041,8 +2059,10 @@ async function sendDeliver(){
   if(!text) return bad('Type the account details to send.');
   if(editDelivery) return saveDeliveryEdit(text,msg,btn);
   const fid=deliverFid; if(!fid) return;
-  if(/^Username:[ \t]*$/m.test(text)&&/^Password:[ \t]*$/m.test(text)){ return askConfirm('Username and Password are both still empty. Send anyway?',()=>sendDeliverNow(fid,text,msg,btn)); }
-  sendDeliverNow(fid,text,msg,btn);
+  const access=document.getElementById('delAccess').value.trim();
+  if(!access){ document.getElementById('delAccess').focus(); return bad('Fill in Access first (it goes in column H of your delivered sheet).'); }
+  if(/^Username:[ \t]*$/m.test(text)&&/^Password:[ \t]*$/m.test(text)){ return askConfirm('Username and Password are both still empty. Send anyway?',()=>sendDeliverNow(fid,text,msg,btn,access)); }
+  sendDeliverNow(fid,text,msg,btn,access);
 }
 async function saveDeliveryEdit(text,msg,btn){
   const {n,id}=editDelivery;
@@ -2053,10 +2073,11 @@ async function saveDeliveryEdit(text,msg,btn){
   }catch(e){ msg.style.color='#dc2626'; msg.textContent=e.message; }
   finally{ btn.disabled=false; }
 }
-async function sendDeliverNow(fid,text,msg,btn){
+async function sendDeliverNow(fid,text,msg,btn,access){
+  const bad=t=>{ msg.style.color='#dc2626'; msg.textContent=t; };
   btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Sending…';
   try{
-    const resp=await fetch(withAuth('/api/admin_deliver'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fulfilment_id:fid,text})});
+    const resp=await fetch(withAuth('/api/admin_deliver'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fulfilment_id:fid,text,access})});
     const data=await resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
     if(!data.ok){ bad(data.error||'Could not deliver.'); return; }
     adminPending=adminPending.filter(x=>x.fid!==fid); setAdminBadges(); drawAdminPendTabs(); closeDeliver(); drawAdminPending();
@@ -4150,6 +4171,81 @@ function applyRemovedLocal(ids){
   if(durSheetFor) renderDurSheet();
 }
 
+
+// ── 📑 Delivered sheet (admin; the sheet password is kept only while this page is open) ──
+let sheetPw=null, sheetTab='main', sheetQ='', sheetTimer=null;
+function closeSheet(){ document.getElementById('sheetOverlay').classList.remove('on'); }
+async function openSheet(){
+  document.getElementById('sheetOverlay').classList.add('on');
+  const box=document.getElementById('sheetContent');
+  if(sheetPw){ return drawSheet(); }
+  box.innerHTML='<div class="search-empty">Loading…</div>';
+  let st;
+  try{ st=await adminPost('/api/admin_sheet',{action:'status'}); }
+  catch(e){ box.innerHTML='<div class="search-empty">'+escHtml(e.message)+'</div>'; return; }
+  const first=!st.password_set;
+  box.innerHTML=(st.connected?'':'<div class="t-meta" style="margin-bottom:10px;color:#d97706">⚠️ '+escHtml(st.why)+'</div>')
+    +'<div class="t-meta" style="margin-bottom:8px">'+(first?'Choose a password for the sheet (at least 6 characters). You need it every time you open the sheet, and the .xlsx file opens with it.':'Enter the sheet password.')+'</div>'
+    +'<input id="sheetPw" class="cw-input" type="password" autocomplete="off" placeholder="Sheet password" aria-label="Sheet password" style="margin-bottom:8px">'
+    +(first?'<input id="sheetPw2" class="cw-input" type="password" autocomplete="off" placeholder="Again" aria-label="Password again" style="margin-bottom:8px">':'')
+    +'<div id="sheetMsg" class="t-meta" style="min-height:16px"></div><button class="btn" id="sheetGo">'+(first?'Set password':'Open')+'</button>';
+  const go=async()=>{
+    const pw=document.getElementById('sheetPw').value, m=document.getElementById('sheetMsg');
+    if(first){
+      if(pw.length<6){ m.textContent='At least 6 characters.'; return; }
+      if(pw!==document.getElementById('sheetPw2').value){ m.textContent="The two passwords don't match."; return; }
+      try{ await adminPost('/api/admin_sheet',{action:'setpw',new:pw}); }catch(e){ m.textContent=e.message; return; }
+    }
+    sheetPw=pw; sheetTab='main'; sheetQ=''; drawSheet();
+  };
+  document.getElementById('sheetGo').onclick=go;
+  document.getElementById('sheetPw').onkeydown=e=>{ if(e.key==='Enter') go(); };
+  setTimeout(()=>document.getElementById('sheetPw').focus(),150);
+}
+async function drawSheet(){
+  const box=document.getElementById('sheetContent');
+  if(!document.getElementById('sheetRows')){
+    box.innerHTML='<div class="seg" id="sheetSeg"><button data-t="main">Delivered</button><button data-t="imd">iMD</button></div>'
+      +'<div class="search-wrap" style="margin-bottom:8px"><span class="search-ico">🔍</span><input id="sheetSearch" type="text" placeholder="Search name, username, order #, customer…" aria-label="Search the sheet"></div>'
+      +'<div id="sheetInfo" class="t-meta" style="margin-bottom:6px"></div><div id="sheetRows"></div>'
+      +'<button class="btn sec" id="sheetFile" style="margin-top:10px">📥 Send me the .xlsx (password-protected)</button><div id="sheetFileMsg" class="t-meta" style="min-height:16px"></div>';
+    box.querySelectorAll('#sheetSeg button').forEach(b=>b.onclick=()=>{ sheetTab=b.dataset.t; loadSheetRows(); });
+    const s=document.getElementById('sheetSearch'); s.value=sheetQ;
+    s.oninput=()=>{ clearTimeout(sheetTimer); sheetTimer=setTimeout(()=>{ sheetQ=s.value.trim(); loadSheetRows(); },350); };
+    document.getElementById('sheetFile').onclick=sendSheetFile;
+  }
+  loadSheetRows();
+}
+async function loadSheetRows(){
+  document.querySelectorAll('#sheetSeg button').forEach(b=>b.classList.toggle('on',b.dataset.t===sheetTab));
+  const rowsEl=document.getElementById('sheetRows'), info=document.getElementById('sheetInfo');
+  rowsEl.innerHTML='<div class="search-empty">Loading…</div>';
+  let d;
+  try{ d=await adminPost('/api/admin_sheet',{action:'rows',password:sheetPw,tab:sheetTab,q:sheetQ}); }
+  catch(e){
+    if(/password/i.test(e.message)){ sheetPw=null; openSheet(); showToast(e.message); return; }
+    rowsEl.innerHTML='<div class="search-empty">'+escHtml(e.message)+'</div>'; info.textContent=''; return;
+  }
+  info.textContent=(sheetQ?d.matches+' of '+d.total+' rows match':d.total+' rows')+(d.rows.length<d.matches?' · showing the newest '+d.rows.length:'')+' · newest first';
+  if(!d.rows.length){ rowsEl.innerHTML='<div class="search-empty">Nothing found.</div>'; return; }
+  const H=d.header||[];
+  const cell=(r,i)=>escHtml((r.cells[i]||'').trim());
+  rowsEl.innerHTML=d.rows.map(r=>{
+    const extra=[[2,'Renewal'],[3,'Created'],[4,'Ends'],[7,'Access'],[8,'Coworker'],[9,'Order'],[10,'Telegram'],[11,'@'],[12,'Renewals']]
+      .filter(([i])=>(r.cells[i]||'').trim()).map(([i,l])=>'<span><b>'+escHtml(H[i]||l)+':</b> '+cell(r,i)+'</span>').join(' · ');
+    return '<div class="t-card"><div class="t-top"><div class="t-title">'+cell(r,0)+(cell(r,1)?' · '+cell(r,1):'')+'</div><span class="t-meta">row '+r.n+'</span></div>'
+      +'<div class="fld-list"><div class="fld"><span class="fld-l">'+escHtml(H[5]||'Username')+'</span><span class="fld-v">'+cell(r,5)+'</span></div>'
+      +'<div class="fld"><span class="fld-l">'+escHtml(H[6]||'Pass')+'</span><span class="fld-v">'+cell(r,6)+'</span></div></div>'
+      +'<div class="t-meta" style="margin-top:6px;line-height:1.6">'+extra+'</div></div>';
+  }).join('');
+}
+async function sendSheetFile(){
+  const btn=document.getElementById('sheetFile'), m=document.getElementById('sheetFileMsg');
+  btn.disabled=true; m.style.color='var(--hint)'; m.textContent='Preparing the file…';
+  try{ await adminPost('/api/admin_sheet',{action:'file',password:sheetPw}); m.textContent='Sent to your chat with the bot. It opens with the sheet password.'; }
+  catch(e){ m.style.color='#dc2626'; m.textContent=e.message; }
+  finally{ btn.disabled=false; }
+}
 </script>
 </body>
 </html>

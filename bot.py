@@ -944,7 +944,11 @@ logger = logging.getLogger(__name__)
 # DATABASE
 # ------------------------------------------------------------------
 
+import delivered_sheet as dsheet  # the owner's delivered-subscriptions Google Sheet (15 Nov 2026)
+
+
 def db_init():
+    dsheet.init(DB_PATH)
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
         """
@@ -1192,6 +1196,12 @@ def db_init():
         conn.execute("ALTER TABLE deliveries ADD COLUMN message_id INTEGER")
     except sqlite3.OperationalError:
         pass  # column already exists
+    # What the admin typed in Access when delivering from the Mini App (column H of the delivered sheet; never shown
+    # to the customer).
+    try:
+        conn.execute("ALTER TABLE deliveries ADD COLUMN access TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS fulfilment (
@@ -1378,7 +1388,8 @@ def db_init():
     renewals.init(DB_PATH)
 
 
-def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, message_id: int = None) -> int:
+def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, message_id: int = None,
+                    access: str = None) -> int:
     """Records one delivered subscription. An order with several products
     produces several rows here, so 'My Subscriptions' can list them
     separately instead of lumping a whole order into one entry.
@@ -1388,14 +1399,37 @@ def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, mes
     delivery row's id."""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute(
-        "INSERT INTO deliveries (order_id, user_id, item_id, message, message_id, delivered_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (order_id, user_id, item_id, message, message_id, datetime.utcnow().isoformat()),
+        "INSERT INTO deliveries (order_id, user_id, item_id, message, message_id, delivered_at, access) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (order_id, user_id, item_id, message, message_id, datetime.utcnow().isoformat(), access),
     )
     delivery_id = cur.lastrowid
     conn.commit()
     conn.close()
+    _queue_sheet_row(order_id, user_id, item_id, message, access)
     return delivery_id
+
+
+def _queue_sheet_row(order_id: int, user_id: int, item_id: str, message: str, access: str = None):
+    """A row for the owner's delivered-subscriptions sheet (sent to Google by sheet_outbox_job). iMD goes on the iMD
+    tab with the serial(s) used in H; a code delivered from the serials pool also has its serial in H. Never lets a
+    delivery fail."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        serials = [r[0] for r in conn.execute(
+            "SELECT code FROM serials WHERE used_for_order = ? AND status = 'used' ORDER BY used_at, id", (order_id,)).fetchall()]
+        row = conn.execute("SELECT coworker_id FROM orders WHERE id = ?", (order_id,)).fetchone()
+        conn.close()
+        coworker = db_get_coworker(row[0]) if row and row[0] else None
+        name = MENU.get(item_id, (item_id,))[0] if item_id else ""
+        imd = item_id in IMD_TRIGGER_ITEMS
+        h_value = access or (", ".join(serials) if serials and (imd or item_id in UPTODATE_AI_TRIGGER_ITEMS
+                                                                     or item_id == "uptodate_ai_bundle_3m") else "")
+        sheet_row = dsheet.build_row(name, item_id or "", datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET), message,
+                                     h_value, coworker[1] if coworker else "Me", order_id, user_id, db_get_username(user_id) or "")
+        dsheet.enqueue_row(DB_PATH, dsheet.IMD_TAB if imd else dsheet.MAIN_TAB, sheet_row)
+    except Exception:
+        logger.exception("Couldn't queue the delivered-sheet row for order #%s (%s)", order_id, item_id)
 
 
 def db_user_deliveries(user_id: int):
@@ -11756,6 +11790,11 @@ async def http_admin_deliver(request):
         return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
     if isinstance(fid, bool) or not isinstance(fid, int) or not isinstance(text, str) or not text.strip() or len(text) > 3500:
         return web.json_response({"ok": False, "error": "Type the account details to send."}, status=400, headers=headers)
+    # Access (column H of the delivered sheet): required, kept in the database, never shown to the customer.
+    access = data.get("access")
+    if not isinstance(access, str) or not access.strip():
+        return web.json_response({"ok": False, "error": "Fill in Access first."}, status=400, headers=headers)
+    access = access.strip()[:100]
     row = db_get_fulfilment(fid)
     if not row:
         return web.json_response({"ok": False, "error": "That order unit no longer exists."}, status=404, headers=headers)
@@ -11766,13 +11805,120 @@ async def http_admin_deliver(request):
                                  status=409, headers=headers)
     application = request.app["application"]
     try:
-        result = await _deliver_credentials(_HttpContext(application, ADMIN_CHAT_ID), fid, text.strip())
+        result = await _deliver_credentials(_HttpContext(application, ADMIN_CHAT_ID), fid, text.strip(), access=access)
     except Exception:
         logger.exception("Admin Shop delivery of unit %s failed", fid)
         return web.json_response({"ok": False, "error": "Could not send it to the customer (they may have blocked the bot). Nothing was marked delivered."},
                                  status=502, headers=headers)
     name, order_id, delivery_id = result
     return web.json_response({"ok": True, "name": name, "order_id": order_id, "delivery_id": delivery_id}, headers=headers)
+
+
+# ── 📑 Delivered sheet (admin Mini App) and @Utdreg_bot's renewals (15 Nov 2026) ──
+_sheet_tries: dict = {}   # admin id -> [times of wrong passwords], at most 5 per 10 minutes
+
+
+def _sheet_password_ok(password) -> tuple:
+    """(ok, error) for the sheet password the admin typed."""
+    stored = db_get_meta("delivered_sheet_password")
+    if not stored:
+        return False, "Set the sheet password first."
+    now = time.time()
+    tries = [t for t in _sheet_tries.get(ADMIN_CHAT_ID, []) if now - t < 600]
+    if len(tries) >= 5:
+        return False, "Too many wrong passwords. Try again in 10 minutes."
+    if not isinstance(password, str) or not dsheet.check_password(password, stored):
+        _sheet_tries[ADMIN_CHAT_ID] = tries + [now]
+        return False, "Wrong password."
+    _sheet_tries[ADMIN_CHAT_ID] = []
+    return True, ""
+
+
+async def http_admin_sheet(request):
+    """POST {action, password, …}: status | setpw {password, new} | rows {tab: main|imd, q} | file. Admin only, and
+    everything but status and setting the first password needs the sheet password."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        data = await request.json()
+        action = data.get("action")
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    has_pw = bool(db_get_meta("delivered_sheet_password"))
+    if action == "status":
+        return web.json_response({"ok": True, "password_set": has_pw, "connected": dsheet.configured(),
+                                  "why": "" if dsheet.configured() else dsheet.not_configured_reason(),
+                                  "waiting": dsheet.pending_count(DB_PATH)}, headers=headers)
+    if action == "setpw":
+        new = data.get("new")
+        if has_pw:
+            ok, why = _sheet_password_ok(data.get("password"))
+            if not ok:
+                return web.json_response({"ok": False, "error": why}, status=403, headers=headers)
+        if not isinstance(new, str) or len(new) < 6:
+            return web.json_response({"ok": False, "error": "The password needs at least 6 characters."}, status=400, headers=headers)
+        db_set_meta("delivered_sheet_password", dsheet.hash_password(new))
+        return web.json_response({"ok": True}, headers=headers)
+    ok, why = _sheet_password_ok(data.get("password"))
+    if not ok:
+        return web.json_response({"ok": False, "error": why}, status=403, headers=headers)
+    if not dsheet.configured():
+        return web.json_response({"ok": False, "error": dsheet.not_configured_reason()}, status=503, headers=headers)
+    try:
+        if action == "rows":
+            tab = dsheet.IMD_TAB if data.get("tab") == "imd" else dsheet.MAIN_TAB
+            rows = await dsheet.read_tab(tab)
+            header, body = (rows[0], rows[1:]) if rows else (dsheet.HEADER, [])
+            numbered = [(i + 2, r) for i, r in enumerate(body)]
+            q = str(data.get("q") or "").strip().lower()
+            hits = [x for x in numbered if q in " ".join(x[1]).lower()] if q else numbered
+            shown = hits[-300:][::-1]   # newest first
+            return web.json_response({"ok": True, "tab": tab, "header": header, "total": len(body), "matches": len(hits),
+                                      "rows": [{"n": n, "cells": r} for n, r in shown]}, headers=headers)
+        if action == "file":
+            data_x = await dsheet.export_xlsx()
+            locked = dsheet.encrypt_xlsx(data_x, data["password"])
+            await request.app["application"].bot.send_document(
+                chat_id=ADMIN_CHAT_ID, document=InputFile(io.BytesIO(locked), filename="Delivered subscriptions.xlsx"),
+                caption="📑 Delivered subscriptions. 🔒 Opens with the sheet password.")
+            return web.json_response({"ok": True}, headers=headers)
+    except Exception as exc:
+        logger.exception("Delivered sheet: %s failed", action)
+        return web.json_response({"ok": False, "error": f"Couldn't reach the sheet: {str(exc)[:200]}"}, status=502, headers=headers)
+    return web.json_response({"ok": False, "error": "Unknown action"}, status=400, headers=headers)
+
+
+async def http_delivered_sheet_renewal(request):
+    """POST {username, number, date?} from @Utdreg_bot (X-Api-Key) when a renewal is approved: the row with that
+    username gets its next renewal date (or End near the expiry) and the R number."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        body = await request.json()
+        username = str(body["username"]).strip()
+        number = str(body.get("number") or "").strip()[:20]
+        when = str(body.get("date") or datetime.utcnow().date().isoformat())[:10]
+        datetime.fromisoformat(when)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return web.json_response({"error": "invalid request body"}, status=400)
+    if not username:
+        return web.json_response({"error": "username is needed"}, status=400)
+    dsheet.enqueue_renewal(DB_PATH, username, number, when)
+    return web.json_response({"ok": True})
+
+
+async def sheet_outbox_job(context: ContextTypes.DEFAULT_TYPE):
+    """Every 30 s: what waits for the delivered sheet goes to Google."""
+    async def notify(text):
+        try:
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
+        except Exception:
+            logger.exception("Delivered sheet: couldn't tell the admin")
+    await dsheet.flush(DB_PATH, notify)
 
 
 async def http_admin_edit_delivery(request):
@@ -13085,6 +13231,9 @@ async def start_api_server(application):
     api_app.router.add_get("/api/admin_delivered", http_admin_delivered)
     api_app.router.add_get("/api/admin_pending", http_admin_pending)
     api_app.router.add_post("/api/admin_deliver", http_admin_deliver)
+    api_app.router.add_post("/api/admin_sheet", http_admin_sheet)
+    api_app.router.add_options("/api/admin_sheet", http_set_coworker_price_options)
+    api_app.router.add_post("/api/delivered_sheet_renewal", http_delivered_sheet_renewal)
     api_app.router.add_options("/api/admin_deliver", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_chat_action", http_admin_chat_action)
     api_app.router.add_post("/api/admin_edit_delivery", http_admin_edit_delivery)
@@ -17506,7 +17655,7 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("That item no longer exists.")
 
 
-async def _deliver_credentials(context, fulfilment_id: int, credentials_text: str, on_delivered=None):
+async def _deliver_credentials(context, fulfilment_id: int, credentials_text: str, on_delivered=None, access: str = None):
     """Sends the account details to the customer and marks that unit delivered, exactly
     as the 📤 Send Credentials chat flow always did. Used by that flow and by the admin
     Shop's Pending Orders tab. Returns (item name, order id, delivery id), or None when the
@@ -17524,7 +17673,7 @@ async def _deliver_credentials(context, fulfilment_id: int, credentials_text: st
     )
     await send_delivery_promo(context, user_id)
     db_save_delivery(order_id, credentials_text)
-    delivery_id = db_add_delivery(order_id, user_id, item_id, credentials_text, sent_message.message_id)
+    delivery_id = db_add_delivery(order_id, user_id, item_id, credentials_text, sent_message.message_id, access=access)
     await post_subscription_to_channel(context, order_id, item_id, credentials_text)
     db_set_fulfilment_state(fulfilment_id, "delivered")
     if on_delivered:
@@ -19424,6 +19573,8 @@ def main():
             time=dt_time(hour=3, minute=30),
             name="imd_catalog_sync",
         )
+        # The delivered-subscriptions sheet: queued rows and renewals go to Google every 30 s.
+        app.job_queue.run_repeating(sheet_outbox_job, interval=30, first=20, name="delivered_sheet")
         # Daily sales Excel to the admin 5 minutes after local midnight.
         app.job_queue.run_daily(
             daily_sales_excel_job,
