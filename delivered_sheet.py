@@ -271,6 +271,40 @@ def enqueue_renewal(db_path: str, username: str, number: str, when: str):
     conn.close()
 
 
+def enqueue_edit(db_path: str, tab: str, order_id: int, old_user: str, user: str, password: str):
+    """A delivery's username/password were edited in the bot: the sheet row follows (15 Nov 2026)."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("INSERT INTO sheet_outbox (kind, tab, payload, created_at) VALUES ('edit', ?, ?, ?)",
+                 (tab, json.dumps({"order_id": order_id, "old_user": old_user, "user": user, "password": password}),
+                  datetime.utcnow().isoformat(timespec="seconds")))
+    conn.commit()
+    conn.close()
+
+
+async def _apply_edit(tab: str, payload: dict) -> str:
+    """The row of that order (column J), the one with the old username if the order has several; else the newest
+    row with the old username. F and G get the new username and password (an empty one is left as it is)."""
+    rows = await read_tab(tab)
+    order, old = str(payload.get("order_id") or ""), (payload.get("old_user") or "").strip().lower()
+    cell = lambda r, i: (r[i] if len(r) > i else "").strip()
+    same_order = [i for i, r in enumerate(rows) if i > 0 and cell(r, 9) == order]
+    hit = next((i for i in reversed(same_order) if cell(rows[i], 5).lower() == old), None)
+    if hit is None and len(same_order) == 1:
+        hit = same_order[0]
+    if hit is None and old:
+        hit = max((i for i, r in enumerate(rows) if i > 0 and cell(r, 5).lower() == old), default=None)
+    if hit is None:
+        return f"order #{order} isn't in the sheet"
+    n, data = hit + 1, []
+    if payload.get("user"):
+        data.append({"range": f"'{tab}'!F{n}", "values": [[payload["user"]]]})
+    if payload.get("password"):
+        data.append({"range": f"'{tab}'!G{n}", "values": [[payload["password"]]]})
+    if data:
+        await _call("POST", f"{SHEETS_API}/{sheet_id()}/values:batchUpdate", json={"valueInputOption": "RAW", "data": data})
+    return f"row {n}: username/password updated"
+
+
 # ── renewals (@Utdreg_bot) ───────────────────────────────────────────
 
 def parse_sheet_date(text: str):
@@ -328,7 +362,8 @@ async def flush(db_path: str, notify=None) -> int:
                 if not sent:
                     await _ensure_header(MAIN_TAB)
                 data = json.loads(payload)
-                note = await _apply_renewal(tab, data) if kind == "renewal" else f"row {await _append_pink(tab, data)}"
+                note = (await _apply_renewal(tab, data) if kind == "renewal" else await _apply_edit(tab, data) if kind == "edit"
+                        else f"row {await _append_pink(tab, data)}")
                 conn = sqlite3.connect(db_path)
                 conn.execute("UPDATE sheet_outbox SET done_at = ?, error = ? WHERE id = ?",
                              (datetime.utcnow().isoformat(timespec="seconds"), note, oid))
@@ -337,6 +372,8 @@ async def flush(db_path: str, notify=None) -> int:
                 log.info("Delivered sheet: %s %s → %s", kind, tab, note)
                 if kind == "renewal" and notify and "isn't in column F" in note:
                     await notify(f"📑 Delivered sheet: renewal {data.get('number')}: {note}, so its renewal date wasn't updated.")
+                if kind == "edit" and notify and "isn't in the sheet" in note:
+                    await notify(f"📑 Delivered sheet: the edited details of {note}, so they weren't changed there.")
                 sent += 1
             except Exception as exc:
                 conn = sqlite3.connect(db_path)

@@ -1468,9 +1468,20 @@ def db_get_delivery_admin(delivery_id: int):
 
 def db_update_delivery_message(delivery_id: int, message: str):
     conn = sqlite3.connect(DB_PATH)
+    old = conn.execute("SELECT order_id, item_id, message FROM deliveries WHERE id = ?", (delivery_id,)).fetchone()
     conn.execute("UPDATE deliveries SET message = ? WHERE id = ?", (message, delivery_id))
     conn.commit()
     conn.close()
+    # The delivered sheet follows: the row of this order (and the old username) gets the new username/password.
+    if old:
+        try:
+            old_user, _ = dsheet.credentials(old[2])
+            user, password = dsheet.credentials(message)
+            if (user, password) != dsheet.credentials(old[2]):
+                dsheet.enqueue_edit(DB_PATH, dsheet.IMD_TAB if old[1] in IMD_TRIGGER_ITEMS else dsheet.MAIN_TAB,
+                                    old[0], old_user, user, password)
+        except Exception:
+            logger.exception("Couldn't queue the delivered-sheet edit for delivery %s", delivery_id)
 
 
 
