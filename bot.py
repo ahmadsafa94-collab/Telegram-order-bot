@@ -11918,8 +11918,15 @@ async def http_delivered_sheet_renewal(request):
         return web.json_response({"error": "invalid request body"}, status=400)
     if not username:
         return web.json_response({"error": "username is needed"}, status=400)
-    dsheet.enqueue_renewal(DB_PATH, username, number, when)
-    return web.json_response({"ok": True})
+    oid = dsheet.enqueue_renewal(DB_PATH, username, number, when)
+    # Written right away when Google answers, so @Utdreg_bot can tell the admin what happened (row updated, or the
+    # username isn't in the sheet); otherwise it stays queued and sheet_outbox_job sends it later.
+    if dsheet.configured():
+        task = asyncio.ensure_future(dsheet.flush(DB_PATH, quiet={oid}))
+        await asyncio.wait({task}, timeout=25)   # never cancelled halfway: a slow write still finishes and is marked
+    done, note = dsheet.outbox_result(DB_PATH, oid)
+    status = ("not_found" if "isn't in column F" in note else "updated") if done else "queued"
+    return web.json_response({"ok": True, "status": status, "note": note if done else ""})
 
 
 async def sheet_outbox_job(context: ContextTypes.DEFAULT_TYPE):

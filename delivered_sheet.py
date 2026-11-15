@@ -276,13 +276,22 @@ def enqueue_row(db_path: str, tab: str, row: list):
     conn.close()
 
 
-def enqueue_renewal(db_path: str, username: str, number: str, when: str):
+def enqueue_renewal(db_path: str, username: str, number: str, when: str) -> int:
     conn = sqlite3.connect(db_path)
-    conn.execute("INSERT INTO sheet_outbox (kind, tab, payload, created_at) VALUES ('renewal', ?, ?, ?)",
+    cur = conn.execute("INSERT INTO sheet_outbox (kind, tab, payload, created_at) VALUES ('renewal', ?, ?, ?)",
                  (MAIN_TAB, json.dumps({"username": username, "number": number, "date": when}),
                   datetime.utcnow().isoformat(timespec="seconds")))
     conn.commit()
     conn.close()
+    return cur.lastrowid
+
+
+def outbox_result(db_path: str, oid: int):
+    """(done, note) for one outbox entry."""
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT done_at, error FROM sheet_outbox WHERE id = ?", (oid,)).fetchone()
+    conn.close()
+    return (bool(row and row[0]), (row[1] if row else "") or "")
 
 
 def enqueue_edit(db_path: str, tab: str, order_id: int, old_user: str, user: str, password: str):
@@ -362,8 +371,9 @@ async def _apply_renewal(tab: str, payload: dict) -> str:
 _flush_lock = asyncio.Lock()
 
 
-async def flush(db_path: str, notify=None) -> int:
-    """Sends what's waiting, oldest first; stops at the first failure (kept for the next try). Returns how many went."""
+async def flush(db_path: str, notify=None, quiet: set = ()) -> int:
+    """Sends what's waiting, oldest first; stops at the first failure (kept for the next try). Returns how many went.
+    Entries in `quiet` aren't reported when not found: the caller tells the admin itself (@Utdreg_bot's reply)."""
     if not configured():
         return 0
     async with _flush_lock:
@@ -384,8 +394,9 @@ async def flush(db_path: str, notify=None) -> int:
                 conn.commit()
                 conn.close()
                 log.info("Delivered sheet: %s %s → %s", kind, tab, note)
-                if kind == "renewal" and notify and "isn't in column F" in note:
-                    await notify(f"📑 Delivered sheet: renewal {data.get('number')}: {note}, so its renewal date wasn't updated.")
+                if kind == "renewal" and notify and "isn't in column F" in note and oid not in quiet:
+                    await notify(f"⚠️ 📑 Delivered sheet: renewal {data.get('number')}: {note}, so nothing was changed "
+                                 "there. Enter its renewal date in the sheet yourself.")
                 if kind == "edit" and notify and "isn't in the sheet" in note:
                     await notify(f"📑 Delivered sheet: the edited details of {note}, so they weren't changed there.")
                 sent += 1
