@@ -214,16 +214,17 @@ MENU = {
     "imd_1y": ("iMD VIP - 1 Year", 75.00),
     "imd_2y": ("iMD VIP - 2 Years", 140.00),
 
-    # Uptodate (owner, 16 Nov 2026) — the official app (no browser) in four plans; "+ Browser Access" is the _web
-    # version of each plan (plan price + 12/12/17/17). AI add-ons (1 year) below, only with a plan.
+    # Uptodate (owner, 16 Nov 2026) — Uptodate Online 1 Year (official app) $20 + features: Pathways +10, Offline +10,
+    # both +20; "Browser Access" is the _web version of each (+12, or +17 with Pathways). AI add-ons (1 year) below,
+    # only with a plan.
     "up_online_app": ("Uptodate Online 1 Year - Official App", 20.00),
     "up_online_web": ("Uptodate Online 1 Year - Official App + Browser Access", 32.00),
     "up_offline_app": ("Uptodate Online + Offline 1 Year - Official App", 30.00),
     "up_offline_web": ("Uptodate Online + Offline 1 Year - Official App + Browser Access", 42.00),
     "up_pathways_app": ("Uptodate Online + Pathways 1 Year - Official App", 30.00),
     "up_pathways_web": ("Uptodate Online + Pathways 1 Year - Official App + Browser Access", 47.00),
-    "up_vip_app": ("Uptodate VIP: Online + Offline + Pathways 1 Year - Official App", 45.00),
-    "up_vip_web": ("Uptodate VIP: Online + Offline + Pathways 1 Year - Official App + Browser Access", 62.00),
+    "up_vip_app": ("Uptodate Online + Pathways + Offline 1 Year - Official App", 40.00),
+    "up_vip_web": ("Uptodate Online + Pathways + Offline 1 Year - Official App + Browser Access", 57.00),
     # AI add-ons, 1 year, sold only together with an Uptodate plan (UPTODATE_AI_ADDONS / addon_problem).
     "uptodate_ai_expert_1y": ("Uptodate Expert AI (Official App) - 1 Year add-on", 15.00),
     "uptodate_ai_tg_1y": ("Uptodate AI (Telegram Bot) - 1 Year add-on", 10.00),
@@ -361,7 +362,7 @@ CATALOG = {
                 },
             },
             "up_vip": {
-                "label": "VIP: Online + Offline + Pathways 1 Year",
+                "label": "Online + Pathways + Offline 1 Year",
                 "children": {
                     "up_vip_app": {"label": "Official App", "item": "up_vip_app"},
                     "up_vip_web": {"label": "Official App + Browser Access", "item": "up_vip_web"},

@@ -510,15 +510,30 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
   border-radius:14px;background:rgba(var(--acc-rgb),.14);color:var(--teal2);font-size:13.5px;font-weight:700;cursor:pointer}
 .per-seg{margin:0 0 10px}.per-seg button{font-size:12px;padding:7px 4px}
 
-/* Uptodate: the add-ons are rows right under each plan (16 Nov 2026) */
-.up-block{border-bottom:1px solid rgba(var(--fg-rgb),.07)}
-.up-block .row{border-bottom:none}
-.up-block .up-addon{padding:7px 13px 7px 30px;background:rgba(13,148,136,.045)}
-.up-block .up-addon .rn{font-size:13px;font-weight:600}
-.up-block .up-addon .rn b{color:var(--teal2,#0d9488)}
-.up-block .up-addon .rs{font-size:11px}
-.up-block .up-addon .rp{font-size:13px}
-.up-block .up-addon:last-child{padding-bottom:10px}
+/* Uptodate set-up card (16 Nov 2026) */
+.up-cfg .up-head{border-bottom:1px solid rgba(var(--fg-rgb),.06)}
+.up-cfg .up-sec{padding:9px 13px 4px}
+.up-cfg .up-lbl{font-size:11px;font-weight:750;letter-spacing:.4px;text-transform:uppercase;color:var(--teal2,#0d9488);margin-bottom:6px}
+.up-cfg .up-chips{display:flex;flex-wrap:wrap;gap:7px}
+.up-chip{font:inherit;font-size:13px;font-weight:600;color:var(--text);background:var(--bg);border:1.5px solid rgba(var(--fg-rgb),.14);
+  border-radius:99px;padding:7px 12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.up-chip span{font-weight:750;color:var(--teal2,#0d9488)}
+.up-chip.on{background:var(--teal,#0d9488);border-color:var(--teal,#0d9488);color:#fff}
+.up-chip.on span{color:#fff}
+.up-chip:disabled{opacity:.4}
+.up-cfg .up-add{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:10px 13px 12px;padding:10px 12px;
+  border-radius:14px;background:rgba(13,148,136,.08)}
+.up-cfg .up-sum{font-size:12px;color:var(--hint);line-height:1.35}
+.up-cfg .up-tot{font-size:18px;font-weight:800}
+.up-cfg .up-add .add-btn{width:42px;height:42px;font-size:22px}
+.up-cfg .up-saved{padding:4px 13px 12px;border-top:1px solid rgba(var(--fg-rgb),.06)}
+.up-saved-row{display:flex;align-items:center;gap:8px;padding:7px 0;font-size:13px;border-bottom:1px dashed rgba(var(--fg-rgb),.1)}
+.up-saved-row:last-child{border-bottom:none}
+.up-saved-row .n{flex:0 0 22px;height:22px;border-radius:50%;background:var(--teal,#0d9488);color:#fff;font-size:11.5px;font-weight:800;
+  display:flex;align-items:center;justify-content:center}
+.up-saved-row .t{flex:1;min-width:0}
+.up-saved-row .p{font-weight:750}
+.up-saved-row .x{border:none;background:rgba(248,113,113,.15);color:#ef4444;border-radius:50%;width:26px;height:26px;cursor:pointer}
 </style>
 </head>
 <body>
@@ -1134,21 +1149,22 @@ const CATALOG = [
       {id:'imd_2y',name:'iMD - 2 Years',sub:'New account or renewal',price:140},
     ]},
   ]},
-  // Uptodate (owner, 16 Nov 2026): the official app (no browser) in four plans, each with its add-on rows right
-  // under it (makePlanRow): + Browser Access (turns the plan into its _web item) and the AI add-ons (1 year). The
-  // hidden group holds those items, so names and admin price edits work for them as for any item.
+  // Uptodate (owner, 16 Nov 2026): one item, Uptodate Online - 1 Year (Official App), set up with three rows
+  // (makeUpConfigurator): Features (Pathways / Offline / both), Browser Access, AI. "+" saves that set-up as one
+  // account (the matching plan item, its _web version with browser, and the AI item) and it is listed below; then
+  // another can be set up. The hidden group holds those items, so names and admin price edits work as for any item.
   {id:'uptodate',name:'Uptodate',emoji:'📖',groups:[
-    {label:'Uptodate Official App (no browser)',items:[
-      {id:'up_online_app',name:'Uptodate Online',sub:'Official App · 1 Year',price:20,plan:'up_online_web'},
-      {id:'up_offline_app',name:'Uptodate Online + Offline',sub:'Official App · 1 Year',price:30,plan:'up_offline_web'},
-      {id:'up_pathways_app',name:'Uptodate Online + Pathways',sub:'Official App · 1 Year',price:30,plan:'up_pathways_web'},
-      {id:'up_vip_app',name:'Uptodate VIP: Online + Offline + Pathways',sub:'Official App · 1 Year',price:45,plan:'up_vip_web'},
+    {label:'Uptodate',items:[
+      {id:'up_online_app',name:'Uptodate Online - 1 Year (Official App)',sub:'Official App · 1 Year',price:20,configurator:true},
     ]},
     {label:'add-ons',hidden:true,items:[
+      {id:'up_offline_app',name:'Uptodate Online + Offline',sub:'Official App · 1 Year',price:30},
+      {id:'up_pathways_app',name:'Uptodate Online + Pathways',sub:'Official App · 1 Year',price:30},
+      {id:'up_vip_app',name:'Uptodate Online + Pathways + Offline',sub:'Official App · 1 Year',price:40},
       {id:'up_online_web',name:'Uptodate Online',sub:'Official App + Browser Access · 1 Year',price:32},
       {id:'up_offline_web',name:'Uptodate Online + Offline',sub:'Official App + Browser Access · 1 Year',price:42},
       {id:'up_pathways_web',name:'Uptodate Online + Pathways',sub:'Official App + Browser Access · 1 Year',price:47},
-      {id:'up_vip_web',name:'Uptodate VIP: Online + Offline + Pathways',sub:'Official App + Browser Access · 1 Year',price:62},
+      {id:'up_vip_web',name:'Uptodate Online + Pathways + Offline',sub:'Official App + Browser Access · 1 Year',price:57},
       {id:'uptodate_ai_expert_1y',name:'Uptodate AI add-on: Uptodate Expert (official app)',sub:'1 Year',price:15},
       {id:'uptodate_ai_tg_1y',name:'Uptodate AI add-on: Uptodate AI (Telegram bot)',sub:'1 Year',price:10},
       {id:'uptodate_ai_both_1y',name:'Uptodate AI add-on: Expert (official app) + Telegram bot',sub:'1 Year',price:20},
@@ -2994,7 +3010,7 @@ function rowPriceHtml(id, basePrice, compact){
   return price + ((PREVIEW_CW||ADMIN_EDIT) ? `<button class="cw-edit" title="Edit this price" onclick="event.stopPropagation();openCwPriceEdit('${id}')">✏️</button>` : '');
 }
 function makeRow(itm,solo){
-  if(itm.plan) return makePlanRow(itm);
+  if(itm.configurator) return makeUpConfigurator(itm);
   const d=document.createElement('div'); d.className=solo?'solo':'row';
   d.dataset.itemId=itm.id; d.dataset.base=itm.price; d.dataset.name=itm.name;
   const oos=OOS_IDS.has(itm.id);
@@ -4106,110 +4122,89 @@ function buildAdBanner(){
 
 // ── Uptodate plans and their add-ons (owner, 16 Nov 2026) ──
 const UP_AI = [
-  {id:'uptodate_ai_expert_1y',label:'Uptodate Expert (official app)',sub:'AI inside the official app · 1 Year'},
-  {id:'uptodate_ai_tg_1y',label:'Uptodate AI (Telegram bot)',sub:'AI chat on Telegram · 1 Year'},
-  {id:'uptodate_ai_both_1y',label:'Both of them',sub:'Uptodate Expert + the Telegram bot · 1 Year'},
+  {id:'uptodate_ai_expert_1y',chip:'AI Expert Path (Official App)'},
+  {id:'uptodate_ai_tg_1y',chip:'AI through Telegram bot'},
+  {id:'uptodate_ai_both_1y',chip:'Both of them'},
 ];
 const UP_PLAN_IDS = new Set(['up_online_app','up_online_web','up_offline_app','up_offline_web','up_pathways_app','up_pathways_web','up_vip_app','up_vip_web']);
 const UP_AI_IDS = new Set(UP_AI.map(a=>a.id));
 const upPrice = id => { const i=IMAP[id]; if(!i) return null; return hasCoworkerDiscount(id)?coworkerPrice(i.price,id):i.price; };
 const upMoney = n => '$'+(Math.round(n*100)/100).toFixed(2).replace(/\.00$/,'');
-// A plan and its add-on rows: the plan (− n + counts the plan with or without browser), "+ Browser Access" (− n +,
-// how many units have it, at most the plan's quantity), then the AI add-ons (at most one of each per unit).
-function makePlanRow(itm){
-  const app=itm.id, web=itm.plan;
-  const block=document.createElement('div'); block.className='up-block'; block.dataset.itemId=app;
-  const plan=document.createElement('div'); plan.className='row'; plan.id='up-plan-'+app;
-  plan.dataset.itemId=app; plan.dataset.base=itm.price; plan.dataset.name=itm.name;
-  plan.innerHTML=`<div class="ri"><div class="rn">${escHtml(itm.name)}</div><div class="rs">${escHtml(itm.sub||'')}</div></div>
-    <div class="rp">${rowPriceHtml(app, itm.price)}</div><span class="up-ctl"></span>`;
-  block.appendChild(plan);
-  const br=document.createElement('div'); br.className='row up-addon'; br.id='up-br-'+app;
-  const extra=(upPrice(web)!=null&&upPrice(app)!=null)?upPrice(web)-upPrice(app):null;
-  br.innerHTML=`<div class="ri"><div class="rn"><b>+</b> Browser Access</div><div class="rs">Also use it in a web browser</div></div>
-    <div class="rp">${extra!=null?'+'+upMoney(extra):''}</div><span class="up-ctl"></span>`;
-  if(IMAP[web]&&!OOS_IDS.has(web)) block.appendChild(br);
-  UP_AI.forEach(a=>{
-    const ai=IMAP[a.id]; if(!ai||REMOVED_IDS.has(a.id)||OOS_IDS.has(a.id)) return;
-    const r=document.createElement('div'); r.className='row up-addon'; r.dataset.ai=a.id;
-    r.innerHTML=`<div class="ri"><div class="rn"><b>+</b> AI: ${escHtml(a.label)}</div><div class="rs">${escHtml(a.sub)}</div></div>
-      <div class="rp">+${rowPriceHtml(a.id, ai.price)}</div><span class="up-ctl"></span>`;
-    block.appendChild(r);
-  });
-  paintUpBlock(app, block);
-  return block;
+// The Uptodate set-up card: Features, Browser Access and AI rows (each a choice that can be switched off), the
+// total, and "+" which saves it as one account and lists it under the card.
+const UP_FEATURES = [   // feature → plan item (the _app item; its _web twin has Browser Access)
+  {k:'',label:'Online only',app:'up_online_app',web:'up_online_web'},
+  {k:'pathways',label:'Pathways',app:'up_pathways_app',web:'up_pathways_web'},
+  {k:'offline',label:'Offline',app:'up_offline_app',web:'up_offline_web'},
+  {k:'both',label:'Pathways + Offline',app:'up_vip_app',web:'up_vip_web'},
+];
+const upCfg = {feature:'', browser:false, ai:''};
+let upSaved = [];   // [{plan, ai}] — each saved set-up = one Uptodate account in the basket
+const upFeat = k => UP_FEATURES.find(f=>f.k===k)||UP_FEATURES[0];
+const upChip = (on,label,price,click,dis) => `<button type="button" class="up-chip${on?' on':''}"${dis?' disabled':''} onclick="event.stopPropagation();${click}">${label}${price?`<span>${price}</span>`:''}</button>`;
+function upCfgPlan(){ const f=upFeat(upCfg.feature); return upCfg.browser?f.web:f.app; }
+function upCfgTotal(){ return (upPrice(upCfgPlan())||0)+(upCfg.ai?(upPrice(upCfg.ai)||0):0); }
+function upAvail(id){ return IMAP[id]&&!OOS_IDS.has(id)&&!REMOVED_IDS.has(id); }
+function makeUpConfigurator(itm){
+  if(document.getElementById('upCfg')){   // e.g. in search results: a row that opens the Uptodate tab
+    const r=document.createElement('div'); r.className='row'; r.style.cursor='pointer';
+    r.innerHTML=`<div class="ri"><div class="rn">${escHtml(itm.name)}</div><div class="rs">Set it up in the Uptodate tab ›</div></div><div class="rp">${rowPriceHtml(itm.id, itm.price)}</div>`;
+    r.onclick=()=>switchCat('uptodate');
+    return r;
+  }
+  const d=document.createElement('div'); d.className='up-cfg'; d.id='upCfg';
+  return d;
 }
-function paintUpBlock(app, root){
-  root=root||document;
-  const itm=IMAP[app]; if(!itm) return;
-  const web=itm.plan, qa=cart[app]?cart[app].qty:0, qw=cart[web]?cart[web].qty:0, q=qa+qw;
-  const oos=OOS_IDS.has(app);
-  root.querySelectorAll('#up-plan-'+app+' .up-ctl').forEach(c=>{
-    c.innerHTML=oos?'<button class="add-btn oos" disabled>✕</button>'
-      :q?`<span class="qty-step" style="display:inline-flex"><button class="qs-btn minus" type="button" aria-label="One less" onclick="event.stopPropagation();upPlanStep('${app}',-1)">−</button><span class="qs-n">${q}</span><button class="qs-btn" type="button" aria-label="One more" onclick="event.stopPropagation();upPlanStep('${app}',1)">+</button></span>`
-      :`<button class="add-btn" aria-label="Add" onclick="event.stopPropagation();upPlanStep('${app}',1)">+</button>`;
-  });
-  const counts=upAiCount[app]||{};
-  root.querySelectorAll('#up-plan-'+app+' ~ .up-addon[data-ai] .up-ctl').forEach(c=>{
-    const ai=c.parentElement.dataset.ai, n=counts[ai]||0, full=n>=q;
-    c.innerHTML=n?`<span class="qty-step" style="display:inline-flex"><button class="qs-btn minus" type="button" aria-label="One less" onclick="event.stopPropagation();upAiStep('${app}','${ai}',-1)">−</button><span class="qs-n">${n}</span><button class="qs-btn" type="button" aria-label="One more"${full?' style="opacity:.35"':''} onclick="event.stopPropagation();upAiStep('${app}','${ai}',1)">+</button></span>`
-      :`<button class="add-btn" aria-label="Add" onclick="event.stopPropagation();upAiStep('${app}','${ai}',1)">+</button>`;
-  });
-  // Browser Access is counted like the AI add-ons: how many of this plan's units have it (0 … the plan's quantity)
-  root.querySelectorAll('#up-br-'+app+' .up-ctl').forEach(c=>{
-    c.innerHTML=qw?`<span class="qty-step" style="display:inline-flex"><button class="qs-btn minus" type="button" aria-label="One less" onclick="event.stopPropagation();upBrowserStep('${app}',-1)">−</button><span class="qs-n">${qw}</span><button class="qs-btn" type="button" aria-label="One more"${qw>=q?' style="opacity:.35"':''} onclick="event.stopPropagation();upBrowserStep('${app}',1)">+</button></span>`
-      :`<button class="add-btn" aria-label="Add Browser Access" onclick="event.stopPropagation();upBrowserStep('${app}',1)">+</button>`;
-  });
+function drawUpConfigurator(){
+  const el=document.getElementById('upCfg'); if(!el) return;
+  const base=upPrice('up_online_app'), f=upFeat(upCfg.feature), hasP=upCfg.feature==='pathways'||upCfg.feature==='both';
+  const plus=(a,b)=>{ const x=upPrice(a), y=upPrice(b); return x!=null&&y!=null?'+'+upMoney(x-y):''; };
+  let html=`<div class="row up-head"><div class="ri"><div class="rn">${escHtml(IMAP.up_online_app.name)}</div><div class="rs">Choose what you need below, then tap +</div></div><div class="rp">${rowPriceHtml('up_online_app', IMAP.up_online_app.price)}</div></div>`;
+  html+='<div class="up-sec"><div class="up-lbl">Features</div><div class="up-chips">'+
+    UP_FEATURES.filter(x=>x.k).map(x=>upChip(upCfg.feature===x.k, escHtml(x.label), plus(x.app,'up_online_app'), `upSetFeature('${x.k}')`, !upAvail(x.app))).join('')+'</div></div>';
+  const brPrice=plus(f.web,f.app);
+  html+='<div class="up-sec"><div class="up-lbl">Browser</div><div class="up-chips">'+
+    upChip(upCfg.browser, hasP?'Pathways Browser Access':'Browser Access', brPrice, 'upToggleBrowser()', !upAvail(f.web))+'</div></div>';
+  html+='<div class="up-sec"><div class="up-lbl">AI</div><div class="up-chips">'+
+    UP_AI.map(a=>upChip(upCfg.ai===a.id, escHtml(a.chip), upAvail(a.id)?'+'+upMoney(upPrice(a.id)):'', `upSetAi('${a.id}')`, !upAvail(a.id))).join('')+'</div></div>';
+  const ok=upAvail(upCfgPlan());
+  html+=`<div class="up-add"><div><div class="up-sum">${escHtml(upCfgSummary(upCfg))}</div><div class="up-tot">${upMoney(upCfgTotal())}</div></div>`+
+    `<button class="add-btn" aria-label="Add this Uptodate account" ${ok?'':'disabled'} onclick="event.stopPropagation();upSaveCfg()">+</button></div>`;
+  if(upSaved.length){
+    html+='<div class="up-saved"><div class="up-lbl">Your Uptodate accounts in this order</div>'+upSaved.map((s,i)=>
+      `<div class="up-saved-row"><span class="n">${i+1}</span><span class="t">${escHtml(upCfgSummary(s))}</span><span class="p">${upMoney((upPrice(s.plan)||0)+(s.ai?(upPrice(s.ai)||0):0))}</span><button class="x" aria-label="Remove" onclick="event.stopPropagation();upRemoveSaved(${i})">✕</button></div>`).join('')+'</div>';
+  }
+  el.innerHTML=html;
 }
-// Each plan's AI rows show what was added under that plan (the basket has one line per AI add-on). When the basket
-// has fewer (removed there), the counts shrink to match, the latest plans first.
-const upAiCount = {};   // plan app id -> {ai id: n}
-function upFitAiCounts(){
-  // a plan takes at most one of each add-on: fewer plans → its extra add-ons leave the basket too
-  Object.keys(upAiCount).forEach(pl=>{
-    const web=IMAP[pl]&&IMAP[pl].plan, pq=(cart[pl]?cart[pl].qty:0)+(web&&cart[web]?cart[web].qty:0);
-    UP_AI.forEach(a=>{
-      const n=upAiCount[pl][a.id]||0;
-      if(n>pq){
-        const drop=n-pq; upAiCount[pl][a.id]=pq;
-        if(cart[a.id]){ const left=cart[a.id].qty-drop; if(left>0) cart[a.id]={...cart[a.id],qty:left}; else delete cart[a.id]; }
-      }
-    });
-  });
-  UP_AI.forEach(a=>{
-    let have=cart[a.id]?cart[a.id].qty:0;
-    const plans=Object.keys(upAiCount);
-    plans.forEach(pl=>{ const n=upAiCount[pl][a.id]||0, keep=Math.min(n,have); upAiCount[pl][a.id]=keep; have-=keep; });
-  });
+function upCfgSummary(c){
+  const plan=c.plan||upCfgPlan(), f=UP_FEATURES.find(x=>x.app===plan||x.web===plan)||UP_FEATURES[0];
+  const browser=c.plan?plan===f.web:c.browser, ai=UP_AI.find(a=>a.id===c.ai);
+  return ['Online'+(f.k?' + '+f.label:''), browser?'Browser':'', ai?'AI: '+ai.chip:''].filter(Boolean).join(' · ');
 }
-function paintUpRows(){ upFitAiCounts(); Object.values(IMAP).forEach(i=>{ if(i.plan) paintUpBlock(i.id); }); }
-function upAiStep(app, ai, d){
-  const c=upAiCount[app]=upAiCount[app]||{};
-  const web=IMAP[app].plan, pq=(cart[app]?cart[app].qty:0)+(cart[web]?cart[web].qty:0);
-  if(d>0&&!pq){ showToast('Add '+IMAP[app].name+' first: the add-ons come with it'); return; }
-  if(d>0&&(c[ai]||0)>=pq){ showToast(pq===1?'One of each add-on per Uptodate plan':'At most '+pq+' (one per '+IMAP[app].name+')'); return; }
-  if(d>0){ c[ai]=(c[ai]||0)+1; addItem(ai); }
-  else if(c[ai]>0){ c[ai]--; stepQty(ai,-1); }
-  paintUpRows();
+function upSetFeature(k){ upCfg.feature=upCfg.feature===k?'':k; drawUpConfigurator(); }
+function upToggleBrowser(){ upCfg.browser=!upCfg.browser; drawUpConfigurator(); }
+function upSetAi(id){ upCfg.ai=upCfg.ai===id?'':id; drawUpConfigurator(); }
+function upSaveCfg(){
+  const plan=upCfgPlan(); if(!upAvail(plan)) return;
+  addItem(plan); if(upCfg.ai) addItem(upCfg.ai);   // into the basket first: the list is checked against it
+  upSaved.push({plan, ai:upCfg.ai});
+  showToast('Uptodate account '+upSaved.length+' added · '+upMoney(upCfgTotal())+'. Set up another or check out.');
+  upCfg.feature=''; upCfg.browser=false; upCfg.ai='';
+  drawUpConfigurator();
 }
-// The plan's + adds one without browser; its − takes one without browser first, then one with.
-function upPlanStep(app,d){
-  const web=IMAP[app].plan;
-  if(d>0) addItem(app);
-  else stepQty(cart[app]?app:web,-1);
-  paintUpRows();
-}
-// + Browser Access turns one unit of this plan into its browser version (at most all of them); − turns one back.
-function upBrowserStep(app,d){
-  const web=IMAP[app].plan, qa=cart[app]?cart[app].qty:0, qw=cart[web]?cart[web].qty:0;
-  if(d>0&&!qa&&!qw){ showToast('Add '+IMAP[app].name+' first: Browser Access comes with it'); return; }
-  if(d>0&&!qa){ showToast(qw===1?'One Browser Access per Uptodate plan':'At most '+qw+' (one per '+IMAP[app].name+')'); return; }
-  if(d<0&&!qw) return;
-  const from=d>0?app:web, to=d>0?web:app;
-  if(cart[from].qty<=1) delete cart[from]; else cart[from]={...cart[from],qty:cart[from].qty-1};
-  cart[to]=cart[to]?{...cart[to],qty:cart[to].qty+1}:{name:IMAP[to].fullname||IMAP[to].name,price:IMAP[to].price,qty:1};
+function upRemoveSaved(i){
+  const s=upSaved[i]; if(!s) return;
+  upSaved.splice(i,1);
+  [s.plan, s.ai].filter(Boolean).forEach(id=>{ if(cart[id]){ if(cart[id].qty>1) cart[id]={...cart[id],qty:cart[id].qty-1}; else delete cart[id]; } });
   syncBasket(); if(document.getElementById('basketOverlay').classList.contains('on')) renderBasket();
-  showToast(d>0?'+ Browser Access · +'+upMoney(upPrice(web)-upPrice(app)):'Browser Access removed');
+}
+// The basket can change elsewhere (its − / ✕): keep only the saved set-ups it still holds, newest dropped first.
+function paintUpRows(){
+  const left={}; Object.entries(cart).forEach(([id,i])=>left[id]=i.qty);
+  const keep=[];
+  upSaved.forEach(s=>{ if((left[s.plan]||0)>0&&(!s.ai||(left[s.ai]||0)>0)){ left[s.plan]--; if(s.ai) left[s.ai]--; keep.push(s); } });
+  upSaved=keep;
+  drawUpConfigurator();
 }
 // AI add-ons come with a plan: not more add-ons than plans in the basket (the bot checks this too).
 function uptodateAddonProblem(){
@@ -4222,6 +4217,7 @@ function uptodateAddonProblem(){
 
 // ── Init ──────────────────────────────────────────────────────────────
 buildCatalog();
+drawUpConfigurator();
 buildAdBanner();
 // Opened from the shareable link (t.me/<bot>?start=imdsearch -> the bot's button adds &open=imdsearch):
 // go straight to iMD and its "What does iMD include?" search.
