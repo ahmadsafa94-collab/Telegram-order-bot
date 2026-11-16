@@ -122,6 +122,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .ad-promo .ad-art .a1{font-size:62px;right:6px;top:10px}
 .ad-promo .ad-art .a2{font-size:30px;left:0;top:0;transform:rotate(-14deg)}
 .ad-promo .ad-art .a3{font-size:26px;left:8px;bottom:2px;transform:rotate(10deg)}
+.ad-slide.ad-promo.ad-dark{background:radial-gradient(120% 140% at 100% 0%,rgba(250,204,21,.35) 0%,rgba(250,204,21,0) 55%),
+  linear-gradient(135deg,#0b0b0f 0%,#18181b 55%,#3f2d06 100%)}
+.ad-dark .ad-kicker{background:#facc15;color:#111}
+.ad-promo.ad-dark .ad-title{font-size:14px}
+.ad-promo.ad-dark .ad-desc{font-size:10.5px;margin-top:4px}
+.ad-promo.ad-dark .ad-cta{margin-top:6px}
+.ad-dark .ad-cta{color:#111;background:#facc15}
+.ad-dark .ad-art .a3{font-size:34px;font-weight:900;color:#facc15;font-family:inherit}
 .ad-dots{display:flex;justify-content:center;gap:5px;margin-top:7px}
 .ad-dot{width:5.5px;height:5.5px;border-radius:50%;background:rgba(var(--fg-rgb),.22);transition:background .15s}
 .ad-dot.active{background:var(--teal2)}
@@ -2346,10 +2354,11 @@ async function openAdminDiscounts(){ openAdm('🏷 Discount codes'); loadAdminDi
 let dcProducts=[], dcScope='all', dcChosen=[], dcQ='';
 async function loadAdminDiscounts(items,made){
   try{ if(!items){ const d=await apiGet('/api/admin_discounts'); items=d.items||[]; dcProducts=d.products||dcProducts; } }catch(e){ admEl().innerHTML=failHtml(e); return; }
-  const keep={}; ['dcPct','dcUses','dcDays'].forEach(k=>{ const f=document.getElementById(k); if(f) keep[k]=f.value; });
+  const keep={}; ['dcCode','dcPct','dcUses','dcDays'].forEach(k=>{ const f=document.getElementById(k); if(f) keep[k]=f.value; });
   admEl().innerHTML=
     (made?'<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">New code created</div><div class="n" style="font-size:24px;letter-spacing:2px">'+escHtml(made)+'</div><button class="tk-btn" style="margin-top:8px" onclick="copyDiscount('+JSON.stringify(made).replace(/"/g,'&quot;')+')">📋 Copy code</button></div>':'')+
     '<div class="sub-section-lbl">Issue a new code</div>'+
+    fieldBox('dcCode','Code (optional: empty = random)',keep.dcCode)+
     '<div style="display:flex;gap:8px">'+fieldBox('dcPct','% off',keep.dcPct,'number')+fieldBox('dcUses','Uses',keep.dcUses,'number')+fieldBox('dcDays','Days valid',keep.dcDays,'number')+'</div>'+
     '<div class="t-meta" style="margin:2px 0 6px">Works for</div>'+
     '<div class="seg" id="dcScopeSeg" style="margin-bottom:8px"><button data-s="all" onclick="setDcScope(\'all\')">All subscriptions</button><button data-s="some" onclick="setDcScope(\'some\')">Only some</button></div>'+
@@ -2395,6 +2404,8 @@ function copyDiscount(code){ navigator.clipboard.writeText(code).then(()=>showTo
 async function createDiscount(){
   const v=id=>document.getElementById(id).value.trim(), btn=document.getElementById('dcSave');
   const percentage=parseFloat(v('dcPct')), uses=parseInt(v('dcUses'),10), days=parseInt(v('dcDays'),10);
+  const code=v('dcCode').toUpperCase();
+  if(code&&!/^[A-Z0-9][A-Z0-9_-]{2,31}$/.test(code)) return admMsg('A code is 3–32 letters or digits (- and _ allowed), e.g. BLACKFRIDAY26.');
   if(!(percentage>0&&percentage<=100)) return admMsg('The percentage must be between 1 and 100.');
   if(!(uses>=1)) return admMsg('Uses must be a whole number of at least 1.');
   if(!(days>=1)) return admMsg('Days must be a whole number of at least 1.');
@@ -2404,7 +2415,7 @@ async function createDiscount(){
     items=[].concat(...dcProducts.filter(p=>dcChosen.includes(p.name)).map(p=>p.ids));
   }
   btn.disabled=true; admMsg('Creating…',true);
-  try{ const d=await adminPost('/api/admin_discount_action',{action:'create',percentage,uses,days,items}); ['dcPct','dcUses','dcDays'].forEach(k=>document.getElementById(k).value=''); dcScope='all'; dcChosen=[]; dcQ=''; loadAdminDiscounts(d.items,d.code); }
+  try{ const d=await adminPost('/api/admin_discount_action',{action:'create',percentage,uses,days,items,code}); ['dcCode','dcPct','dcUses','dcDays'].forEach(k=>document.getElementById(k).value=''); dcScope='all'; dcChosen=[]; dcQ=''; loadAdminDiscounts(d.items,d.code); }
   catch(e){ admMsg(e.message); btn.disabled=false; }
 }
 function deleteDiscount(code){
@@ -4001,6 +4012,17 @@ tg.MainButton.onClick(submitOrder);
 // Earlier ads (kept in LOGOS to bring back): @Medicaltoolkit_bot (LOGOS.adMedicToolkit, link
 // https://t.me/Medicaltoolkit_bot) and UWorld Qbanks in iMD (LOGOS.uworld, goToCategory 'imd').
 const ADS = [
+  // Black Friday (owner, 16 Nov 2026): shown until the end of November; tapping copies BLACKFRIDAY26 and puts it in
+  // the discount box at checkout.
+  ...(Date.now() < Date.parse('2026-11-30T21:00:00Z') ? [{
+    promo: true, dark: true,
+    kicker: 'Black Friday',
+    title: '15% off Uptodate, Amboss, ACP MKSAP & Boardvitals',
+    desc: 'Code BLACKFRIDAY26 at checkout · until 30 November',
+    cta: 'Copy code',
+    art: ['🛍️','🏷️','%'],
+    action: () => usePromoCode('BLACKFRIDAY26')
+  }] : []),
   // Referral credits (16 Nov 2026): opens 🎁 How to get accounts for free, with the customer's link. Not for coworkers.
   ...(IS_COWORKER ? [] : [{
     promo: true,
@@ -4048,6 +4070,14 @@ function openAdLink(link){
   }catch(e){ window.open(link, '_blank'); }
 }
 
+// A promo code from a banner: copied, and put in the checkout's discount box (still applied with Apply there).
+let promoCode='';
+function usePromoCode(code){
+  promoCode=code;
+  try{ navigator.clipboard.writeText(code).catch(()=>{}); }catch(e){}
+  const inp=document.getElementById('discountInput'); if(inp&&!inp.value) inp.value=code;
+  showToast('Code '+code+' copied: it is filled in at checkout');
+}
 function buildAdBanner(){
   const wrap = document.getElementById('adBannerWrap');
   if (!wrap || !ADS.length) return;
@@ -4074,9 +4104,10 @@ function buildAdBanner(){
     if (ad.bright) slide.classList.add('ad-bright');
     if (ad.promo) {
       slide.classList.add('ad-promo');
+      if (ad.dark) slide.classList.add('ad-dark');
       slide.innerHTML = '<div class="ad-overlay"><span class="ad-kicker">' + escHtml(ad.kicker) + '</span><div class="ad-title">' + escHtml(ad.title) + '</div>'
         + '<div class="ad-desc">' + escHtml(ad.desc) + '</div><span class="ad-cta">' + escHtml(ad.cta) + '</span></div>'
-        + '<div class="ad-art" aria-hidden="true"><span class="a1">🎁</span><span class="a2">💳</span><span class="a3">🪙</span></div>';
+        + '<div class="ad-art" aria-hidden="true">' + (ad.art || ['🎁','💳','🪙']).map((a, k) => '<span class="a' + (k + 1) + '">' + escHtml(a) + '</span>').join('') + '</div>';
     } else {
       slide.style.backgroundImage = `url('${ad.img}')`;
       slide.innerHTML = `<div class="ad-overlay"><div class="ad-title">${escHtml(ad.title)}</div><div class="ad-desc">${escHtml(ad.desc)}</div></div>`;

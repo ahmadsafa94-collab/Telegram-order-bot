@@ -2300,16 +2300,36 @@ def _generate_discount_code(length: int = 8) -> str:
     return "".join(random.choices(alphabet, k=length))
 
 
-def db_create_discount_code(percentage: float, uses: int, days: int, items: list = None) -> str:
-    """Generates a fresh, guaranteed-unique code and saves it — the admin
-    never types the code itself, only the terms (percentage/uses/days)."""
+DISCOUNT_CODE_RE = re.compile(r"^[A-Z0-9][A-Z0-9_-]{2,31}$")
+
+
+def clean_custom_code(text) -> tuple:
+    """(code, problem) for a code the admin typed: 3–32 letters, digits, - or _, stored upper-case."""
+    code = str(text or "").strip().upper()
+    if not DISCOUNT_CODE_RE.match(code):
+        return None, "A code is 3–32 letters or digits (- and _ allowed), e.g. BLACKFRIDAY26."
     conn = sqlite3.connect(DB_PATH)
-    while True:
-        code = _generate_discount_code()
-        exists = conn.execute("SELECT 1 FROM discount_codes WHERE code = ?", (code,)).fetchone()
-        if not exists:
-            break
-    expires_at = (datetime.utcnow() + timedelta(days=days)).isoformat()
+    taken = conn.execute("SELECT 1 FROM discount_codes WHERE code = ?", (code,)).fetchone()
+    conn.close()
+    if taken:
+        return None, f"The code {code} already exists. Choose another one, or delete the old one first."
+    return code, None
+
+
+def db_create_discount_code(percentage: float, uses: int, days: int, items: list = None, code: str = None,
+                            expires_at: str = None) -> str:
+    """Saves a discount code: the admin's own (16 Nov 2026, checked with clean_custom_code first) or a fresh,
+    guaranteed-unique random one."""
+    conn = sqlite3.connect(DB_PATH)
+    if code:
+        code = code.strip().upper()
+    else:
+        while True:
+            code = _generate_discount_code()
+            exists = conn.execute("SELECT 1 FROM discount_codes WHERE code = ?", (code,)).fetchone()
+            if not exists:
+                break
+    expires_at = expires_at or (datetime.utcnow() + timedelta(days=days)).isoformat()
     conn.execute(
         "INSERT INTO discount_codes (code, percentage, uses_remaining, expires_at, created_at, items) "
         "VALUES (?, ?, ?, ?, ?, ?)",
@@ -2341,6 +2361,31 @@ def db_check_discount_code(code: str):
     if datetime.utcnow().isoformat() > expires_at:
         return None
     return percentage
+
+
+# Black Friday 2026 (owner, 16 Nov 2026): 15% off Uptodate, Amboss, ACP MKSAP and Boardvitals until the end of
+# November with BLACKFRIDAY26; the Mini App banner advertises it. Created once at startup if it isn't there.
+BLACK_FRIDAY_CODE = "BLACKFRIDAY26"
+BLACK_FRIDAY_ENDS = "2026-11-30T21:00:00"   # 30 Nov 24:00 in the owner's time (UTC+3), stored in UTC
+
+
+def black_friday_items() -> list:
+    return sorted([i for i in MENU if i.startswith("up_") and not i.startswith("up_ai")]
+                  + ["uptodate_ai_expert_1y", "uptodate_ai_tg_1y", "uptodate_ai_both_1y",
+                     "amboss_premium_1y", "amboss_library", "mksap_20", "boardvitals"])
+
+
+def ensure_black_friday_code():
+    if datetime.utcnow().isoformat() >= BLACK_FRIDAY_ENDS or db_get_meta("black_friday_2026_code"):
+        return
+    conn = sqlite3.connect(DB_PATH)
+    exists = conn.execute("SELECT 1 FROM discount_codes WHERE code = ?", (BLACK_FRIDAY_CODE,)).fetchone()
+    conn.close()
+    if not exists:
+        db_create_discount_code(15, 100000, 0, [i for i in black_friday_items() if i in MENU], BLACK_FRIDAY_CODE,
+                                BLACK_FRIDAY_ENDS)
+        logger.info("Discount code %s created (15%%, until %s)", BLACK_FRIDAY_CODE, BLACK_FRIDAY_ENDS)
+    db_set_meta("black_friday_2026_code", datetime.utcnow().isoformat(timespec="seconds"))
 
 
 def db_discount_code_items(code: str):
@@ -8270,8 +8315,23 @@ async def discount_field_reply(update: Update, context: ContextTypes.DEFAULT_TYP
                 return
             scope = sorted({i for g in groups for i in g["ids"]})
             names = [g["name"] for g in groups]
-        days = data["days"]
-        code = db_create_discount_code(data["percentage"], data["uses"], days, scope)
+        data["scope"], data["names"] = scope, names
+        context.user_data["discount_data"] = data
+        context.user_data["awaiting_discount_field"] = "code"
+        await update.message.reply_text(
+            "Your own code (e.g. BLACKFRIDAY26: 3–32 letters or digits), or *random* for a generated one:",
+            parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if field == "code":
+        own = None
+        if text.lower() not in ("random", "r", "-"):
+            own, why = clean_custom_code(text)
+            if why:
+                await update.message.reply_text(why + " Or send random.")
+                return
+        scope, names, days = data.get("scope"), data.get("names") or [], data["days"]
+        code = db_create_discount_code(data["percentage"], data["uses"], days, scope, own)
         context.user_data.pop("awaiting_discount_field", None)
         context.user_data.pop("discount_data", None)
         expires = (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%d")
@@ -13034,11 +13094,16 @@ async def http_admin_discount_action(request):
             return _admin_bad("Uses must be a whole number of at least 1.")
         if days is None or not (1 <= days <= 3650):
             return _admin_bad("Days must be a whole number of at least 1.")
+        own = None
+        if str(data.get("code") or "").strip():   # the admin's own code (16 Nov 2026); empty = random
+            own, why = clean_custom_code(data.get("code"))
+            if why:
+                return _admin_bad(why)
         scope = data.get("items")   # None/[] = every subscription; else item ids it works for (16 Nov 2026)
         if scope:
             if not isinstance(scope, list) or not all(isinstance(i, str) and i in MENU for i in scope):
                 return _admin_bad("Choose the subscriptions again (one isn't in the Shop anymore).")
-        code = db_create_discount_code(pct, uses, days, scope or None)
+        code = db_create_discount_code(pct, uses, days, scope or None, own)
         return web.json_response({"ok": True, "code": code, "items": _discount_rows()}, headers=headers)
     if action == "delete":
         code = data.get("code")
@@ -19802,6 +19867,7 @@ def main():
     # The owner's new Uptodate list (16 Nov 2026) replaces earlier edits of those plans' names, prices and Shop
     # titles, once; later edits are kept as usual.
     reset_uptodate_edits_once()
+    ensure_black_friday_code()
     # Apply any admin edits from 📦 Manage Stock → Edit — layered on top
     # of the built-in catalog and custom items above, so edited titles/
     # prices survive restarts without touching the hardcoded CATALOG tree.
