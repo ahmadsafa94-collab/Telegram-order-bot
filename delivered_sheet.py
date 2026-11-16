@@ -366,6 +366,18 @@ async def _apply_edit(tab: str, payload: dict) -> str:
     return f"row {n}: username/password updated"
 
 
+async def find_username(username: str) -> list:
+    """Rows of the main tab whose username (F) is this one, ignoring case and spaces: [{row, account, uni, ...}],
+    newest (lowest in the sheet) first. For @Utdreg_bot's ➕ New renewal (16 Nov 2026)."""
+    rows = await read_tab(MAIN_TAB)
+    want = (username or "").strip().lower()
+    cell = lambda r, i: (r[i] if len(r) > i else "").strip()
+    hits = [{"row": i + 1, "account": cell(r, 0), "duration": cell(r, 1), "renewal": cell(r, 2), "created": cell(r, 3),
+             "ends": cell(r, 4), "uni": cell(r, 7)}
+            for i, r in enumerate(rows) if i > 0 and want and cell(r, 5).lower() == want]
+    return hits[::-1]
+
+
 # ── renewals (@Utdreg_bot) ───────────────────────────────────────────
 
 def parse_sheet_date(text: str):

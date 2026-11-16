@@ -12115,6 +12115,28 @@ async def http_delivered_sheet_renewal(request):
     return web.json_response({"ok": True, "status": status, "note": note if done else ""})
 
 
+async def http_delivered_sheet_lookup(request):
+    """POST {username} from @Utdreg_bot (X-Api-Key): that username's rows in the delivered sheet (newest first), so
+    its ➕ New renewal can say which Uni (column H) the account is on (16 Nov 2026)."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        username = str((await request.json())["username"]).strip()
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return web.json_response({"error": "invalid request body"}, status=400)
+    if not username:
+        return web.json_response({"error": "username is needed"}, status=400)
+    if not dsheet.configured():
+        return web.json_response({"ok": False, "error": dsheet.not_configured_reason()})
+    try:
+        rows = await dsheet.find_username(username)
+    except Exception as exc:
+        logger.warning("Delivered sheet lookup for %s failed: %s", username, exc)
+        return web.json_response({"ok": False, "error": f"couldn't read the sheet ({str(exc)[:120]})"})
+    return web.json_response({"ok": True, "found": bool(rows), "rows": rows[:10]})
+
+
 async def sheet_outbox_job(context: ContextTypes.DEFAULT_TYPE):
     """Every 30 s: what waits for the delivered sheet goes to Google."""
     async def notify(text):
@@ -13459,6 +13481,7 @@ async def start_api_server(application):
     api_app.router.add_post("/api/admin_sheet", http_admin_sheet)
     api_app.router.add_options("/api/admin_sheet", http_set_coworker_price_options)
     api_app.router.add_post("/api/delivered_sheet_renewal", http_delivered_sheet_renewal)
+    api_app.router.add_post("/api/delivered_sheet_lookup", http_delivered_sheet_lookup)
     api_app.router.add_options("/api/admin_deliver", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_chat_action", http_admin_chat_action)
     api_app.router.add_post("/api/admin_edit_delivery", http_admin_edit_delivery)
