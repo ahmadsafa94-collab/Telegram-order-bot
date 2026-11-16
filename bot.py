@@ -214,16 +214,21 @@ MENU = {
     "imd_1y": ("iMD VIP - 1 Year", 75.00),
     "imd_2y": ("iMD VIP - 2 Years", 140.00),
 
-    # Uptodate — three access tiers, each with a Mobile App / Mobile App +
-    # Browser choice.
-    "up_online_app": ("Uptodate Online 1 Year - Mobile App", 20.00),
-    "up_online_web": ("Uptodate Online 1 Year - Mobile App + Browser", 35.00),
-    "up_offline_app": ("Uptodate Online + Offline Access 1 Year - Mobile App", 30.00),
-    "up_offline_web": ("Uptodate Online + Offline Access 1 Year - Mobile App + Browser", 45.00),
-    "up_pathways_app": ("Uptodate Online + Pathways Access 1 Year - Mobile App", 30.00),
-    "up_pathways_web": ("Uptodate Online + Pathways Access 1 Year - Mobile App + Browser", 45.00),
-    # No longer sold on its own (6 Nov 2026: replaced by the Official + Telegram Chat bundle below); kept for old
-    # orders and for its codes pool, which the bundle uses.
+    # Uptodate (owner, 16 Nov 2026) — the official app (no browser) in four plans; "+ Browser Access" is the _web
+    # version of each plan (plan price + 12/12/17/17). AI add-ons (1 year) below, only with a plan.
+    "up_online_app": ("Uptodate Online 1 Year - Official App", 20.00),
+    "up_online_web": ("Uptodate Online 1 Year - Official App + Browser Access", 32.00),
+    "up_offline_app": ("Uptodate Online + Offline 1 Year - Official App", 30.00),
+    "up_offline_web": ("Uptodate Online + Offline 1 Year - Official App + Browser Access", 42.00),
+    "up_pathways_app": ("Uptodate Online + Pathways 1 Year - Official App", 30.00),
+    "up_pathways_web": ("Uptodate Online + Pathways 1 Year - Official App + Browser Access", 47.00),
+    "up_vip_app": ("Uptodate VIP: Online + Offline + Pathways 1 Year - Official App", 45.00),
+    "up_vip_web": ("Uptodate VIP: Online + Offline + Pathways 1 Year - Official App + Browser Access", 62.00),
+    # AI add-ons, 1 year, sold only together with an Uptodate plan (UPTODATE_AI_ADDONS / addon_problem).
+    "uptodate_ai_expert_1y": ("Uptodate Expert AI (Official App) - 1 Year add-on", 15.00),
+    "uptodate_ai_tg_1y": ("Uptodate AI (Telegram Bot) - 1 Year add-on", 10.00),
+    "uptodate_ai_both_1y": ("Uptodate Expert AI (Official App) + Uptodate AI (Telegram Bot) - 1 Year add-on", 20.00),
+    # No longer sold (6 Nov 2026, then 16 Nov 2026: AI is only an add-on now); these three stay for old orders.
     "uptodate_ai_2m": ("Uptodate Expert AI (Telegram Bot) - 3 Months", 10.00),
     "uptodate_ai_official_3m": ("Uptodate AI (Official) - 3 Months", 15.00),
     # The official app account (details collected and delivered like the one above) plus a code for the Uptodate
@@ -337,31 +342,38 @@ CATALOG = {
             "up_online": {
                 "label": "Online 1 Year",
                 "children": {
-                    "up_online_app": {"label": "Mobile App", "item": "up_online_app"},
-                    "up_online_web": {"label": "Mobile App + Browser", "item": "up_online_web"},
+                    "up_online_app": {"label": "Official App", "item": "up_online_app"},
+                    "up_online_web": {"label": "Official App + Browser Access", "item": "up_online_web"},
                 },
             },
             "up_offline": {
-                "label": "Online + Offline Access 1 Year",
+                "label": "Online + Offline 1 Year",
                 "children": {
-                    "up_offline_app": {"label": "Mobile App", "item": "up_offline_app"},
-                    "up_offline_web": {"label": "Mobile App + Browser", "item": "up_offline_web"},
+                    "up_offline_app": {"label": "Official App", "item": "up_offline_app"},
+                    "up_offline_web": {"label": "Official App + Browser Access", "item": "up_offline_web"},
                 },
             },
             "up_pathways": {
-                "label": "Online + Pathways Access 1 Year",
+                "label": "Online + Pathways 1 Year",
                 "children": {
-                    "up_pathways_app": {"label": "Mobile App", "item": "up_pathways_app"},
-                    "up_pathways_web": {"label": "Mobile App + Browser", "item": "up_pathways_web"},
+                    "up_pathways_app": {"label": "Official App", "item": "up_pathways_app"},
+                    "up_pathways_web": {"label": "Official App + Browser Access", "item": "up_pathways_web"},
                 },
             },
-            "uptodate_ai_official_3m": {
-                "label": "Uptodate AI (Official) - 3 Months",
-                "item": "uptodate_ai_official_3m",
+            "up_vip": {
+                "label": "VIP: Online + Offline + Pathways 1 Year",
+                "children": {
+                    "up_vip_app": {"label": "Official App", "item": "up_vip_app"},
+                    "up_vip_web": {"label": "Official App + Browser Access", "item": "up_vip_web"},
+                },
             },
-            "uptodate_ai_bundle_3m": {
-                "label": "Uptodate AI (Official) + Uptodate Telegram Chat - 3 Months",
-                "item": "uptodate_ai_bundle_3m",
+            "up_ai_addons": {
+                "label": "➕ AI add-on (with a plan above) 1 Year",
+                "children": {
+                    "uptodate_ai_expert_1y": {"label": "Uptodate Expert AI (official app)", "item": "uptodate_ai_expert_1y"},
+                    "uptodate_ai_tg_1y": {"label": "Uptodate AI (Telegram bot)", "item": "uptodate_ai_tg_1y"},
+                    "uptodate_ai_both_1y": {"label": "Both", "item": "uptodate_ai_both_1y"},
+                },
             },
         },
     },
@@ -394,11 +406,30 @@ IMD_TRIGGER_ITEMS = {"imd_6m", "imd_1y", "imd_2y"}
 # iMD/renewal serials, keyed by this item's own "duration" value so it's
 # fully separate from the 6m/1y iMD pools and manageable the same way
 # (📦 Manage Stock → this item → Stock, or the same add/remove flow).
-UPTODATE_AI_TRIGGER_ITEMS = {"uptodate_ai_2m"}
+UPTODATE_AI_TRIGGER_ITEMS = {"uptodate_ai_2m", "uptodate_ai_tg_1y"}
 UPTODATE_AI_CODES_DURATION = "uptodate_ai_2m"
+# The 1-year Telegram bot codes (16 Nov 2026) have their own pool.
+UPTODATE_AI_CODES_1Y = "uptodate_ai_1y"
 # Bundles that include the Uptodate Telegram chat: the rest is delivered as usual (details, then the admin), and a
-# code from the same pool is sent as soon as the order is paid.
-UPTODATE_AI_BUNDLE_ITEMS = {"uptodate_ai_bundle_3m"}
+# code from the matching pool is sent as soon as the order is paid.
+UPTODATE_AI_BUNDLE_ITEMS = {"uptodate_ai_bundle_3m", "uptodate_ai_both_1y"}
+# Which codes pool each code-delivered item takes from.
+UPTODATE_AI_CODE_POOL = {"uptodate_ai_2m": UPTODATE_AI_CODES_DURATION, "uptodate_ai_bundle_3m": UPTODATE_AI_CODES_DURATION,
+                         "uptodate_ai_tg_1y": UPTODATE_AI_CODES_1Y, "uptodate_ai_both_1y": UPTODATE_AI_CODES_1Y}
+# Uptodate plans and the AI add-ons that can only be bought with one (16 Nov 2026).
+UPTODATE_PLAN_ITEMS = {"up_online_app", "up_online_web", "up_offline_app", "up_offline_web",
+                       "up_pathways_app", "up_pathways_web", "up_vip_app", "up_vip_web"}
+UPTODATE_AI_ADDONS = {"uptodate_ai_expert_1y", "uptodate_ai_tg_1y", "uptodate_ai_both_1y"}
+
+
+def addon_problem(order_items: dict):
+    """Why an order can't be placed as it is: more Uptodate AI add-ons than Uptodate plans. None when fine."""
+    addons = sum(q for i, q in order_items.items() if i in UPTODATE_AI_ADDONS)
+    plans = sum(q for i, q in order_items.items() if i in UPTODATE_PLAN_ITEMS)
+    if addons > plans:
+        return ("The Uptodate AI add-ons come with an Uptodate plan (Online, Online + Offline, Online + Pathways or "
+                "VIP): add a plan for each AI add-on.")
+    return None
 
 # Items that need no customer-entered details at all AND can't be
 # auto-delivered (unlike Uptodate AI's serial pool) — access has to be
@@ -414,6 +445,7 @@ SERIAL_POOL_LABELS = {
     "6m": "iMD — 6 Months",
     "1y": "iMD — 1 Year",
     UPTODATE_AI_CODES_DURATION: "Uptodate AI 3 Months",
+    UPTODATE_AI_CODES_1Y: "Uptodate AI Telegram 1 Year",
 }
 
 # ------------------------------------------------------------------
@@ -426,6 +458,7 @@ UPTODATE_TICKET_ITEMS = {
     "item1", "item3",  # legacy
     "up_online_app", "up_online_web", "up_offline_app", "up_offline_web",
     "up_pathways_app", "up_pathways_web", "uptodate_ai_official_3m", "uptodate_ai_bundle_3m",
+    "up_vip_app", "up_vip_web", "uptodate_ai_expert_1y", "uptodate_ai_tg_1y", "uptodate_ai_both_1y",
 }
 
 IMD_FORGOT_PASSWORD_URL = "https://en.imedicaldoctor.net/forgot.php"
@@ -2917,6 +2950,22 @@ def db_set_item_removed(item_id: str, removed: bool):
     )
     conn.commit()
     conn.close()
+
+
+def reset_uptodate_edits_once():
+    """Clears earlier Manage Stock edits (name, price, duration, removed) and Shop titles of the Uptodate plans and
+    AI add-ons the first time the new Uptodate list runs, so the owner's new prices show (16 Nov 2026)."""
+    if db_get_meta("uptodate_list_2026_11_16"):
+        return
+    ids = sorted(UPTODATE_PLAN_ITEMS | UPTODATE_AI_ADDONS)
+    marks = ",".join("?" * len(ids))
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(f"DELETE FROM item_overrides WHERE item_id IN ({marks})", ids)
+    conn.execute(f"DELETE FROM shop_titles WHERE item_id IN ({marks})", ids)
+    conn.commit()
+    conn.close()
+    db_set_meta("uptodate_list_2026_11_16", datetime.utcnow().isoformat(timespec="seconds"))
+    logger.info("Uptodate list of 16 Nov 2026: earlier edits of %s cleared", ", ".join(ids))
 
 
 def db_load_item_overrides():
@@ -5793,6 +5842,10 @@ async def start_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = query.from_user
+    problem = addon_problem(cart)
+    if problem:
+        await query.edit_message_text("⚠️ " + problem, reply_markup=menu_keyboard())
+        return
     total = cart_total(cart, user.id)
     order_id = db_create_order(user.id, user.username or user.first_name, cart, total)
     coworker_login = db_get_user_coworker(user.id)
@@ -10852,6 +10905,9 @@ async def http_create_order(request):
         return web.json_response(
             {"error": f"order between 1 and {CREATE_ORDER_MAX_UNITS} subscriptions"}, status=400
         )
+    problem = addon_problem(order_items)   # Uptodate AI add-ons only with a plan (16 Nov 2026)
+    if problem:
+        return web.json_response({"error": problem}, status=400)
 
     # Account details for the first unit that takes any, checked before anything is created.
     first_unit = next((i for i in order_items if _register_kind(i) is not None), None)
@@ -16824,7 +16880,13 @@ async def send_uptodate_ai_bundle_code(context: ContextTypes.DEFAULT_TYPE, order
     sent_key = f"bundle_code_sent:{fulfilment_id}"
     if db_get_meta(sent_key):
         return
-    serial = db_pop_serial(UPTODATE_AI_CODES_DURATION)
+    frow = db_get_fulfilment(fulfilment_id)
+    item_id = frow[3] if frow and frow[3] in UPTODATE_AI_BUNDLE_ITEMS else "uptodate_ai_bundle_3m"
+    pool = UPTODATE_AI_CODE_POOL[item_id]
+    product = ("Uptodate Expert AI (Official App) + Uptodate AI (Telegram Bot) 1 Year" if item_id == "uptodate_ai_both_1y"
+               else "Uptodate AI (Official) + Uptodate Telegram Chat")
+    official = "Uptodate Expert AI (Official App)" if item_id == "uptodate_ai_both_1y" else "Uptodate AI (Official)"
+    serial = db_pop_serial(pool)
     if not serial:
         db_set_meta(sent_key, "pool empty, admin told")
         if ADMIN_CHAT_ID:
@@ -16832,9 +16894,10 @@ async def send_uptodate_ai_bundle_code(context: ContextTypes.DEFAULT_TYPE, order
                 await context.bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
                     text=(
-                        f"⚠️ Order #{order_id} — Uptodate AI (Official) + Telegram Chat sold but the Uptodate AI codes "
-                        "pool is empty, so the Telegram chat code wasn't sent. Add codes (➕ Add Serials → Uptodate AI "
-                        f"3 Months) and send the customer (ID {user_id}) one with: Click @Up2down_bot, type /Redeem <code>."
+                        f"⚠️ Order #{order_id} — {product} sold but the codes pool is empty ({SERIAL_POOL_LABELS.get(pool, pool)}), "
+                        "so the Telegram code wasn't sent. Add codes (➕ Add Serials → "
+                        f"{SERIAL_POOL_LABELS.get(pool, pool)}) and send the customer (ID {user_id}) one with: Click "
+                        "@Up2down_bot, type /Redeem <code>."
                     ),
                 )
             except Exception:
@@ -16844,12 +16907,12 @@ async def send_uptodate_ai_bundle_code(context: ContextTypes.DEFAULT_TYPE, order
     db_finalize_serial(serial_id, order_id, success=True)
     db_set_meta(sent_key, code)
     message = (
-        "✅ Your Uptodate Telegram Chat (part of Uptodate AI (Official) + Uptodate Telegram Chat) is ready!\n\n"
+        f"✅ Your Uptodate Telegram Chat (part of {product}) is ready!\n\n"
         "1️⃣ Click on @Up2down_bot\n"
         f"2️⃣ Type /Redeem {code}\n\n"
-        "Your Uptodate AI (Official) account is sent separately."
+        f"Your {official} account is sent separately."
     )
-    db_add_delivery(order_id, user_id, "uptodate_ai_bundle_3m", message)
+    db_add_delivery(order_id, user_id, item_id, message)
     try:
         await context.bot.send_message(chat_id=user_id, text=message)
     except Exception:
@@ -16869,7 +16932,11 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
     """Pops one code from the Uptodate AI pool and delivers it instantly —
     no customer details needed at all, this runs the moment payment is
     confirmed, same timing as iMD's auto-registration."""
-    serial = db_pop_serial(UPTODATE_AI_CODES_DURATION)
+    frow = db_get_fulfilment(fulfilment_id)
+    item_id = frow[3] if frow and frow[3] in UPTODATE_AI_CODE_POOL else "uptodate_ai_2m"
+    pool = UPTODATE_AI_CODE_POOL[item_id]
+    label = "Uptodate AI (Telegram Bot) 1 Year" if pool == UPTODATE_AI_CODES_1Y else "Uptodate Expert AI (Telegram Bot)"
+    serial = db_pop_serial(pool)
 
     if not serial:
         # Pool is empty — fall back to normal manual delivery so the order
@@ -16880,8 +16947,8 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
                 await context.bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
                     text=(
-                        f"⚠️ Order #{order_id} — Uptodate Expert AI (Telegram Bot) sold but the codes "
-                        "pool is empty. Add more codes via 📦 Manage Stock → Uptodate Expert AI → Stock, "
+                        f"⚠️ Order #{order_id} — {label} sold but the codes pool is empty "
+                        f"({SERIAL_POOL_LABELS.get(pool, pool)}). Add codes (➕ Add Serials), "
                         "then deliver this one manually."
                     ),
                     reply_markup=InlineKeyboardMarkup(
@@ -16898,11 +16965,11 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
     db_set_fulfilment_info(fulfilment_id, {"code": code})
 
     message = (
-        "✅ Your Uptodate Expert AI (Telegram Bot) subscription is ready!\n\n"
+        f"✅ Your {label} subscription is ready!\n\n"
         "1️⃣ Click on @Up2down_bot\n"
         f"2️⃣ Type /Redeem {code}"
     )
-    db_add_delivery(order_id, user_id, "uptodate_ai_2m", message)
+    db_add_delivery(order_id, user_id, item_id, message)
 
     try:
         await context.bot.send_message(chat_id=user_id, text=message)
@@ -16915,7 +16982,7 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
         try:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
-                text=f"✅ Delivered Uptodate Expert AI code {code} — Order #{order_id}",
+                text=f"✅ Delivered {label} code {code} — Order #{order_id}",
             )
         except Exception:
             pass
@@ -18114,8 +18181,10 @@ async def add_serials_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         duration = "1y"
     elif duration_arg in ("uptodateai", "uptodate_ai", "uptodateaicode", "aicode"):
         duration = UPTODATE_AI_CODES_DURATION
+    elif duration_arg in ("uptodateai1y", "uptodate_ai_1y", "aicode1y", "ai1y"):
+        duration = UPTODATE_AI_CODES_1Y
     else:
-        await update.message.reply_text("Duration must be '6m', '1y', or 'uptodateai'.")
+        await update.message.reply_text("Duration must be '6m', '1y', 'uptodateai' or 'uptodateai1y'.")
         return
 
     codes = parse_serial_codes(" ".join(context.args[1:]))
@@ -18844,6 +18913,10 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
         text = "None of your items are available right now.\n" + "\n".join(skipped)
         await message.reply_text(text)
         return {"ok": False, "error": text}
+    problem = addon_problem(order_items)
+    if problem:
+        await message.reply_text("⚠️ " + problem)
+        return {"ok": False, "error": problem}
 
     # ── Apply the coworker discount server-side, before anything else —
     # never trust a client-sent discount; look up whether THIS Telegram
@@ -19721,6 +19794,9 @@ def main():
     for item_id, name, price in db_load_book_menu_items():
         MENU[item_id] = (name, price)
 
+    # The owner's new Uptodate list (16 Nov 2026) replaces earlier edits of those plans' names, prices and Shop
+    # titles, once; later edits are kept as usual.
+    reset_uptodate_edits_once()
     # Apply any admin edits from 📦 Manage Stock → Edit — layered on top
     # of the built-in catalog and custom items above, so edited titles/
     # prices survive restarts without touching the hardcoded CATALOG tree.
