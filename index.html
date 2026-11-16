@@ -4205,10 +4205,10 @@ async function openSheet(){
 async function drawSheet(){
   const box=document.getElementById('sheetContent');
   if(!document.getElementById('sheetRows')){
-    box.innerHTML='<div class="seg" id="sheetSeg"><button data-t="main">Delivered</button><button data-t="imd">iMD</button></div>'
+    box.innerHTML='<button class="btn" id="sheetFile">📥 Send me the .xlsx (password-protected)</button><div id="sheetFileMsg" class="t-meta" style="min-height:16px;margin:4px 0 6px"></div>'
+      +'<div class="seg" id="sheetSeg"><button data-t="main">Delivered</button><button data-t="imd">iMD</button></div>'
       +'<div class="search-wrap" style="margin-bottom:8px"><span class="search-ico">🔍</span><input id="sheetSearch" type="text" placeholder="Search name, username, order #, customer…" aria-label="Search the sheet"></div>'
-      +'<div id="sheetInfo" class="t-meta" style="margin-bottom:6px"></div><div id="sheetRows"></div>'
-      +'<button class="btn sec" id="sheetFile" style="margin-top:10px">📥 Send me the .xlsx (password-protected)</button><div id="sheetFileMsg" class="t-meta" style="min-height:16px"></div>';
+      +'<div id="sheetInfo" class="t-meta" style="margin-bottom:6px"></div><div id="sheetRows"></div>';
     box.querySelectorAll('#sheetSeg button').forEach(b=>b.onclick=()=>{ sheetTab=b.dataset.t; loadSheetRows(); });
     const s=document.getElementById('sheetSearch'); s.value=sheetQ;
     s.oninput=()=>{ clearTimeout(sheetTimer); sheetTimer=setTimeout(()=>{ sheetQ=s.value.trim(); loadSheetRows(); },350); };
