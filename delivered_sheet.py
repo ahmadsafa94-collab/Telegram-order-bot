@@ -262,6 +262,18 @@ def credentials(message: str) -> tuple:
     return user, (p.group(1) if p else "")
 
 
+_DURATION_RE = re.compile(r"\s*[-–—(:,|]?\s*\b\d+\s*(?:years?|yrs?|months?|weeks?|days?)\b\s*\)?", re.I)
+
+
+def title_only(name: str) -> str:
+    """Column A without the duration (it's in B): 'iMD VIP - 6 Months' → 'iMD VIP', 'France-Clinicalkey Student
+    (EMC Consult) webproxy - 1 Year' → 'France-Clinicalkey Student (EMC Consult) webproxy' (owner, 16 Nov 2026)."""
+    t = _DURATION_RE.sub(" ", name or "")
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    t = re.sub(r"\s*([-–—+])\s*([-–—])\s*", r" \1 ", t)          # 'A - - B' left behind → 'A - B'
+    return re.sub(r"^[\s\-–—+:,|]+|[\s\-–—+:,|(]+$", "", t).strip() or (name or "")
+
+
 def build_row(name: str, item_id: str, delivered: datetime, message: str, access: str, coworker: str,
               order_id: int, user_id: int, username: str) -> list:
     d = delivered.date()
@@ -269,7 +281,7 @@ def build_row(name: str, item_id: str, delivered: datetime, message: str, access
     end = expiry_date(d, dur)
     user, password = credentials(message)
     renew = (d + timedelta(days=UPTODATE_RENEW_DAYS)).strftime("%d%m%y") if is_uptodate(item_id, name) else "Auto"
-    return [name, dur, renew, d.strftime("%d/%m/%y"), end.strftime("%d/%m/%y") if end else "", user, password,
+    return [title_only(name), dur, renew, d.strftime("%d/%m/%y"), end.strftime("%d/%m/%y") if end else "", user, password,
             access or "", coworker or "Me", str(order_id), str(user_id), (username or "").lstrip("@"), ""]
 
 
