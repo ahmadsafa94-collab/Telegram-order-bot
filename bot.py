@@ -423,12 +423,16 @@ UPTODATE_AI_ADDONS = {"uptodate_ai_expert_1y", "uptodate_ai_tg_1y", "uptodate_ai
 
 
 def addon_problem(order_items: dict):
-    """Why an order can't be placed as it is: more Uptodate AI add-ons than Uptodate plans. None when fine."""
-    addons = sum(q for i, q in order_items.items() if i in UPTODATE_AI_ADDONS)
+    """Why an order can't be placed as it is: an Uptodate AI add-on without a plan, or more of one add-on type than
+    Uptodate plans ordered (owner, 16 Nov 2026: one plan takes at most one of each add-on). None when fine."""
     plans = sum(q for i, q in order_items.items() if i in UPTODATE_PLAN_ITEMS)
-    if addons > plans:
-        return ("The Uptodate AI add-ons come with an Uptodate plan (Online, Online + Offline, Online + Pathways or "
-                "VIP): add a plan for each AI add-on.")
+    for i, q in order_items.items():
+        if i in UPTODATE_AI_ADDONS and q > plans:
+            if not plans:
+                return ("The Uptodate AI add-ons come with an Uptodate plan (Online, Online + Offline, Online + "
+                        "Pathways or VIP): add a plan first.")
+            return (f"At most {plans} of each Uptodate AI add-on: one per Uptodate plan in the order "
+                    f"({MENU[i][0]}: {q}).")
     return None
 
 # Items that need no customer-entered details at all AND can't be

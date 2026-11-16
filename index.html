@@ -4154,8 +4154,8 @@ function paintUpBlock(app, root){
   });
   const counts=upAiCount[app]||{};
   root.querySelectorAll('#up-plan-'+app+' ~ .up-addon[data-ai] .up-ctl').forEach(c=>{
-    const ai=c.parentElement.dataset.ai, n=counts[ai]||0;
-    c.innerHTML=n?`<span class="qty-step" style="display:inline-flex"><button class="qs-btn minus" type="button" aria-label="One less" onclick="event.stopPropagation();upAiStep('${app}','${ai}',-1)">−</button><span class="qs-n">${n}</span><button class="qs-btn" type="button" aria-label="One more" onclick="event.stopPropagation();upAiStep('${app}','${ai}',1)">+</button></span>`
+    const ai=c.parentElement.dataset.ai, n=counts[ai]||0, full=n>=q;
+    c.innerHTML=n?`<span class="qty-step" style="display:inline-flex"><button class="qs-btn minus" type="button" aria-label="One less" onclick="event.stopPropagation();upAiStep('${app}','${ai}',-1)">−</button><span class="qs-n">${n}</span><button class="qs-btn" type="button" aria-label="One more"${full?' style="opacity:.35"':''} onclick="event.stopPropagation();upAiStep('${app}','${ai}',1)">+</button></span>`
       :`<button class="add-btn" aria-label="Add" onclick="event.stopPropagation();upAiStep('${app}','${ai}',1)">+</button>`;
   });
   const on=q?qw>0:!!upWantBrowser[app];
@@ -4167,6 +4167,17 @@ function paintUpBlock(app, root){
 // has fewer (removed there), the counts shrink to match, the latest plans first.
 const upAiCount = {};   // plan app id -> {ai id: n}
 function upFitAiCounts(){
+  // a plan takes at most one of each add-on: fewer plans → its extra add-ons leave the basket too
+  Object.keys(upAiCount).forEach(pl=>{
+    const web=IMAP[pl]&&IMAP[pl].plan, pq=(cart[pl]?cart[pl].qty:0)+(web&&cart[web]?cart[web].qty:0);
+    UP_AI.forEach(a=>{
+      const n=upAiCount[pl][a.id]||0;
+      if(n>pq){
+        const drop=n-pq; upAiCount[pl][a.id]=pq;
+        if(cart[a.id]){ const left=cart[a.id].qty-drop; if(left>0) cart[a.id]={...cart[a.id],qty:left}; else delete cart[a.id]; }
+      }
+    });
+  });
   UP_AI.forEach(a=>{
     let have=cart[a.id]?cart[a.id].qty:0;
     const plans=Object.keys(upAiCount);
@@ -4176,6 +4187,9 @@ function upFitAiCounts(){
 function paintUpRows(){ upFitAiCounts(); Object.values(IMAP).forEach(i=>{ if(i.plan) paintUpBlock(i.id); }); }
 function upAiStep(app, ai, d){
   const c=upAiCount[app]=upAiCount[app]||{};
+  const web=IMAP[app].plan, pq=(cart[app]?cart[app].qty:0)+(cart[web]?cart[web].qty:0);
+  if(d>0&&!pq){ showToast('Add '+IMAP[app].name+' first: the add-ons come with it'); return; }
+  if(d>0&&(c[ai]||0)>=pq){ showToast(pq===1?'One of each add-on per Uptodate plan':'At most '+pq+' (one per '+IMAP[app].name+')'); return; }
   if(d>0){ c[ai]=(c[ai]||0)+1; addItem(ai); }
   else if(c[ai]>0){ c[ai]--; stepQty(ai,-1); }
   paintUpRows();
@@ -4199,9 +4213,11 @@ function upToggleBrowser(app){
 }
 // AI add-ons come with a plan: not more add-ons than plans in the basket (the bot checks this too).
 function uptodateAddonProblem(){
-  let plans=0, addons=0;
-  Object.entries(cart).forEach(([id,i])=>{ if(UP_PLAN_IDS.has(id)) plans+=i.qty; if(UP_AI_IDS.has(id)) addons+=i.qty; });
-  return addons>plans?'The Uptodate AI add-ons come with an Uptodate plan: add a plan for each AI add-on.':'';
+  let plans=0;
+  Object.entries(cart).forEach(([id,i])=>{ if(UP_PLAN_IDS.has(id)) plans+=i.qty; });
+  const over=Object.entries(cart).find(([id,i])=>UP_AI_IDS.has(id)&&i.qty>plans);
+  if(!over) return '';
+  return plans?'At most '+plans+' of each Uptodate AI add-on: one per Uptodate plan.':'The Uptodate AI add-ons come with an Uptodate plan: add a plan first.';
 }
 
 // ── Init ──────────────────────────────────────────────────────────────
