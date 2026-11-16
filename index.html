@@ -519,8 +519,6 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
 .up-block .up-addon .rs{font-size:11px}
 .up-block .up-addon .rp{font-size:13px}
 .up-block .up-addon:last-child{padding-bottom:10px}
-.up-block .add-btn.up-tick{background:transparent;border:2px solid var(--teal,#0d9488);color:var(--teal,#0d9488);box-shadow:none}
-.up-block .add-btn.up-tick.up-on{background:var(--teal,#0d9488);color:#fff}
 </style>
 </head>
 <body>
@@ -4116,9 +4114,8 @@ const UP_PLAN_IDS = new Set(['up_online_app','up_online_web','up_offline_app','u
 const UP_AI_IDS = new Set(UP_AI.map(a=>a.id));
 const upPrice = id => { const i=IMAP[id]; if(!i) return null; return hasCoworkerDiscount(id)?coworkerPrice(i.price,id):i.price; };
 const upMoney = n => '$'+(Math.round(n*100)/100).toFixed(2).replace(/\.00$/,'');
-// A plan and its add-on rows: the plan (− n + counts the plan with or without browser), "+ Browser Access" (a tick:
-// every unit of this plan becomes the _web item, or back), then the AI add-ons (ordinary items, + / − n +).
-const upWantBrowser = {};   // a plan not in the basket yet: add it with Browser Access
+// A plan and its add-on rows: the plan (− n + counts the plan with or without browser), "+ Browser Access" (− n +,
+// how many units have it, at most the plan's quantity), then the AI add-ons (at most one of each per unit).
 function makePlanRow(itm){
   const app=itm.id, web=itm.plan;
   const block=document.createElement('div'); block.className='up-block'; block.dataset.itemId=app;
@@ -4158,9 +4155,10 @@ function paintUpBlock(app, root){
     c.innerHTML=n?`<span class="qty-step" style="display:inline-flex"><button class="qs-btn minus" type="button" aria-label="One less" onclick="event.stopPropagation();upAiStep('${app}','${ai}',-1)">−</button><span class="qs-n">${n}</span><button class="qs-btn" type="button" aria-label="One more"${full?' style="opacity:.35"':''} onclick="event.stopPropagation();upAiStep('${app}','${ai}',1)">+</button></span>`
       :`<button class="add-btn" aria-label="Add" onclick="event.stopPropagation();upAiStep('${app}','${ai}',1)">+</button>`;
   });
-  const on=q?qw>0:!!upWantBrowser[app];
+  // Browser Access is counted like the AI add-ons: how many of this plan's units have it (0 … the plan's quantity)
   root.querySelectorAll('#up-br-'+app+' .up-ctl').forEach(c=>{
-    c.innerHTML=`<button class="add-btn up-tick${on?' up-on':''}" aria-label="Browser Access" aria-pressed="${on}" onclick="event.stopPropagation();upToggleBrowser('${app}')">${on?'✓':'+'}</button>`;
+    c.innerHTML=qw?`<span class="qty-step" style="display:inline-flex"><button class="qs-btn minus" type="button" aria-label="One less" onclick="event.stopPropagation();upBrowserStep('${app}',-1)">−</button><span class="qs-n">${qw}</span><button class="qs-btn" type="button" aria-label="One more"${qw>=q?' style="opacity:.35"':''} onclick="event.stopPropagation();upBrowserStep('${app}',1)">+</button></span>`
+      :`<button class="add-btn" aria-label="Add Browser Access" onclick="event.stopPropagation();upBrowserStep('${app}',1)">+</button>`;
   });
 }
 // Each plan's AI rows show what was added under that plan (the basket has one line per AI add-on). When the basket
@@ -4194,22 +4192,24 @@ function upAiStep(app, ai, d){
   else if(c[ai]>0){ c[ai]--; stepQty(ai,-1); }
   paintUpRows();
 }
+// The plan's + adds one without browser; its − takes one without browser first, then one with.
 function upPlanStep(app,d){
   const web=IMAP[app].plan;
-  const variant=cart[web]?web:cart[app]?app:(upWantBrowser[app]?web:app);
-  if(d>0) addItem(variant); else stepQty(variant,-1);
-  paintUpBlock(app);
+  if(d>0) addItem(app);
+  else stepQty(cart[app]?app:web,-1);
+  paintUpRows();
 }
-function upToggleBrowser(app){
-  const web=IMAP[app].plan, from=cart[web]?web:cart[app]?app:null;
-  if(!from){ upWantBrowser[app]=!upWantBrowser[app]; paintUpBlock(app);
-    showToast(upWantBrowser[app]?'Browser Access will be added with the plan':'Without Browser Access'); return; }
-  const to=from===web?app:web, q=cart[from].qty;
-  delete cart[from];
-  cart[to]=cart[to]?{...cart[to],qty:cart[to].qty+q}:{name:IMAP[to].fullname||IMAP[to].name,price:IMAP[to].price,qty:q};
-  upWantBrowser[app]=to===web;
+// + Browser Access turns one unit of this plan into its browser version (at most all of them); − turns one back.
+function upBrowserStep(app,d){
+  const web=IMAP[app].plan, qa=cart[app]?cart[app].qty:0, qw=cart[web]?cart[web].qty:0;
+  if(d>0&&!qa&&!qw){ showToast('Add '+IMAP[app].name+' first: Browser Access comes with it'); return; }
+  if(d>0&&!qa){ showToast(qw===1?'One Browser Access per Uptodate plan':'At most '+qw+' (one per '+IMAP[app].name+')'); return; }
+  if(d<0&&!qw) return;
+  const from=d>0?app:web, to=d>0?web:app;
+  if(cart[from].qty<=1) delete cart[from]; else cart[from]={...cart[from],qty:cart[from].qty-1};
+  cart[to]=cart[to]?{...cart[to],qty:cart[to].qty+1}:{name:IMAP[to].fullname||IMAP[to].name,price:IMAP[to].price,qty:1};
   syncBasket(); if(document.getElementById('basketOverlay').classList.contains('on')) renderBasket();
-  showToast(to===web?'+ Browser Access added · '+upMoney(upPrice(web)):'Browser Access removed · '+upMoney(upPrice(app)));
+  showToast(d>0?'+ Browser Access · +'+upMoney(upPrice(web)-upPrice(app)):'Browser Access removed');
 }
 // AI add-ons come with a plan: not more add-ons than plans in the basket (the bot checks this too).
 function uptodateAddonProblem(){
