@@ -993,6 +993,11 @@ def db_init():
         )
         """
     )
+    # Which subscriptions a code works for (16 Nov 2026): a JSON list of item ids; NULL = every subscription.
+    try:
+        conn.execute("ALTER TABLE discount_codes ADD COLUMN items TEXT")
+    except sqlite3.OperationalError:
+        pass
 
     conn.execute(
         """
@@ -2257,7 +2262,7 @@ def _generate_discount_code(length: int = 8) -> str:
     return "".join(random.choices(alphabet, k=length))
 
 
-def db_create_discount_code(percentage: float, uses: int, days: int) -> str:
+def db_create_discount_code(percentage: float, uses: int, days: int, items: list = None) -> str:
     """Generates a fresh, guaranteed-unique code and saves it — the admin
     never types the code itself, only the terms (percentage/uses/days)."""
     conn = sqlite3.connect(DB_PATH)
@@ -2268,9 +2273,9 @@ def db_create_discount_code(percentage: float, uses: int, days: int) -> str:
             break
     expires_at = (datetime.utcnow() + timedelta(days=days)).isoformat()
     conn.execute(
-        "INSERT INTO discount_codes (code, percentage, uses_remaining, expires_at, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (code, percentage, uses, expires_at, datetime.utcnow().isoformat()),
+        "INSERT INTO discount_codes (code, percentage, uses_remaining, expires_at, created_at, items) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (code, percentage, uses, expires_at, datetime.utcnow().isoformat(), json.dumps(sorted(items)) if items else None),
     )
     conn.commit()
     conn.close()
@@ -2298,6 +2303,58 @@ def db_check_discount_code(code: str):
     if datetime.utcnow().isoformat() > expires_at:
         return None
     return percentage
+
+
+def db_discount_code_items(code: str):
+    """The item ids a code is limited to (a set), or None when it works for every subscription."""
+    if not code:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT items FROM discount_codes WHERE code = ?", (code.strip().upper(),)).fetchone()
+    conn.close()
+    try:
+        items = json.loads(row[0]) if row and row[0] else None
+    except ValueError:
+        items = None
+    return set(items) if items else None
+
+
+def discount_code_off(code: str, order_items: dict, unit_price) -> tuple:
+    """(percentage, amount off) for a code on these items, priced with unit_price(item_id) (retail or the
+    coworker's price). A code limited to some subscriptions only takes its % off those; (None, 0) when the code
+    isn't valid or none of the items is one it works for."""
+    pct = db_check_discount_code(code)
+    if pct is None:
+        return None, 0.0
+    scope = db_discount_code_items(code)
+    eligible = sum(unit_price(i) * q for i, q in order_items.items() if scope is None or i in scope)
+    if eligible <= 0:
+        return None, 0.0
+    return pct, round(eligible * pct / 100, 2)
+
+
+def discount_scope_names(items) -> list:
+    """The product names (without durations) a limited code works for, for messages."""
+    import delivered_sheet as _ds
+    out = []
+    for i in sorted(items or []):
+        if i in MENU:
+            n = _ds.title_only(MENU[i][0])
+            if n not in out:
+                out.append(n)
+    return out
+
+
+def discount_product_groups() -> list:
+    """[{name, ids}] — every subscription product (its durations together) for picking what a code works for."""
+    import delivered_sheet as _ds
+    removed = {i for i, o in db_load_item_overrides().items() if o[3]}
+    groups = {}
+    for i, v in MENU.items():
+        if i in removed:
+            continue
+        groups.setdefault(_ds.title_only(v[0]), []).append(i)
+    return [{"name": n, "ids": sorted(ids)} for n, ids in sorted(groups.items(), key=lambda x: x[0].lower())]
 
 
 def db_consume_discount_code(code: str) -> bool:
@@ -2631,10 +2688,10 @@ def db_customers_with_credits():
     return rows
 
 
-def db_list_discount_codes() -> list:
+def db_list_discount_codes() -> list:  # (code, percentage, uses, expires, created, items_json)
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT code, percentage, uses_remaining, expires_at, created_at FROM discount_codes "
+        "SELECT code, percentage, uses_remaining, expires_at, created_at, items FROM discount_codes "
         "ORDER BY created_at DESC, code").fetchall()
     conn.close()
     return rows
@@ -6251,13 +6308,28 @@ async def discount_code_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not order_id:
         return
     code = update.message.text.strip()
-    percentage = db_check_discount_code(code)
-
     order = db_get_order(order_id)
     if not order:
         await update.message.reply_text("Order not found — please start over.")
         return
     total = order[4]
+    # A code limited to some subscriptions takes its % off only those (their share of this order's total).
+    try:
+        items = json.loads(order[3] or "{}")
+    except ValueError:
+        items = {}
+    retail = sum(MENU[i][1] * q for i, q in items.items() if i in MENU) or 0
+    percentage, _ = discount_code_off(code, items, lambda i: MENU[i][1] if i in MENU else 0)
+    scope = db_discount_code_items(code)
+    if percentage is None and scope and db_check_discount_code(code) is not None:
+        await update.message.reply_text(
+            "❌ That code only works for: " + ", ".join(discount_scope_names(scope)) + ". It doesn't apply to this order.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏷 Try another code", callback_data=f"discount_start:{order_id}")],
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"precheck_back:{order_id}")],
+            ]),
+        )
+        return
 
     if percentage is None:
         await update.message.reply_text(
@@ -6269,10 +6341,16 @@ async def discount_code_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    new_total = round(total * (1 - percentage / 100), 2)
+    if scope and retail > 0:
+        share = sum(MENU[i][1] * q for i, q in items.items() if i in scope) / retail
+        new_total = round(total - total * share * percentage / 100, 2)
+        what = f"{percentage:.0f}% off " + ", ".join(discount_scope_names(scope & set(items)))
+    else:
+        new_total = round(total * (1 - percentage / 100), 2)
+        what = f"{percentage:.0f}% off"
     db_apply_discount_to_order(order_id, new_total, code)
     await update.message.reply_text(
-        f"✅ Code applied — {percentage:.0f}% off! Total: {CURRENCY}{total:.2f} → {CURRENCY}{new_total:.2f}"
+        f"✅ Code applied — {what}! Total: {CURRENCY}{total:.2f} → {CURRENCY}{new_total:.2f}"
     )
     text, keyboard = checkout_view(order_id)
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
@@ -8114,15 +8192,36 @@ async def discount_field_reply(update: Update, context: ContextTypes.DEFAULT_TYP
         except ValueError:
             await update.message.reply_text("Send a whole number of days greater than 0:")
             return
+        data["days"] = days
+        context.user_data["discount_data"] = data
+        context.user_data["awaiting_discount_field"] = "items"
+        await update.message.reply_text(
+            "Which subscriptions does it work for?\n\nSend *all* for every subscription, or the names separated by "
+            "commas (e.g. `Amboss, UpToDate, iMD VIP`): every duration of each one is included.",
+            parse_mode=ParseMode.MARKDOWN)
+        return
 
-        code = db_create_discount_code(data["percentage"], data["uses"], days)
+    if field == "items":
+        scope, names = None, []
+        if text.lower() not in ("all", "everything", "*"):
+            words = [w.strip().lower() for w in re.split(r"[,\n]+", text) if w.strip()]
+            groups = [g for g in discount_product_groups() if any(w in g["name"].lower() for w in words)]
+            if not groups:
+                await update.message.reply_text("No subscription matches that. Send part of the names (e.g. Amboss), or *all*:",
+                                                parse_mode=ParseMode.MARKDOWN)
+                return
+            scope = sorted({i for g in groups for i in g["ids"]})
+            names = [g["name"] for g in groups]
+        days = data["days"]
+        code = db_create_discount_code(data["percentage"], data["uses"], days, scope)
         context.user_data.pop("awaiting_discount_field", None)
         context.user_data.pop("discount_data", None)
         expires = (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%d")
+        works = ("Works for: " + re.sub(r"([_*`\[])", r"\\\1", ", ".join(names)[:1500])) if scope else "Works for every subscription."
         await update.message.reply_text(
             f"✅ Discount code created:\n\n`{code}`\n\n"
             f"{data['percentage']:.0f}% off · usable {data['uses']} time(s) · "
-            f"expires {expires}\n\n"
+            f"expires {expires}\n{works}\n\n"
             "Customers can enter this at checkout. It's active immediately.",
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -12803,9 +12902,14 @@ async def http_admin_sales_excel(request):
 def _discount_rows() -> list:
     now = datetime.utcnow().isoformat()
     out = []
-    for code, pct, uses, expires, created in db_list_discount_codes():
+    for code, pct, uses, expires, created, items in db_list_discount_codes():
         state = "used up" if uses <= 0 else "expired" if expires < now else "active"
-        out.append({"code": code, "pct": pct, "uses": uses, "expires": (expires or "")[:10], "state": state})
+        try:
+            scope = json.loads(items) if items else None
+        except ValueError:
+            scope = None
+        out.append({"code": code, "pct": pct, "uses": uses, "expires": (expires or "")[:10], "state": state,
+                    "for": discount_scope_names(scope) if scope else None})
     return out
 
 
@@ -12814,7 +12918,8 @@ async def http_admin_discounts(request):
     _, err = _admin_shop_request(request)
     if err:
         return err
-    return web.json_response({"ok": True, "items": _discount_rows()}, headers=_imd_search_cors_headers())
+    return web.json_response({"ok": True, "items": _discount_rows(), "products": discount_product_groups()},
+                             headers=_imd_search_cors_headers())
 
 
 async def http_admin_discount_action(request):
@@ -12846,7 +12951,11 @@ async def http_admin_discount_action(request):
             return _admin_bad("Uses must be a whole number of at least 1.")
         if days is None or not (1 <= days <= 3650):
             return _admin_bad("Days must be a whole number of at least 1.")
-        code = db_create_discount_code(pct, uses, days)
+        scope = data.get("items")   # None/[] = every subscription; else item ids it works for (16 Nov 2026)
+        if scope:
+            if not isinstance(scope, list) or not all(isinstance(i, str) and i in MENU for i in scope):
+                return _admin_bad("Choose the subscriptions again (one isn't in the Shop anymore).")
+        code = db_create_discount_code(pct, uses, days, scope or None)
         return web.json_response({"ok": True, "code": code, "items": _discount_rows()}, headers=headers)
     if action == "delete":
         code = data.get("code")
@@ -13244,8 +13353,12 @@ async def http_check_discount(request):
     if count >= DISCOUNT_CHECKS_PER_WINDOW:
         return web.json_response({"error": "Too many attempts, try again later"}, status=429, headers=headers)
     _discount_checks[user_id] = (start, count + 1)
-    pct = db_check_discount_code((request.query.get("code") or "").strip().upper())
-    return web.json_response({"valid": pct is not None, "pct": pct or 0}, headers=headers)
+    code = (request.query.get("code") or "").strip().upper()
+    pct = db_check_discount_code(code)
+    scope = db_discount_code_items(code) if pct is not None else None
+    # items/names: the subscriptions a limited code works for (the Mini App takes the % off only those)
+    return web.json_response({"valid": pct is not None, "pct": pct or 0, "items": sorted(scope) if scope else None,
+                              "names": discount_scope_names(scope) if scope else None}, headers=headers)
 
 
 async def http_my_purchase_history(request):
@@ -18739,9 +18852,10 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
     discount_code_raw = (data.get("discount_code") or "").strip()
     applied_discount_code = None
     if discount_code_raw:
-        pct = db_check_discount_code(discount_code_raw)
+        unit = ((lambda i: _coworker_unit_price_by_id(i, coworker_id)) if coworker_id else (lambda i: MENU[i][1]))
+        pct, off = discount_code_off(discount_code_raw, order_items, unit)   # only the subscriptions it works for
         if pct is not None:
-            total = round(total * (1 - pct / 100), 2)
+            total = round(max(0.0, total - off), 2)
             applied_discount_code = discount_code_raw.strip().upper()
 
     credits_applied = 0

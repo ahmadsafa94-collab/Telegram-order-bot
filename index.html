@@ -106,6 +106,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   background:linear-gradient(180deg,rgba(5,10,25,.15) 0%,rgba(5,10,25,.68) 45%,rgba(5,10,25,.94) 100%)}
 .ad-slide .ad-title{color:#fff;font-size:12.5px;font-weight:700;line-height:1.32}
 .ad-slide .ad-desc{color:rgba(255,255,255,.86);font-size:10.5px;margin-top:3px;line-height:1.35}
+/* A drawn slide (no picture): the referral credits ad (16 Nov 2026). */
+.ad-slide.ad-promo{background:radial-gradient(120% 140% at 100% 0%,#22d3ee 0%,rgba(34,211,238,0) 55%),
+  linear-gradient(135deg,#0d9488 0%,#0f766e 42%,#1e3a8a 100%);align-items:stretch}
+.ad-slide.ad-promo::before{display:none}
+.ad-promo .ad-overlay{background:none;display:flex;flex-direction:column;justify-content:center;padding:14px 120px 14px 16px}
+.ad-promo .ad-kicker{display:inline-block;align-self:flex-start;background:rgba(255,255,255,.18);color:#fff;font-size:10px;
+  font-weight:700;letter-spacing:.4px;text-transform:uppercase;padding:3px 8px;border-radius:99px;margin-bottom:6px}
+.ad-promo .ad-title{font-size:16px;line-height:1.25}
+.ad-promo .ad-desc{font-size:11px;margin-top:5px}
+.ad-promo .ad-cta{display:inline-block;align-self:flex-start;margin-top:8px;background:#fff;color:#0f766e;font-size:11.5px;
+  font-weight:800;padding:5px 11px;border-radius:99px}
+.ad-promo .ad-art{position:absolute;right:12px;top:50%;transform:translateY(-50%);width:104px;height:104px}
+.ad-promo .ad-art span{position:absolute;filter:drop-shadow(0 4px 8px rgba(0,0,0,.25))}
+.ad-promo .ad-art .a1{font-size:62px;right:6px;top:10px}
+.ad-promo .ad-art .a2{font-size:30px;left:0;top:0;transform:rotate(-14deg)}
+.ad-promo .ad-art .a3{font-size:26px;left:8px;bottom:2px;transform:rotate(10deg)}
 .ad-dots{display:flex;justify-content:center;gap:5px;margin-top:7px}
 .ad-dot{width:5.5px;height:5.5px;border-radius:50%;background:rgba(var(--fg-rgb),.22);transition:background .15s}
 .ad-dot.active{background:var(--teal2)}
@@ -1083,6 +1099,7 @@ const OOS_IDS = new Set((SUBS_DATA && SUBS_DATA.oos) || []);
 let appliedCreditsFlag = false;   // did the customer choose to use credits?
 let appliedDiscountCode = '';
 let appliedDiscountPct = 0;
+let appliedDiscountItems = null;   // a code limited to some subscriptions: their ids (the % comes off only those)
 
 // ── Catalog data ──────────────────────────────────────────────────────
 const IMD = new Set(['imd_6m','imd_1y','imd_2y']);
@@ -2297,22 +2314,55 @@ async function sendSalesExcel(){
 
 // Discount codes
 async function openAdminDiscounts(){ openAdm('🏷 Discount codes'); loadAdminDiscounts(); }
+// Which subscriptions a new code works for: all, or products picked here (every duration of each) — 16 Nov 2026.
+let dcProducts=[], dcScope='all', dcChosen=[], dcQ='';
 async function loadAdminDiscounts(items,made){
-  try{ if(!items) items=(await apiGet('/api/admin_discounts')).items||[]; }catch(e){ admEl().innerHTML=failHtml(e); return; }
+  try{ if(!items){ const d=await apiGet('/api/admin_discounts'); items=d.items||[]; dcProducts=d.products||dcProducts; } }catch(e){ admEl().innerHTML=failHtml(e); return; }
   const keep={}; ['dcPct','dcUses','dcDays'].forEach(k=>{ const f=document.getElementById(k); if(f) keep[k]=f.value; });
   admEl().innerHTML=
     (made?'<div class="ref-balance"><div style="font-size:12px;color:var(--hint)">New code created</div><div class="n" style="font-size:24px;letter-spacing:2px">'+escHtml(made)+'</div><button class="tk-btn" style="margin-top:8px" onclick="copyDiscount('+JSON.stringify(made).replace(/"/g,'&quot;')+')">📋 Copy code</button></div>':'')+
     '<div class="sub-section-lbl">Issue a new code</div>'+
     '<div style="display:flex;gap:8px">'+fieldBox('dcPct','% off',keep.dcPct,'number')+fieldBox('dcUses','Uses',keep.dcUses,'number')+fieldBox('dcDays','Days valid',keep.dcDays,'number')+'</div>'+
+    '<div class="t-meta" style="margin:2px 0 6px">Works for</div>'+
+    '<div class="seg" id="dcScopeSeg" style="margin-bottom:8px"><button data-s="all" onclick="setDcScope(\'all\')">All subscriptions</button><button data-s="some" onclick="setDcScope(\'some\')">Only some</button></div>'+
+    '<div id="dcPick"></div>'+
     '<div id="admMsg" style="font-size:12px;margin:0 0 8px;min-height:14px"></div>'+
     '<button class="btn" id="dcSave" style="margin-top:0" onclick="createDiscount()">➕ Create code</button>'+
     '<div class="sub-section-lbl" style="margin-top:14px">Codes ('+items.length+')</div>'+
     (items.length?items.map(i=>'<div class="t-card"><div class="t-top"><div class="t-title" style="font-family:ui-monospace,Menlo,monospace;letter-spacing:1px">'+escHtml(i.code)+
-      '<div class="t-meta" style="font-family:inherit;letter-spacing:0">'+Number(i.pct)+'% off · '+i.uses+' use'+(i.uses===1?'':'s')+' left · expires '+escHtml(i.expires)+'</div></div>'+
+      '<div class="t-meta" style="font-family:inherit;letter-spacing:0">'+Number(i.pct)+'% off · '+i.uses+' use'+(i.uses===1?'':'s')+' left · expires '+escHtml(i.expires)+'</div>'+
+      '<div class="t-meta" style="font-family:inherit;letter-spacing:0;margin-top:2px">'+(i.for&&i.for.length?'Only for: '+escHtml(i.for.join(', ')):'All subscriptions')+'</div></div>'+
       '<span class="t-pill '+(i.state==='active'?'ok':'open')+'">'+escHtml(i.state)+'</span></div>'+
       '<div style="display:flex;gap:8px;margin-top:8px"><button class="tk-btn" style="flex:1;width:auto" onclick="copyDiscount('+JSON.stringify(i.code).replace(/"/g,'&quot;')+')">📋 Copy</button>'+
       '<button class="tk-btn" style="flex:1;width:auto;color:#f87171" onclick="deleteDiscount('+JSON.stringify(i.code).replace(/"/g,'&quot;')+')">🗑 Delete</button></div></div>').join(''):'<div class="t-meta">No codes yet.</div>');
+  drawDcScope();
 }
+function setDcScope(s){ dcScope=s; drawDcScope(); if(s==='some') setTimeout(()=>{ const f=document.getElementById('dcSearch'); f&&f.focus(); },60); }
+function drawDcScope(){
+  document.querySelectorAll('#dcScopeSeg button').forEach(b=>b.classList.toggle('on',b.dataset.s===dcScope));
+  const el=document.getElementById('dcPick'); if(!el) return;
+  if(dcScope!=='some'){ el.innerHTML=''; return; }
+  el.innerHTML='<div id="dcChips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>'+
+    '<div class="search-wrap" style="margin-bottom:6px"><span class="search-ico">🔍</span><input id="dcSearch" type="text" placeholder="Search subscriptions (e.g. Amboss)" aria-label="Search subscriptions" autocomplete="off"></div>'+
+    '<div id="dcResults" style="max-height:220px;overflow-y:auto;margin-bottom:8px"></div>';
+  const s=document.getElementById('dcSearch'); s.value=dcQ; s.oninput=()=>{ dcQ=s.value; drawDcResults(); };
+  drawDcChips(); drawDcResults();
+}
+function drawDcChips(){
+  const el=document.getElementById('dcChips'); if(!el) return;
+  el.innerHTML=dcChosen.length?dcChosen.map((n,k)=>'<button class="tk-btn" style="width:auto;margin:0;padding:6px 10px;font-size:12px" onclick="dcRemove('+k+')">'+escHtml(n)+' ✕</button>').join('')
+    :'<div class="t-meta">None chosen yet: search and tap the subscriptions below.</div>';
+}
+function drawDcResults(){
+  const el=document.getElementById('dcResults'); if(!el) return;
+  const q=dcQ.trim().toLowerCase();
+  const hits=dcProducts.filter(p=>!dcChosen.includes(p.name)&&(!q||p.name.toLowerCase().includes(q))).slice(0,40);
+  el.innerHTML=hits.length?hits.map(p=>'<button class="contact-row" style="padding:9px 12px" data-n="'+escHtml(p.name)+'"><span class="ci-t"><div class="ci-n" style="font-size:13px">'+escHtml(p.name)+'</div>'+
+      (p.ids.length>1?'<div class="ci-s">'+p.ids.length+' durations</div>':'')+'</span><span class="ci-c">＋</span></button>').join('')
+    :'<div class="t-meta">'+(q?'Nothing matches.':'')+'</div>';
+  el.querySelectorAll('button[data-n]').forEach(b=>b.onclick=()=>{ dcChosen.push(b.dataset.n); drawDcChips(); drawDcResults(); });
+}
+function dcRemove(k){ dcChosen.splice(k,1); drawDcChips(); drawDcResults(); }
 function copyDiscount(code){ navigator.clipboard.writeText(code).then(()=>showToast('Copied '+code)).catch(()=>showToast(code)); }
 async function createDiscount(){
   const v=id=>document.getElementById(id).value.trim(), btn=document.getElementById('dcSave');
@@ -2320,8 +2370,13 @@ async function createDiscount(){
   if(!(percentage>0&&percentage<=100)) return admMsg('The percentage must be between 1 and 100.');
   if(!(uses>=1)) return admMsg('Uses must be a whole number of at least 1.');
   if(!(days>=1)) return admMsg('Days must be a whole number of at least 1.');
+  let items=null;
+  if(dcScope==='some'){
+    if(!dcChosen.length) return admMsg('Choose the subscriptions it works for, or pick "All subscriptions".');
+    items=[].concat(...dcProducts.filter(p=>dcChosen.includes(p.name)).map(p=>p.ids));
+  }
   btn.disabled=true; admMsg('Creating…',true);
-  try{ const d=await adminPost('/api/admin_discount_action',{action:'create',percentage,uses,days}); ['dcPct','dcUses','dcDays'].forEach(k=>document.getElementById(k).value=''); loadAdminDiscounts(d.items,d.code); }
+  try{ const d=await adminPost('/api/admin_discount_action',{action:'create',percentage,uses,days,items}); ['dcPct','dcUses','dcDays'].forEach(k=>document.getElementById(k).value=''); dcScope='all'; dcChosen=[]; dcQ=''; loadAdminDiscounts(d.items,d.code); }
   catch(e){ admMsg(e.message); btn.disabled=false; }
 }
 function deleteDiscount(code){
@@ -3640,7 +3695,7 @@ async function applyDiscountCode(){
   // created *after* that (e.g. moments ago) wouldn't be in it yet even
   // though it's genuinely valid — never let a stale local cache silently
   // block a real code from ever reaching the server.
-  appliedDiscountCode=raw;
+  appliedDiscountCode=raw; appliedDiscountItems=null;
   let pct=DISCOUNT_CODES[raw]!=null ? DISCOUNT_CODES[raw] : null;
   if(pct==null && !ordersUnavailableReason()){
     msg.style.color='';
@@ -3648,7 +3703,14 @@ async function applyDiscountCode(){
     try{
       const resp=await fetch(withAuth('/api/check_discount?code='+encodeURIComponent(raw)));
       const data=await resp.json();
-      if(resp.ok && data.valid) pct=data.pct;
+      if(resp.ok && data.valid && data.items && data.items.length && !Object.keys(cart).some(id=>data.items.includes(id))){
+        appliedDiscountPct=0; appliedDiscountCode=''; appliedDiscountItems=null;
+        msg.style.color='#f87171';
+        msg.textContent='❌ This code only works for: '+(data.names||[]).join(', ')+'.';
+        buildPaymentPage();
+        return;
+      }
+      if(resp.ok && data.valid){ pct=data.pct; appliedDiscountItems=(data.items&&data.items.length)?data.items:null; }
       else if(resp.ok){
         appliedDiscountPct=0;
         appliedDiscountCode='';
@@ -3662,7 +3724,7 @@ async function applyDiscountCode(){
   if(pct!=null){
     appliedDiscountPct=pct;
     msg.style.color='#4ade80';
-    msg.textContent=`✅ ${appliedDiscountPct}% off applied!`;
+    msg.textContent=appliedDiscountItems?`✅ ${appliedDiscountPct}% off applied to the subscriptions it works for!`:`✅ ${appliedDiscountPct}% off applied!`;
   }else{
     appliedDiscountPct=0;
     msg.style.color='#fbbf24';
@@ -3670,9 +3732,14 @@ async function applyDiscountCode(){
   }
   buildPaymentPage();
 }
+function discountableTotal(){
+  if(!appliedDiscountItems) return cartTotal();
+  return Object.entries(cart).filter(([id])=>appliedDiscountItems.includes(id))
+    .reduce((s,[id,i])=>s+(hasCoworkerDiscount(id)?coworkerPrice(i.price,id):i.price)*i.qty,0);
+}
 function effectiveTotal(){
   let t = cartTotal();
-  if(appliedDiscountPct>0) t = t*(1-appliedDiscountPct/100);
+  if(appliedDiscountPct>0) t = Math.max(0, t - discountableTotal()*appliedDiscountPct/100);
   if(appliedCreditsFlag) t = Math.max(0, t - CREDITS_BALANCE*CREDIT_VALUE_USD);
   return Math.round(t*100)/100;
 }
@@ -3903,6 +3970,15 @@ tg.MainButton.onClick(submitOrder);
 // Earlier ads (kept in LOGOS to bring back): @Medicaltoolkit_bot (LOGOS.adMedicToolkit, link
 // https://t.me/Medicaltoolkit_bot) and UWorld Qbanks in iMD (LOGOS.uworld, goToCategory 'imd').
 const ADS = [
+  // Referral credits (16 Nov 2026): opens 🎁 How to get accounts for free, with the customer's link. Not for coworkers.
+  ...(IS_COWORKER ? [] : [{
+    promo: true,
+    kicker: 'Free credits',
+    title: 'Invite friends, get subscriptions for free',
+    desc: 'Earn 1 credit ($' + CREDIT_VALUE_USD + ') each time someone you invite buys.',
+    cta: 'Get my link ›',
+    action: () => openReferral('free')
+  }]),
   {
     img: LOGOS.adMksap,
     bright: true,
@@ -3959,12 +4035,21 @@ function buildAdBanner(){
       slide.target = '_blank';
       slide.rel = 'noopener';
       slide.onclick = (e) => { e.preventDefault(); openAdLink(ad.link); };
+    } else if (ad.action) {
+      slide.onclick = ad.action;
     } else if (ad.goToCategory) {
       slide.onclick = () => { switchCat(ad.goToCategory); if (ad.goToItem) showCatalogItem(ad.goToCategory, ad.goToItem); };
     }
     if (ad.bright) slide.classList.add('ad-bright');
-    slide.style.backgroundImage = `url('${ad.img}')`;
-    slide.innerHTML = `<div class="ad-overlay"><div class="ad-title">${escHtml(ad.title)}</div><div class="ad-desc">${escHtml(ad.desc)}</div></div>`;
+    if (ad.promo) {
+      slide.classList.add('ad-promo');
+      slide.innerHTML = '<div class="ad-overlay"><span class="ad-kicker">' + escHtml(ad.kicker) + '</span><div class="ad-title">' + escHtml(ad.title) + '</div>'
+        + '<div class="ad-desc">' + escHtml(ad.desc) + '</div><span class="ad-cta">' + escHtml(ad.cta) + '</span></div>'
+        + '<div class="ad-art" aria-hidden="true"><span class="a1">🎁</span><span class="a2">💳</span><span class="a3">🪙</span></div>';
+    } else {
+      slide.style.backgroundImage = `url('${ad.img}')`;
+      slide.innerHTML = `<div class="ad-overlay"><div class="ad-title">${escHtml(ad.title)}</div><div class="ad-desc">${escHtml(ad.desc)}</div></div>`;
+    }
     track.appendChild(slide);
   });
   wrap.appendChild(track);
