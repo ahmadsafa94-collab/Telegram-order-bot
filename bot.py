@@ -1410,26 +1410,73 @@ def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, mes
     return delivery_id
 
 
-def _queue_sheet_row(order_id: int, user_id: int, item_id: str, message: str, access: str = None):
-    """A row for the owner's delivered-subscriptions sheet (sent to Google by sheet_outbox_job). iMD goes on the iMD
-    tab with the serial(s) used in H; a code delivered from the serials pool also has its serial in H. Never lets a
-    delivery fail."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
+def _sheet_row_for(order_id: int, user_id: int, item_id: str, message: str, access: str = None,
+                   delivered_utc: datetime = None, serials: list = None) -> tuple:
+    """(tab, row) for the owner's delivered-subscriptions sheet. iMD goes on the iMD tab with the serial(s) used in H;
+    a code delivered from the serials pool also has its serial in H."""
+    conn = sqlite3.connect(DB_PATH)
+    if serials is None:
         serials = [r[0] for r in conn.execute(
             "SELECT code FROM serials WHERE used_for_order = ? AND status = 'used' ORDER BY used_at, id", (order_id,)).fetchall()]
-        row = conn.execute("SELECT coworker_id FROM orders WHERE id = ?", (order_id,)).fetchone()
-        conn.close()
-        coworker = db_get_coworker(row[0]) if row and row[0] else None
-        name = MENU.get(item_id, (item_id,))[0] if item_id else ""
-        imd = item_id in IMD_TRIGGER_ITEMS
-        h_value = access or (", ".join(serials) if serials and (imd or item_id in UPTODATE_AI_TRIGGER_ITEMS
-                                                                     or item_id == "uptodate_ai_bundle_3m") else "")
-        sheet_row = dsheet.build_row(name, item_id or "", datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET), message,
-                                     h_value, coworker[1] if coworker else "Me", order_id, user_id, db_get_username(user_id) or "")
-        dsheet.enqueue_row(DB_PATH, dsheet.IMD_TAB if imd else dsheet.MAIN_TAB, sheet_row)
+    row = conn.execute("SELECT coworker_id FROM orders WHERE id = ?", (order_id,)).fetchone()
+    conn.close()
+    coworker = db_get_coworker(row[0]) if row and row[0] else None
+    name = MENU.get(item_id, (item_id,))[0] if item_id else ""
+    imd = item_id in IMD_TRIGGER_ITEMS
+    h_value = access or (", ".join(serials) if serials and (imd or item_id in UPTODATE_AI_TRIGGER_ITEMS
+                                                                 or item_id == "uptodate_ai_bundle_3m") else "")
+    sheet_row = dsheet.build_row(name, item_id or "", (delivered_utc or datetime.utcnow()) + timedelta(hours=REPORT_UTC_OFFSET),
+                                 message, h_value, coworker[1] if coworker else "Me", order_id, user_id,
+                                 db_get_username(user_id) or "")
+    return (dsheet.IMD_TAB if imd else dsheet.MAIN_TAB), sheet_row
+
+
+def _queue_sheet_row(order_id: int, user_id: int, item_id: str, message: str, access: str = None):
+    """A row for the owner's delivered-subscriptions sheet (sent to Google by sheet_outbox_job). Never lets a
+    delivery fail."""
+    try:
+        tab, sheet_row = _sheet_row_for(order_id, user_id, item_id, message, access)
+        dsheet.enqueue_row(DB_PATH, tab, sheet_row)
     except Exception:
         logger.exception("Couldn't queue the delivered-sheet row for order #%s (%s)", order_id, item_id)
+
+
+def backfill_imd_sheet_rows() -> int:
+    """The owner asked (16 Nov 2026) for every iMD subscription the bot ever delivered on the iMD tab: the ones from
+    before the sheet are queued once, oldest first, as batched pink rows. An order already queued for the iMD tab is
+    skipped. When an order has as many serials as iMD deliveries, each delivery gets its own serial in H."""
+    done = {str(r[9]) for r in dsheet.queued_rows(DB_PATH, dsheet.IMD_TAB) if len(r) > 9}
+    marks = ",".join("?" * len(IMD_TRIGGER_ITEMS))
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(f"SELECT id, order_id, user_id, item_id, message, delivered_at, access FROM deliveries "
+                        f"WHERE item_id IN ({marks}) ORDER BY delivered_at, id", tuple(sorted(IMD_TRIGGER_ITEMS))).fetchall()
+    conn.close()
+    by_order = {}
+    for r in rows:
+        by_order.setdefault(r[1], []).append(r)
+    out = []
+    for r in rows:
+        did, order_id, user_id, item_id, message, delivered_at, access = r
+        if str(order_id) in done:
+            continue
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            serials = [s[0] for s in conn.execute("SELECT code FROM serials WHERE used_for_order = ? AND status = 'used' "
+                                                  "ORDER BY used_at, id", (order_id,)).fetchall()]
+            conn.close()
+            same = by_order[order_id]
+            if len(serials) == len(same) > 1:
+                serials = [serials[same.index(r)]]
+            try:
+                when = datetime.fromisoformat(delivered_at) if delivered_at else None
+            except ValueError:
+                when = None
+            out.append(_sheet_row_for(order_id, user_id, item_id, message or "", access, when, serials)[1])
+        except Exception:
+            logger.exception("Delivered sheet backfill: delivery %s (order #%s) skipped", did, order_id)
+    if out:
+        dsheet.enqueue_rows(DB_PATH, dsheet.IMD_TAB, out)
+    return len(out)
 
 
 def db_user_deliveries(user_id: int):
@@ -11936,6 +11983,13 @@ async def sheet_outbox_job(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
         except Exception:
             logger.exception("Delivered sheet: couldn't tell the admin")
+    if dsheet.configured() and not db_get_meta("delivered_sheet_imd_backfill"):
+        db_set_meta("delivered_sheet_imd_backfill", datetime.utcnow().isoformat(timespec="seconds"))
+        n = backfill_imd_sheet_rows()
+        logger.info("Delivered sheet: %s earlier iMD deliveries queued for the iMD tab", n)
+        await notify(f"📑 Delivered sheet: {n} iMD subscription{'s' if n != 1 else ''} the bot delivered before the "
+                     "sheet existed are being added to the iMD tab (pink, oldest first)." if n else
+                     "📑 Delivered sheet: no earlier iMD deliveries to add; the iMD tab already has them all.")
     await dsheet.flush(DB_PATH, notify)
 
 

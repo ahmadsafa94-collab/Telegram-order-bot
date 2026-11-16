@@ -174,15 +174,20 @@ async def _ensure_header(tab: str):
 
 
 async def _append_pink(tab: str, row: list) -> int:
+    return await _append_pink_rows(tab, [row])
+
+
+async def _append_pink_rows(tab: str, rows: list) -> int:
+    """Appends the rows (light pink) and returns the first one's row number."""
     gid = await _ensure_tab(tab)
     resp = await _call("POST", f"{SHEETS_API}/{sheet_id()}/values/{_a1(tab, 'A:M')}:append",
-                       params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"}, json={"values": [row]})
+                       params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"}, json={"values": rows})
     rng = resp.json().get("updates", {}).get("updatedRange", "")
     m = re.search(r"!A(\d+)", rng)
     n = int(m.group(1)) if m else None
     if n:
         await _call("POST", f"{SHEETS_API}/{sheet_id()}:batchUpdate", json={"requests": [{"repeatCell": {
-            "range": {"sheetId": gid, "startRowIndex": n - 1, "endRowIndex": n, "startColumnIndex": 0, "endColumnIndex": len(HEADER)},
+            "range": {"sheetId": gid, "startRowIndex": n - 1, "endRowIndex": n - 1 + len(rows), "startColumnIndex": 0, "endColumnIndex": len(HEADER)},
             "cell": {"userEnteredFormat": {"backgroundColor": PINK}}, "fields": "userEnteredFormat.backgroundColor"}}]})
     return n
 
@@ -274,6 +279,27 @@ def enqueue_row(db_path: str, tab: str, row: list):
                  (tab, json.dumps(row), datetime.utcnow().isoformat(timespec="seconds")))
     conn.commit()
     conn.close()
+
+
+def enqueue_rows(db_path: str, tab: str, rows: list):
+    """Many rows sent as one append (the backfill of old deliveries), so Google's per-minute limit isn't hit."""
+    conn = sqlite3.connect(db_path)
+    for i in range(0, len(rows), 200):
+        conn.execute("INSERT INTO sheet_outbox (kind, tab, payload, created_at) VALUES ('rows', ?, ?, ?)",
+                     (tab, json.dumps(rows[i:i + 200]), datetime.utcnow().isoformat(timespec="seconds")))
+    conn.commit()
+    conn.close()
+
+
+def queued_rows(db_path: str, tab: str) -> list:
+    """Every row queued for a tab so far (sent or not), from single and batched entries."""
+    conn = sqlite3.connect(db_path)
+    out = []
+    for kind, payload in conn.execute("SELECT kind, payload FROM sheet_outbox WHERE tab = ? AND kind IN ('row', 'rows')", (tab,)):
+        data = json.loads(payload)
+        out.extend(data if kind == "rows" else [data])
+    conn.close()
+    return out
 
 
 def enqueue_renewal(db_path: str, username: str, number: str, when: str) -> int:
@@ -387,6 +413,7 @@ async def flush(db_path: str, notify=None, quiet: set = ()) -> int:
                     await _ensure_header(MAIN_TAB)
                 data = json.loads(payload)
                 note = (await _apply_renewal(tab, data) if kind == "renewal" else await _apply_edit(tab, data) if kind == "edit"
+                        else f"{len(data)} rows from row {await _append_pink_rows(tab, data)}" if kind == "rows"
                         else f"row {await _append_pink(tab, data)}")
                 conn = sqlite3.connect(db_path)
                 conn.execute("UPDATE sheet_outbox SET done_at = ?, error = ? WHERE id = ?",
