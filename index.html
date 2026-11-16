@@ -4162,9 +4162,11 @@ function drawUpConfigurator(){
   let html=`<div class="row up-head"><div class="ri"><div class="rn">${escHtml(IMAP.up_online_app.name)}</div><div class="rs">Choose what you need below, then tap +</div></div><div class="rp">${rowPriceHtml('up_online_app', IMAP.up_online_app.price)}</div></div>`;
   html+='<div class="up-sec"><div class="up-lbl">Features</div><div class="up-chips">'+
     UP_FEATURES.filter(x=>x.k).map(x=>upChip(upCfg.feature===x.k, escHtml(x.label), plus(x.app,'up_online_app'), `upSetFeature('${x.k}')`, !upAvail(x.app))).join('')+'</div></div>';
-  const brPrice=plus(f.web,f.app);
+  // Both browser options always show: Browser Access (+12) for plans without Pathways, Pathways Browser Access (+17)
+  // for plans with it (choosing it on a plan without Pathways adds Pathways).
   html+='<div class="up-sec"><div class="up-lbl">Browser</div><div class="up-chips">'+
-    upChip(upCfg.browser, hasP?'Pathways Browser Access':'Browser Access', brPrice, 'upToggleBrowser()', !upAvail(f.web))+'</div></div>';
+    upChip(upCfg.browser&&!hasP, 'Browser Access', plus('up_online_web','up_online_app'), "upPickBrowser('plain')", !upAvail(hasP?'up_online_web':f.web))+
+    upChip(upCfg.browser&&hasP, 'Pathways Browser Access', plus('up_pathways_web','up_pathways_app'), "upPickBrowser('pathways')", !upAvail(hasP?f.web:'up_pathways_web'))+'</div></div>';
   html+='<div class="up-sec"><div class="up-lbl">AI</div><div class="up-chips">'+
     UP_AI.map(a=>upChip(upCfg.ai===a.id, escHtml(a.chip), upAvail(a.id)?'+'+upMoney(upPrice(a.id)):'', `upSetAi('${a.id}')`, !upAvail(a.id))).join('')+'</div></div>';
   const ok=upAvail(upCfgPlan());
@@ -4182,7 +4184,13 @@ function upCfgSummary(c){
   return ['Online'+(f.k?' + '+f.label:''), browser?'Browser':'', ai?'AI: '+ai.chip:''].filter(Boolean).join(' · ');
 }
 function upSetFeature(k){ upCfg.feature=upCfg.feature===k?'':k; drawUpConfigurator(); }
-function upToggleBrowser(){ upCfg.browser=!upCfg.browser; drawUpConfigurator(); }
+function upPickBrowser(kind){
+  const hasP=upCfg.feature==='pathways'||upCfg.feature==='both';
+  if(kind==='plain'&&hasP){ showToast('With Pathways, choose Pathways Browser Access'); return; }
+  if(kind==='pathways'&&!hasP){ upCfg.feature=upCfg.feature==='offline'?'both':'pathways'; upCfg.browser=true;
+    showToast('Pathways added: Pathways Browser Access needs it'); drawUpConfigurator(); return; }
+  upCfg.browser=!upCfg.browser; drawUpConfigurator();
+}
 function upSetAi(id){ upCfg.ai=upCfg.ai===id?'':id; drawUpConfigurator(); }
 function upSaveCfg(){
   const plan=upCfgPlan(); if(!upAvail(plan)) return;
