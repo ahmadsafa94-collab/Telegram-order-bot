@@ -510,19 +510,17 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
   border-radius:14px;background:rgba(var(--acc-rgb),.14);color:var(--teal2);font-size:13.5px;font-weight:700;cursor:pointer}
 .per-seg{margin:0 0 10px}.per-seg button{font-size:12px;padding:7px 4px}
 
-/* Uptodate plan add-ons sheet (16 Nov 2026) */
-.up-opt{display:flex;align-items:center;gap:11px;width:100%;text-align:left;font:inherit;color:var(--text);
-  background:var(--bg2);border:1.5px solid rgba(var(--fg-rgb),.10);border-radius:14px;padding:11px 13px;margin:0 0 8px;cursor:pointer}
-.up-opt .uo-mark{flex:0 0 22px;height:22px;border-radius:7px;border:2px solid rgba(var(--fg-rgb),.25);display:flex;
-  align-items:center;justify-content:center;font-size:13px;font-weight:800;color:#fff}
-.up-opt.radio .uo-mark{border-radius:50%}
-.up-opt.on{border-color:var(--teal2,#0d9488);background:rgba(13,148,136,.08)}
-.up-opt.on .uo-mark{background:var(--teal2,#0d9488);border-color:var(--teal2,#0d9488)}
-.up-opt .uo-t{flex:1;min-width:0}
-.up-opt .uo-n{font-size:14px;font-weight:650;line-height:1.3}
-.up-opt .uo-s{font-size:11.5px;color:var(--hint);margin-top:2px;line-height:1.35}
-.up-opt .uo-p{font-size:14px;font-weight:750;white-space:nowrap}
-.up-total{display:flex;justify-content:space-between;align-items:center;font-weight:750;font-size:15px;margin:6px 2px 10px}
+/* Uptodate: the add-ons are rows right under each plan (16 Nov 2026) */
+.up-block{border-bottom:1px solid rgba(var(--fg-rgb),.07)}
+.up-block .row{border-bottom:none}
+.up-block .up-addon{padding:7px 13px 7px 30px;background:rgba(13,148,136,.045)}
+.up-block .up-addon .rn{font-size:13px;font-weight:600}
+.up-block .up-addon .rn b{color:var(--teal2,#0d9488)}
+.up-block .up-addon .rs{font-size:11px}
+.up-block .up-addon .rp{font-size:13px}
+.up-block .up-addon:last-child{padding-bottom:10px}
+.up-block .add-btn.up-tick{background:transparent;border:2px solid var(--teal,#0d9488);color:var(--teal,#0d9488);box-shadow:none}
+.up-block .add-btn.up-tick.up-on{background:var(--teal,#0d9488);color:#fff}
 </style>
 </head>
 <body>
@@ -682,14 +680,6 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
 </div>
 
 <!-- Durations of one All Subscriptions product -->
-<!-- Uptodate plan: + Browser Access and an AI add-on (16 Nov 2026) -->
-<div class="overlay" id="upOverlay" onclick="if(event.target===this)closeUpPlan()">
-  <div class="sheet">
-    <div class="sheet-handle"></div>
-    <div class="sheet-title" id="upTitle"></div>
-    <div style="padding:12px 15px 0" id="upBody"></div>
-  </div>
-</div>
 <div class="overlay" id="durOverlay" onclick="if(event.target===this)closeDurSheet()">
   <div class="sheet">
     <div class="sheet-handle"></div>
@@ -1146,9 +1136,9 @@ const CATALOG = [
       {id:'imd_2y',name:'iMD - 2 Years',sub:'New account or renewal',price:140},
     ]},
   ]},
-  // Uptodate (owner, 16 Nov 2026): the official app (no browser) in four plans; tapping one opens its add-ons
-  // (UP_PLAN sheet): + Browser Access (the plan's _web item) and an AI add-on (1 year). The hidden group holds the
-  // items the add-ons put in the basket, so names and admin price edits work for them as for any item.
+  // Uptodate (owner, 16 Nov 2026): the official app (no browser) in four plans, each with its add-on rows right
+  // under it (makePlanRow): + Browser Access (turns the plan into its _web item) and the AI add-ons (1 year). The
+  // hidden group holds those items, so names and admin price edits work for them as for any item.
   {id:'uptodate',name:'Uptodate',emoji:'📖',groups:[
     {label:'Uptodate Official App (no browser)',items:[
       {id:'up_online_app',name:'Uptodate Online',sub:'Official App · 1 Year',price:20,plan:'up_online_web'},
@@ -1515,6 +1505,7 @@ function removeDetailItem(id){
 
 function syncBasket(){
   syncQtySteppers();
+  if(typeof paintUpRows==='function') paintUpRows();
   document.querySelectorAll('.panel-row.multi').forEach(paintPanelRow);
   const n=cartSize();
   const bc=document.getElementById('bc');
@@ -4115,6 +4106,104 @@ function buildAdBanner(){
   }
 }
 
+// ── Uptodate plans and their add-ons (owner, 16 Nov 2026) ──
+const UP_AI = [
+  {id:'uptodate_ai_expert_1y',label:'Uptodate Expert (official app)',sub:'AI inside the official app · 1 Year'},
+  {id:'uptodate_ai_tg_1y',label:'Uptodate AI (Telegram bot)',sub:'AI chat on Telegram · 1 Year'},
+  {id:'uptodate_ai_both_1y',label:'Both of them',sub:'Uptodate Expert + the Telegram bot · 1 Year'},
+];
+const UP_PLAN_IDS = new Set(['up_online_app','up_online_web','up_offline_app','up_offline_web','up_pathways_app','up_pathways_web','up_vip_app','up_vip_web']);
+const UP_AI_IDS = new Set(UP_AI.map(a=>a.id));
+const upPrice = id => { const i=IMAP[id]; if(!i) return null; return hasCoworkerDiscount(id)?coworkerPrice(i.price,id):i.price; };
+const upMoney = n => '$'+(Math.round(n*100)/100).toFixed(2).replace(/\.00$/,'');
+// A plan and its add-on rows: the plan (− n + counts the plan with or without browser), "+ Browser Access" (a tick:
+// every unit of this plan becomes the _web item, or back), then the AI add-ons (ordinary items, + / − n +).
+const upWantBrowser = {};   // a plan not in the basket yet: add it with Browser Access
+function makePlanRow(itm){
+  const app=itm.id, web=itm.plan;
+  const block=document.createElement('div'); block.className='up-block'; block.dataset.itemId=app;
+  const plan=document.createElement('div'); plan.className='row'; plan.id='up-plan-'+app;
+  plan.dataset.itemId=app; plan.dataset.base=itm.price; plan.dataset.name=itm.name;
+  plan.innerHTML=`<div class="ri"><div class="rn">${escHtml(itm.name)}</div><div class="rs">${escHtml(itm.sub||'')}</div></div>
+    <div class="rp">${rowPriceHtml(app, itm.price)}</div><span class="up-ctl"></span>`;
+  block.appendChild(plan);
+  const br=document.createElement('div'); br.className='row up-addon'; br.id='up-br-'+app;
+  const extra=(upPrice(web)!=null&&upPrice(app)!=null)?upPrice(web)-upPrice(app):null;
+  br.innerHTML=`<div class="ri"><div class="rn"><b>+</b> Browser Access</div><div class="rs">Also use it in a web browser</div></div>
+    <div class="rp">${extra!=null?'+'+upMoney(extra):''}</div><span class="up-ctl"></span>`;
+  if(IMAP[web]&&!OOS_IDS.has(web)) block.appendChild(br);
+  UP_AI.forEach(a=>{
+    const ai=IMAP[a.id]; if(!ai||REMOVED_IDS.has(a.id)||OOS_IDS.has(a.id)) return;
+    const r=document.createElement('div'); r.className='row up-addon'; r.dataset.ai=a.id;
+    r.innerHTML=`<div class="ri"><div class="rn"><b>+</b> AI: ${escHtml(a.label)}</div><div class="rs">${escHtml(a.sub)}</div></div>
+      <div class="rp">+${rowPriceHtml(a.id, ai.price)}</div><span class="up-ctl"></span>`;
+    block.appendChild(r);
+  });
+  paintUpBlock(app, block);
+  return block;
+}
+function paintUpBlock(app, root){
+  root=root||document;
+  const itm=IMAP[app]; if(!itm) return;
+  const web=itm.plan, qa=cart[app]?cart[app].qty:0, qw=cart[web]?cart[web].qty:0, q=qa+qw;
+  const oos=OOS_IDS.has(app);
+  root.querySelectorAll('#up-plan-'+app+' .up-ctl').forEach(c=>{
+    c.innerHTML=oos?'<button class="add-btn oos" disabled>✕</button>'
+      :q?`<span class="qty-step" style="display:inline-flex"><button class="qs-btn minus" type="button" aria-label="One less" onclick="event.stopPropagation();upPlanStep('${app}',-1)">−</button><span class="qs-n">${q}</span><button class="qs-btn" type="button" aria-label="One more" onclick="event.stopPropagation();upPlanStep('${app}',1)">+</button></span>`
+      :`<button class="add-btn" aria-label="Add" onclick="event.stopPropagation();upPlanStep('${app}',1)">+</button>`;
+  });
+  const counts=upAiCount[app]||{};
+  root.querySelectorAll('#up-plan-'+app+' ~ .up-addon[data-ai] .up-ctl').forEach(c=>{
+    const ai=c.parentElement.dataset.ai, n=counts[ai]||0;
+    c.innerHTML=n?`<span class="qty-step" style="display:inline-flex"><button class="qs-btn minus" type="button" aria-label="One less" onclick="event.stopPropagation();upAiStep('${app}','${ai}',-1)">−</button><span class="qs-n">${n}</span><button class="qs-btn" type="button" aria-label="One more" onclick="event.stopPropagation();upAiStep('${app}','${ai}',1)">+</button></span>`
+      :`<button class="add-btn" aria-label="Add" onclick="event.stopPropagation();upAiStep('${app}','${ai}',1)">+</button>`;
+  });
+  const on=q?qw>0:!!upWantBrowser[app];
+  root.querySelectorAll('#up-br-'+app+' .up-ctl').forEach(c=>{
+    c.innerHTML=`<button class="add-btn up-tick${on?' up-on':''}" aria-label="Browser Access" aria-pressed="${on}" onclick="event.stopPropagation();upToggleBrowser('${app}')">${on?'✓':'+'}</button>`;
+  });
+}
+// Each plan's AI rows show what was added under that plan (the basket has one line per AI add-on). When the basket
+// has fewer (removed there), the counts shrink to match, the latest plans first.
+const upAiCount = {};   // plan app id -> {ai id: n}
+function upFitAiCounts(){
+  UP_AI.forEach(a=>{
+    let have=cart[a.id]?cart[a.id].qty:0;
+    const plans=Object.keys(upAiCount);
+    plans.forEach(pl=>{ const n=upAiCount[pl][a.id]||0, keep=Math.min(n,have); upAiCount[pl][a.id]=keep; have-=keep; });
+  });
+}
+function paintUpRows(){ upFitAiCounts(); Object.values(IMAP).forEach(i=>{ if(i.plan) paintUpBlock(i.id); }); }
+function upAiStep(app, ai, d){
+  const c=upAiCount[app]=upAiCount[app]||{};
+  if(d>0){ c[ai]=(c[ai]||0)+1; addItem(ai); }
+  else if(c[ai]>0){ c[ai]--; stepQty(ai,-1); }
+  paintUpRows();
+}
+function upPlanStep(app,d){
+  const web=IMAP[app].plan;
+  const variant=cart[web]?web:cart[app]?app:(upWantBrowser[app]?web:app);
+  if(d>0) addItem(variant); else stepQty(variant,-1);
+  paintUpBlock(app);
+}
+function upToggleBrowser(app){
+  const web=IMAP[app].plan, from=cart[web]?web:cart[app]?app:null;
+  if(!from){ upWantBrowser[app]=!upWantBrowser[app]; paintUpBlock(app);
+    showToast(upWantBrowser[app]?'Browser Access will be added with the plan':'Without Browser Access'); return; }
+  const to=from===web?app:web, q=cart[from].qty;
+  delete cart[from];
+  cart[to]=cart[to]?{...cart[to],qty:cart[to].qty+q}:{name:IMAP[to].fullname||IMAP[to].name,price:IMAP[to].price,qty:q};
+  upWantBrowser[app]=to===web;
+  syncBasket(); if(document.getElementById('basketOverlay').classList.contains('on')) renderBasket();
+  showToast(to===web?'+ Browser Access added · '+upMoney(upPrice(web)):'Browser Access removed · '+upMoney(upPrice(app)));
+}
+// AI add-ons come with a plan: not more add-ons than plans in the basket (the bot checks this too).
+function uptodateAddonProblem(){
+  let plans=0, addons=0;
+  Object.entries(cart).forEach(([id,i])=>{ if(UP_PLAN_IDS.has(id)) plans+=i.qty; if(UP_AI_IDS.has(id)) addons+=i.qty; });
+  return addons>plans?'The Uptodate AI add-ons come with an Uptodate plan: add a plan for each AI add-on.':'';
+}
+
 // ── Init ──────────────────────────────────────────────────────────────
 buildCatalog();
 buildAdBanner();
@@ -4410,73 +4499,6 @@ async function sendSheetFile(){
   try{ await adminPost('/api/admin_sheet',Object.assign({action:'file'},sheetCred)); m.textContent='Sent to your chat with the bot. It opens with the sheet password.'; }
   catch(e){ m.style.color='#dc2626'; m.textContent=e.message; }
   finally{ btn.disabled=false; }
-}
-
-// ── Uptodate plans and their add-ons (owner, 16 Nov 2026) ──
-const UP_AI = [
-  {id:'',label:'No AI',sub:'Just the plan'},
-  {id:'uptodate_ai_expert_1y',label:'Uptodate Expert',sub:'AI inside the official app · 1 Year'},
-  {id:'uptodate_ai_tg_1y',label:'Uptodate AI (Telegram bot)',sub:'AI chat on Telegram · 1 Year'},
-  {id:'uptodate_ai_both_1y',label:'Both',sub:'Uptodate Expert + the Telegram bot · 1 Year'},
-];
-const UP_PLAN_IDS = new Set(['up_online_app','up_online_web','up_offline_app','up_offline_web','up_pathways_app','up_pathways_web','up_vip_app','up_vip_web']);
-const UP_AI_IDS = new Set(UP_AI.map(a=>a.id).filter(Boolean));
-let upSel = null;
-const upPrice = id => { const i=IMAP[id]; if(!i) return null; return hasCoworkerDiscount(id)?coworkerPrice(i.price,id):i.price; };
-const upMoney = n => '$'+(Math.round(n*100)/100).toFixed(2).replace(/\.00$/,'');
-function makePlanRow(itm){
-  const d=document.createElement('div'); d.className='row'; d.dataset.itemId=itm.id; d.dataset.base=itm.price; d.dataset.name=itm.name;
-  const oos=OOS_IDS.has(itm.id);
-  d.innerHTML=`<div class="ri"><div class="rn">${escHtml(itm.name)}</div><div class="rs">${escHtml(itm.sub||'')}${oos?'':' · add-ons ›'}</div></div>
-    <div class="rp">${rowPriceHtml(itm.id, itm.price)}</div>
-    <button class="add-btn${oos?' oos':''}" id="ab-${itm.id}" ${oos?'disabled':''} aria-label="Choose add-ons" onclick="event.stopPropagation();${oos?"showToast('Out of stock')":`openUpPlan('${itm.id}')`}">${oos?'✕':'+'}</button>`;
-  if(!oos) d.onclick=()=>openUpPlan(itm.id);
-  return d;
-}
-function openUpPlan(id){
-  const itm=IMAP[id]; if(!itm) return;
-  upSel={id, web:false, ai:''};
-  document.getElementById('upTitle').textContent=itm.name;
-  drawUpPlan();
-  document.getElementById('upOverlay').classList.add('on');
-}
-function closeUpPlan(){ document.getElementById('upOverlay').classList.remove('on'); }
-function drawUpPlan(){
-  const itm=IMAP[upSel.id], webId=itm.plan, base=upPrice(upSel.id), webP=upPrice(webId);
-  const browserAdd=(webP!=null&&base!=null)?webP-base:null;
-  const webOk=webP!=null&&!OOS_IDS.has(webId);
-  const opt=(on,radio,name,sub,price,click,dis)=>`<button type="button" class="up-opt${radio?' radio':''}${on?' on':''}" ${dis?'disabled style="opacity:.45"':''} onclick="${click}">`+
-    `<span class="uo-mark">${on?(radio?'●':'✓'):''}</span><span class="uo-t"><div class="uo-n">${name}</div><div class="uo-s">${sub}</div></span><span class="uo-p">${price}</span></button>`;
-  let html='<div class="t-meta" style="margin:0 0 10px">Uptodate official app · 1 Year · '+upMoney(base)+'</div>';
-  html+='<div class="sl" style="margin-top:0">Add-on: browser</div>';
-  html+=opt(upSel.web,false,'+ Browser Access','Also use it in a web browser',browserAdd!=null?'+'+upMoney(browserAdd):'',webOk?'upToggleWeb()':'',!webOk);
-  html+='<div class="sl">Add-on: AI</div>';
-  UP_AI.forEach(a=>{
-    const p=a.id?upPrice(a.id):0, ok=!a.id||(p!=null&&!OOS_IDS.has(a.id));
-    html+=opt(upSel.ai===a.id,true,escHtml(a.label),escHtml(a.sub),a.id?(p!=null?'+'+upMoney(p):''):'',ok?`upPickAi('${a.id}')`:'',!ok);
-  });
-  html+=`<div class="up-total"><span>Total</span><span>${upMoney(upPlanTotal())}</span></div>`;
-  html+='<button class="btn" style="margin-top:0" onclick="addUpPlan()">Add to basket</button><button class="btn sec" onclick="closeUpPlan()">Cancel</button>';
-  document.getElementById('upBody').innerHTML=html;
-}
-function upToggleWeb(){ upSel.web=!upSel.web; drawUpPlan(); }
-function upPickAi(id){ upSel.ai=id; drawUpPlan(); }
-function upPlanTotal(){
-  const itm=IMAP[upSel.id];
-  return (upPrice(upSel.web?itm.plan:upSel.id)||0)+(upSel.ai?(upPrice(upSel.ai)||0):0);
-}
-function addUpPlan(){
-  const itm=IMAP[upSel.id], planId=upSel.web?itm.plan:upSel.id;
-  addItem(planId);
-  if(upSel.ai) addItem(upSel.ai);
-  closeUpPlan();
-  showToast('Added to basket · '+upMoney(upPlanTotal()));
-}
-// AI add-ons come with a plan: not more add-ons than plans in the basket (the bot checks this too).
-function uptodateAddonProblem(){
-  let plans=0, addons=0;
-  Object.entries(cart).forEach(([id,i])=>{ if(UP_PLAN_IDS.has(id)) plans+=i.qty; if(UP_AI_IDS.has(id)) addons+=i.qty; });
-  return addons>plans?'The Uptodate AI add-ons come with an Uptodate plan: add a plan for each AI add-on.':'';
 }
 </script>
 </body>
