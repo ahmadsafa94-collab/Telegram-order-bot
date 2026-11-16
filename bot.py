@@ -423,6 +423,55 @@ UPTODATE_PLAN_ITEMS = {"up_online_app", "up_online_web", "up_offline_app", "up_o
 UPTODATE_AI_ADDONS = {"uptodate_ai_expert_1y", "uptodate_ai_tg_1y", "uptodate_ai_both_1y"}
 
 
+# Uptodate AI add-ons that go on the customer's Uptodate account (the Telegram-bot-only one is just a code).
+UPTODATE_AI_ON_ACCOUNT = {"uptodate_ai_expert_1y", "uptodate_ai_both_1y"}
+
+
+def _addon_details_from_plans(matched: list) -> list:
+    """[(fulfilment_id, item_id, entry)] with each Uptodate AI add-on given the details of the Uptodate account it was
+    ordered with (owner, 16 Nov 2026: one form per account). The Mini App says which (with_plan/with_unit); without
+    that, the add-ons of each type take the plan units in order."""
+    plans = [(iid, e) for _, iid, e in matched if iid in UPTODATE_PLAN_ITEMS]
+    if not plans:
+        return matched
+    by_unit, seen = {}, {}
+    for iid, e in plans:
+        seen[iid] = seen.get(iid, 0) + 1
+        by_unit[(iid, seen[iid])] = e
+    nth, out = {}, []
+    for fid, iid, e in matched:
+        if iid in UPTODATE_AI_ON_ACCOUNT:
+            k = nth[iid] = nth.get(iid, 0) + 1
+            src = by_unit.get((e.get("with_plan"), e.get("with_unit"))) or plans[min(k, len(plans)) - 1][1]
+            details = {key: v for key, v in src.items() if key not in ("id", "with_plan", "with_unit")}
+            e = {**details, "id": iid, "for_account": MENU.get(src.get("id"), (src.get("id"),))[0]}
+        out.append((fid, iid, e))
+    return out
+
+
+def _copy_plan_info_for_addon(order_id: int, fulfilment_id: int) -> bool:
+    """Gives an Uptodate AI add-on with no details yet the details of an Uptodate account in the same order (its
+    unit number picks the plan unit, the last one when there are fewer). False when no account has details yet."""
+    row = db_get_fulfilment(fulfilment_id)
+    if not row or row[6]:
+        return bool(row and row[6])
+    marks = ",".join("?" * len(UPTODATE_PLAN_ITEMS))
+    conn = sqlite3.connect(DB_PATH)
+    plans = conn.execute(f"SELECT item_id, info_json FROM fulfilment WHERE order_id = ? AND item_id IN ({marks}) "
+                         f"AND info_json IS NOT NULL AND info_json != '' ORDER BY id", (order_id, *UPTODATE_PLAN_ITEMS)).fetchall()
+    conn.close()
+    if not plans:
+        return False
+    plan_item, info_json = plans[min(row[4] or 1, len(plans)) - 1]
+    try:
+        info = json.loads(info_json)
+    except ValueError:
+        return False
+    info["for_account"] = MENU.get(plan_item, (plan_item,))[0]
+    db_set_fulfilment_info(fulfilment_id, info)
+    return True
+
+
 def addon_problem(order_items: dict):
     """Why an order can't be placed as it is: an Uptodate AI add-on without a plan, or more of one add-on type than
     Uptodate plans ordered (owner, 16 Nov 2026: one plan takes at most one of each add-on). None when fine."""
@@ -16625,6 +16674,11 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
     if item_id in UPTODATE_AI_BUNDLE_ITEMS:
         await send_uptodate_ai_bundle_code(context, order_id, user_id, fulfilment_id)
 
+    # An Uptodate AI add-on goes on the Uptodate account it was ordered with: take that account's details instead
+    # of asking for them again (owner, 16 Nov 2026).
+    if item_id in UPTODATE_AI_ON_ACCOUNT:
+        _copy_plan_info_for_addon(order_id, fulfilment_id)
+
     # Before asking the customer anything, check if credentials were already
     # collected (Mini App Step 2 or any pre-payment collection). If info_json
     # is already set, use it directly — never ask twice.
@@ -19098,8 +19152,9 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
             )
     conn.close()
 
+    matched = _addon_details_from_plans(matched)
     for fid, iid, detail_entry in matched:
-        info = {k: v for k, v in detail_entry.items() if k not in ("id", "account_type")}
+        info = {k: v for k, v in detail_entry.items() if k not in ("id", "account_type", "with_plan", "with_unit")}
         info["account_type"] = detail_entry.get("account_type", "new")
         db_set_fulfilment_info(fid, info)
         # Mark awaiting_delivery so process_next_in_queue skips re-asking

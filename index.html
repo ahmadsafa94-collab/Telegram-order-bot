@@ -1140,7 +1140,14 @@ const IMD = new Set(['imd_6m','imd_1y','imd_2y']);
 // Uptodate AI is a code-redemption product — no account/credentials are
 // needed at all, it's delivered automatically right after payment. Skip
 // generating a details form for it entirely.
-const NO_DETAILS_NEEDED = new Set(['uptodate_ai_2m', 'uptodate_ai_tg_1y', 'medical_toolkit']);
+const NO_DETAILS_NEEDED = new Set(['uptodate_ai_2m', 'uptodate_ai_tg_1y', 'medical_toolkit',
+  'uptodate_ai_expert_1y', 'uptodate_ai_both_1y']);
+// Uptodate AI add-ons (16 Nov 2026) take no form of their own: they go on the Uptodate account they were added with.
+const UP_ADDON_NOTE = {
+  uptodate_ai_expert_1y: '✅ No details needed: it goes on your Uptodate account above.',
+  uptodate_ai_both_1y: '✅ No details needed: it goes on your Uptodate account above, and the Telegram bot code is sent automatically after payment.',
+  uptodate_ai_tg_1y: '✅ No details needed: the Telegram bot code is sent automatically after payment.',
+};
 // Subset of NO_DETAILS_NEEDED that isn't auto-delivered — access has to be
 // granted by hand on another system, so the checkout copy shouldn't say
 // "automatically" for these.
@@ -1163,7 +1170,7 @@ const CATALOG = [
   // another can be set up. The hidden group holds those items, so names and admin price edits work as for any item.
   {id:'uptodate',name:'Uptodate',emoji:'📖',groups:[
     {label:'Uptodate',items:[
-      {id:'up_online_app',name:'Uptodate Online - 1 Year (Official App)',sub:'Official App · 1 Year',price:20,configurator:true},
+      {id:'up_online_app',name:'Uptodate Online',sub:'Official App · 1 Year',price:20,configurator:true},
     ]},
     {label:'add-ons',hidden:true,items:[
       {id:'up_offline_app',name:'Uptodate Online + Offline',sub:'Official App · 1 Year',price:30},
@@ -3586,7 +3593,7 @@ function makeNoDetailsBlock(id,name,price,idx){
   // Most no-details items auto-deliver right after payment (serial pool);
   // manual-access ones (e.g. Medical Toolkit) instead need the admin to
   // grant access on another bot, so say that instead of over-promising.
-  const note=MANUAL_ACCESS_ITEMS.has(id)
+  const note=UP_ADDON_NOTE[id] ? UP_ADDON_NOTE[id] : MANUAL_ACCESS_ITEMS.has(id)
     ? '✅ No account details needed — access is granted shortly after payment is confirmed.'
     : '✅ No account details needed — delivered automatically after payment.';
   w.innerHTML=`<div class="dheader"><div class="ri"><div class="rn">${name}${lbl}</div></div>`+
@@ -3942,11 +3949,20 @@ const OTHER_COUNTRIES=[
 // ── Submit order ──────────────────────────────────────────────────────
 function collectDetails(){
   const out=[];
+  // Which Uptodate account (plan item, its unit 1..n) each AI add-on was set up with, so the bot gives the add-on
+  // that account's details (16 Nov 2026).
+  const withPlan={}, unitOf={};
+  (typeof upSaved!=='undefined'?upSaved:[]).forEach(s=>{
+    unitOf[s.plan]=(unitOf[s.plan]||0)+1;
+    if(s.ai) (withPlan[s.ai]=withPlan[s.ai]||[]).push([s.plan, unitOf[s.plan]]);
+  });
   document.querySelectorAll('.dblock').forEach(block=>{
     const id=block.dataset.id, idx=parseInt(block.dataset.idx||0);
     const type=block.dataset.type||'new';
     const entry={id,account_type:type};
     block.querySelectorAll('input').forEach(inp=>{if(inp.value.trim()) entry[inp.name]=inp.value.trim();});
+    const link=withPlan[id]&&withPlan[id][idx];
+    if(link){ entry.with_plan=link[0]; entry.with_unit=link[1]; }
     out.push(entry);
   });
   return out;
@@ -4190,7 +4206,7 @@ function drawUpConfigurator(){
   const el=document.getElementById('upCfg'); if(!el) return;
   const base=upPrice('up_online_app'), f=upFeat(upCfg.feature), hasP=upCfg.feature==='pathways'||upCfg.feature==='both';
   const plus=(a,b)=>{ const x=upPrice(a), y=upPrice(b); return x!=null&&y!=null?'+'+upMoney(x-y):''; };
-  let html=`<div class="row up-head"><div class="ri"><div class="rn">${escHtml(IMAP.up_online_app.name)}</div><div class="rs">Choose what you need below, then tap +</div></div><div class="rp">${rowPriceHtml('up_online_app', IMAP.up_online_app.price)}</div></div>`;
+  let html=`<div class="row up-head"><div class="ri"><div class="rn">Uptodate Online - 1 Year (Official App)</div><div class="rs">Choose what you need below, then tap +</div></div><div class="rp">${rowPriceHtml('up_online_app', IMAP.up_online_app.price)}</div></div>`;
   html+='<div class="up-sec"><div class="up-lbl">Features</div><div class="up-chips">'+
     UP_FEATURES.filter(x=>x.k).map(x=>upChip(upCfg.feature===x.k, escHtml(x.label), plus(x.app,'up_online_app'), `upSetFeature('${x.k}')`, !upAvail(x.app))).join('')+'</div></div>';
   // Both browser options always show: Browser Access (+12) for plans without Pathways, Pathways Browser Access (+17)
