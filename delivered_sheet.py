@@ -461,6 +461,42 @@ def pending_count(db_path: str) -> int:
 
 # ── the sheet password ───────────────────────────────────────────────
 
+# Fingerprint (Telegram's BiometricManager, 16 Nov 2026): the phone keeps a random key in its secure storage that only
+# the admin's fingerprint releases; here only its hash and the sheet password encrypted with it are kept, so a
+# fingerprint unlock can still lock the .xlsx with the real password.
+
+def bio_wrap(password: str) -> tuple:
+    """(token for the phone, record to keep)."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    token = _b64(os.urandom(32))
+    salt, nonce = os.urandom(16), os.urandom(12)
+    key = hashlib.sha256(salt + token.encode()).digest()
+    ct = AESGCM(key).encrypt(nonce, password.encode(), None)
+    return token, {"id": hashlib.sha256(token.encode()).hexdigest(), "salt": _b64(salt), "ct": _b64(nonce + ct),
+                   "at": datetime.utcnow().isoformat(timespec="seconds")}
+
+
+def bio_unwrap(token: str, records: list):
+    """The sheet password for a phone's key, or None."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    if not isinstance(token, str) or not token:
+        return None
+    rid = hashlib.sha256(token.encode()).hexdigest()
+    rec = next((r for r in records or [] if hmac.compare_digest(r.get("id", ""), rid)), None)
+    if not rec:
+        return None
+    unb = lambda s: base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+    try:
+        blob = unb(rec["ct"])
+        key = hashlib.sha256(unb(rec["salt"]) + token.encode()).digest()
+        return AESGCM(key).decrypt(blob[:12], blob[12:], None).decode()
+    except Exception:
+        return None
+
+
+def bio_id(token: str) -> str:
+    return hashlib.sha256((token or "").encode()).hexdigest()
+
 def hash_password(password: str, salt: bytes = None) -> str:
     salt = salt or os.urandom(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 200_000)

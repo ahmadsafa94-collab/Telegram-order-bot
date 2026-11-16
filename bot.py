@@ -11892,9 +11892,36 @@ def _sheet_password_ok(password) -> tuple:
     return True, ""
 
 
+def _sheet_bio_records() -> list:
+    try:
+        return json.loads(db_get_meta("delivered_sheet_bio") or "[]")
+    except ValueError:
+        return []
+
+
+def _sheet_auth(data: dict) -> tuple:
+    """(ok, error, password): the typed sheet password, or a phone's fingerprint key ({"bio": token}) that unlocks the
+    stored password. Wrong keys count as wrong passwords."""
+    token = data.get("bio")
+    if token:
+        now = time.time()
+        tries = [t for t in _sheet_tries.get(ADMIN_CHAT_ID, []) if now - t < 600]
+        if len(tries) >= 5:
+            return False, "Too many wrong passwords. Try again in 10 minutes.", None
+        password = dsheet.bio_unwrap(token, _sheet_bio_records())
+        if not password:
+            _sheet_tries[ADMIN_CHAT_ID] = tries + [now]
+            return False, "Fingerprint isn't set up for this phone anymore. Enter the sheet password.", None
+        ok, why = _sheet_password_ok(password)
+        return ok, why, (password if ok else None)
+    ok, why = _sheet_password_ok(data.get("password"))
+    return ok, why, (data.get("password") if ok else None)
+
+
 async def http_admin_sheet(request):
-    """POST {action, password, …}: status | setpw {password, new} | rows {tab: main|imd, q} | file. Admin only, and
-    everything but status and setting the first password needs the sheet password."""
+    """POST {action, password | bio, …}: status | setpw {password, new} | rows {tab: main|imd, q} | file |
+    bio_on {password} → {token} | bio_off. Admin only, and everything but status and setting the first password needs
+    the sheet password or a phone's fingerprint key (bio)."""
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
@@ -11909,7 +11936,8 @@ async def http_admin_sheet(request):
     if action == "status":
         return web.json_response({"ok": True, "password_set": has_pw, "connected": dsheet.configured(),
                                   "why": "" if dsheet.configured() else dsheet.not_configured_reason(),
-                                  "waiting": dsheet.pending_count(DB_PATH)}, headers=headers)
+                                  "waiting": dsheet.pending_count(DB_PATH),
+                                  "bio_phones": len(_sheet_bio_records())}, headers=headers)
     if action == "setpw":
         new = data.get("new")
         if has_pw:
@@ -11919,10 +11947,22 @@ async def http_admin_sheet(request):
         if not isinstance(new, str) or len(new) < 6:
             return web.json_response({"ok": False, "error": "The password needs at least 6 characters."}, status=400, headers=headers)
         db_set_meta("delivered_sheet_password", dsheet.hash_password(new))
+        db_set_meta("delivered_sheet_bio", "[]")   # a new password: fingerprint is set up again on each phone
         return web.json_response({"ok": True}, headers=headers)
-    ok, why = _sheet_password_ok(data.get("password"))
+    if action == "bio_on":   # only with the typed password
+        ok, why = _sheet_password_ok(data.get("password"))
+        if not ok:
+            return web.json_response({"ok": False, "error": why}, status=403, headers=headers)
+        token, rec = dsheet.bio_wrap(data["password"])
+        db_set_meta("delivered_sheet_bio", json.dumps((_sheet_bio_records() + [rec])[-5:]))
+        return web.json_response({"ok": True, "token": token}, headers=headers)
+    ok, why, password = _sheet_auth(data)
     if not ok:
         return web.json_response({"ok": False, "error": why}, status=403, headers=headers)
+    if action == "bio_off":
+        gone = dsheet.bio_id(data.get("bio") or data.get("token") or "")
+        db_set_meta("delivered_sheet_bio", json.dumps([r for r in _sheet_bio_records() if r.get("id") != gone]))
+        return web.json_response({"ok": True}, headers=headers)
     if not dsheet.configured():
         return web.json_response({"ok": False, "error": dsheet.not_configured_reason()}, status=503, headers=headers)
     try:
@@ -11938,7 +11978,7 @@ async def http_admin_sheet(request):
                                       "rows": [{"n": n, "cells": r} for n, r in shown]}, headers=headers)
         if action == "file":
             data_x = await dsheet.export_xlsx()
-            locked = dsheet.encrypt_xlsx(data_x, data["password"])
+            locked = dsheet.encrypt_xlsx(data_x, password)
             await request.app["application"].bot.send_document(
                 chat_id=ADMIN_CHAT_ID, document=InputFile(io.BytesIO(locked), filename="Delivered subscriptions.xlsx"),
                 caption="📑 Delivered subscriptions. 🔒 Opens with the sheet password.")

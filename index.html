@@ -4172,35 +4172,54 @@ function applyRemovedLocal(ids){
 }
 
 
-// ── 📑 Delivered sheet (admin; the sheet password is kept only while this page is open) ──
-let sheetPw=null, sheetTab='main', sheetQ='', sheetTimer=null;
+// ── 📑 Delivered sheet (admin; the password or fingerprint key is kept only while this page is open) ──
+let sheetCred=null, sheetTab='main', sheetQ='', sheetTimer=null, sheetBioPhones=0, sheetBioTried=false;
 function closeSheet(){ document.getElementById('sheetOverlay').classList.remove('on'); }
+// Fingerprint through Telegram's BiometricManager (Telegram 7.2+): the phone keeps a key only the fingerprint releases.
+function sheetBM(){ const w=window.Telegram&&Telegram.WebApp; return (w&&w.isVersionAtLeast&&w.isVersionAtLeast('7.2')&&w.BiometricManager)||null; }
+function sheetBMReady(){ return new Promise(res=>{ const b=sheetBM(); if(!b) return res(null); if(b.isInited) return res(b); try{ b.init(()=>res(b)); }catch(e){ res(null); } setTimeout(()=>res(b.isInited?b:null),3000); }); }
+function sheetBioName(b){ return b&&b.biometricType==='face'?'Face ID':'fingerprint'; }
+function sheetBioOpen(b,m){
+  b.authenticate({reason:'Open your delivered subscriptions'},(ok,token)=>{
+    if(ok&&token){ sheetCred={bio:token}; sheetTab='main'; sheetQ=''; drawSheet(); }
+    else if(m){ m.textContent=sheetBioName(b)+' not confirmed. Try again or enter the password.'; }
+  });
+}
 async function openSheet(){
   document.getElementById('sheetOverlay').classList.add('on');
   const box=document.getElementById('sheetContent');
-  if(sheetPw){ return drawSheet(); }
+  if(sheetCred){ return drawSheet(); }
   box.innerHTML='<div class="search-empty">Loading…</div>';
   let st;
   try{ st=await adminPost('/api/admin_sheet',{action:'status'}); }
   catch(e){ box.innerHTML='<div class="search-empty">'+escHtml(e.message)+'</div>'; return; }
+  sheetBioPhones=st.bio_phones||0;
   const first=!st.password_set;
+  const b=first?null:await sheetBMReady();
+  const bio=b&&b.isBiometricAvailable&&b.isAccessGranted&&b.isBiometricTokenSaved&&sheetBioPhones>0;
   box.innerHTML=(st.connected?'':'<div class="t-meta" style="margin-bottom:10px;color:#d97706">⚠️ '+escHtml(st.why)+'</div>')
-    +'<div class="t-meta" style="margin-bottom:8px">'+(first?'Choose a password for the sheet (at least 6 characters). You need it every time you open the sheet, and the .xlsx file opens with it.':'Enter the sheet password.')+'</div>'
+    +(bio?'<button class="btn" id="sheetBio" style="margin-bottom:12px">👆 Open with '+sheetBioName(b)+'</button><div class="t-meta" style="margin-bottom:8px">or enter the sheet password:</div>':'')
+    +(bio?'':'<div class="t-meta" style="margin-bottom:8px">'+(first?'Choose a password for the sheet (at least 6 characters). You need it every time you open the sheet, and the .xlsx file opens with it.':'Enter the sheet password.')+'</div>')
     +'<input id="sheetPw" class="cw-input" type="password" autocomplete="off" placeholder="Sheet password" aria-label="Sheet password" style="margin-bottom:8px">'
     +(first?'<input id="sheetPw2" class="cw-input" type="password" autocomplete="off" placeholder="Again" aria-label="Password again" style="margin-bottom:8px">':'')
-    +'<div id="sheetMsg" class="t-meta" style="min-height:16px"></div><button class="btn" id="sheetGo">'+(first?'Set password':'Open')+'</button>';
+    +'<div id="sheetMsg" class="t-meta" style="min-height:16px"></div><button class="btn'+(bio?' sec':'')+'" id="sheetGo">'+(first?'Set password':'Open')+'</button>';
+  const m=document.getElementById('sheetMsg');
   const go=async()=>{
-    const pw=document.getElementById('sheetPw').value, m=document.getElementById('sheetMsg');
+    const pw=document.getElementById('sheetPw').value;
     if(first){
       if(pw.length<6){ m.textContent='At least 6 characters.'; return; }
       if(pw!==document.getElementById('sheetPw2').value){ m.textContent="The two passwords don't match."; return; }
       try{ await adminPost('/api/admin_sheet',{action:'setpw',new:pw}); }catch(e){ m.textContent=e.message; return; }
+      sheetBioPhones=0;
     }
-    sheetPw=pw; sheetTab='main'; sheetQ=''; drawSheet();
+    sheetCred={password:pw}; sheetTab='main'; sheetQ=''; drawSheet();
   };
   document.getElementById('sheetGo').onclick=go;
   document.getElementById('sheetPw').onkeydown=e=>{ if(e.key==='Enter') go(); };
-  setTimeout(()=>document.getElementById('sheetPw').focus(),150);
+  if(bio){
+    document.getElementById('sheetBio').onclick=()=>sheetBioOpen(b,m);
+    if(!sheetBioTried){ sheetBioTried=true; sheetBioOpen(b,m); }   // ask for the fingerprint right away, once per visit
+  } else setTimeout(()=>document.getElementById('sheetPw').focus(),150);
 }
 async function drawSheet(){
   const box=document.getElementById('sheetContent');
@@ -4208,7 +4227,7 @@ async function drawSheet(){
     box.innerHTML='<button class="btn" id="sheetFile">📥 Send me the .xlsx (password-protected)</button><div id="sheetFileMsg" class="t-meta" style="min-height:16px;margin:4px 0 6px"></div>'
       +'<div class="seg" id="sheetSeg"><button data-t="main">Delivered</button><button data-t="imd">iMD</button></div>'
       +'<div class="search-wrap" style="margin-bottom:8px"><span class="search-ico">🔍</span><input id="sheetSearch" type="text" placeholder="Search name, username, order #, customer…" aria-label="Search the sheet"></div>'
-      +'<div id="sheetInfo" class="t-meta" style="margin-bottom:6px"></div><div id="sheetRows"></div>';
+      +'<div id="sheetInfo" class="t-meta" style="margin-bottom:6px"></div><div id="sheetRows"></div><div id="sheetBioBox" style="margin-top:10px"></div>';
     box.querySelectorAll('#sheetSeg button').forEach(b=>b.onclick=()=>{ sheetTab=b.dataset.t; loadSheetRows(); });
     const s=document.getElementById('sheetSearch'); s.value=sheetQ;
     s.oninput=()=>{ clearTimeout(sheetTimer); sheetTimer=setTimeout(()=>{ sheetQ=s.value.trim(); loadSheetRows(); },350); };
@@ -4216,16 +4235,51 @@ async function drawSheet(){
   }
   loadSheetRows();
 }
+async function drawSheetBio(){
+  const el=document.getElementById('sheetBioBox'); if(!el) return;
+  const b=await sheetBMReady();
+  if(!b||!b.isBiometricAvailable){ el.innerHTML=''; return; }
+  const on=b.isBiometricTokenSaved&&b.isAccessGranted&&sheetBioPhones>0, name=sheetBioName(b);
+  el.innerHTML=on?'<button class="btn sec" id="sheetBioBtn">Turn off '+name+' on this phone</button>'
+                 :(sheetCred&&sheetCred.password?'<button class="btn sec" id="sheetBioBtn">👆 Use '+name+' to open next time</button>':'');
+  const btn=document.getElementById('sheetBioBtn'); if(!btn) return;
+  btn.onclick=()=>on?sheetBioOff(b):sheetBioOn(b);
+}
+function sheetBioOn(b){
+  const name=sheetBioName(b);
+  const save=async()=>{
+    let d;
+    try{ d=await adminPost('/api/admin_sheet',{action:'bio_on',password:sheetCred.password}); }
+    catch(e){ showToast(e.message); return; }
+    b.updateBiometricToken(d.token,ok=>{
+      if(ok){ sheetBioPhones+=1; showToast('👆 Next time, open the sheet with your '+name+'.'); drawSheetBio(); }
+      else showToast("Telegram didn't save it. Try again.");
+    });
+  };
+  if(b.isAccessGranted) return save();
+  if(b.isAccessRequested){ showToast('Allow '+name+' for this bot in Telegram settings, then try again.'); try{ b.openSettings(); }catch(e){} return; }
+  b.requestAccess({reason:'Open your delivered subscriptions with your '+name},granted=>{ if(granted) save(); else showToast(name+' not allowed.'); });
+}
+function sheetBioOff(b){
+  const done=()=>b.updateBiometricToken('',()=>{ showToast('Turned off on this phone. Use the password next time.'); drawSheetBio(); });
+  if(sheetCred&&sheetCred.bio){ adminPost('/api/admin_sheet',{action:'bio_off',bio:sheetCred.bio}).then(()=>{ sheetBioPhones=Math.max(0,sheetBioPhones-1); done(); },()=>done()); }
+  else done();
+}
 async function loadSheetRows(){
   document.querySelectorAll('#sheetSeg button').forEach(b=>b.classList.toggle('on',b.dataset.t===sheetTab));
   const rowsEl=document.getElementById('sheetRows'), info=document.getElementById('sheetInfo');
   rowsEl.innerHTML='<div class="search-empty">Loading…</div>';
   let d;
-  try{ d=await adminPost('/api/admin_sheet',{action:'rows',password:sheetPw,tab:sheetTab,q:sheetQ}); }
+  try{ d=await adminPost('/api/admin_sheet',Object.assign({action:'rows',tab:sheetTab,q:sheetQ},sheetCred)); }
   catch(e){
-    if(/password/i.test(e.message)){ sheetPw=null; openSheet(); showToast(e.message); return; }
+    if(/password|fingerprint/i.test(e.message)){
+      const wasBio=sheetCred&&sheetCred.bio; sheetCred=null;
+      if(wasBio&&/isn't set up/.test(e.message)){ const b=sheetBM(); try{ b&&b.updateBiometricToken('',()=>{}); }catch(x){} }
+      openSheet(); showToast(e.message); return;
+    }
     rowsEl.innerHTML='<div class="search-empty">'+escHtml(e.message)+'</div>'; info.textContent=''; return;
   }
+  drawSheetBio();
   info.textContent=(sheetQ?d.matches+' of '+d.total+' rows match':d.total+' rows')+(d.rows.length<d.matches?' · showing the newest '+d.rows.length:'')+' · newest first';
   if(!d.rows.length){ rowsEl.innerHTML='<div class="search-empty">Nothing found.</div>'; return; }
   const H=d.header||[];
@@ -4242,7 +4296,7 @@ async function loadSheetRows(){
 async function sendSheetFile(){
   const btn=document.getElementById('sheetFile'), m=document.getElementById('sheetFileMsg');
   btn.disabled=true; m.style.color='var(--hint)'; m.textContent='Preparing the file…';
-  try{ await adminPost('/api/admin_sheet',{action:'file',password:sheetPw}); m.textContent='Sent to your chat with the bot. It opens with the sheet password.'; }
+  try{ await adminPost('/api/admin_sheet',Object.assign({action:'file'},sheetCred)); m.textContent='Sent to your chat with the bot. It opens with the sheet password.'; }
   catch(e){ m.style.color='#dc2626'; m.textContent=e.message; }
   finally{ btn.disabled=false; }
 }
