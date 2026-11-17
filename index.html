@@ -3786,6 +3786,26 @@ function discountableTotal(){
   return Object.entries(cart).filter(([id])=>appliedDiscountItems.includes(id))
     .reduce((s,[id,i])=>s+(hasCoworkerDiscount(id)?coworkerPrice(i.price,id):i.price)*i.qty,0);
 }
+// The order summary: each line at its price, and a line the discount code covers shown with its old price struck
+// through and the new one (owner, 17 Nov 2026); then the code and credits lines, then the total.
+function summaryRowsHtml(totalLabel, total){
+  const unit=(id,price)=>hasCoworkerDiscount(id)?coworkerPrice(price,id):price;
+  const covered=id=>appliedDiscountPct>0&&(!appliedDiscountItems||appliedDiscountItems.includes(id));
+  let off=0;
+  const rows=Object.entries(cart).map(([id,{name,price,qty}])=>{
+    const line=unit(id,price)*qty;
+    let shown='$'+line.toFixed(2);
+    if(covered(id)){
+      const now=Math.round(line*(1-appliedDiscountPct/100)*100)/100; off+=line-now;
+      shown='<s style="color:var(--hint);font-weight:400;font-size:.88em;margin-right:5px">$'+line.toFixed(2)+'</s>$'+now.toFixed(2);
+    }
+    return '<div class="sumrow"><div>'+name+(qty>1?' ×'+qty:'')+'</div><div class="r">'+shown+'</div></div>';
+  }).join('');
+  const code=off>0?'<div class="sumrow"><div>🏷 '+escHtml(appliedDiscountCode)+' ('+appliedDiscountPct+'% off)</div><div class="r" style="color:#16a34a">−$'+off.toFixed(2)+'</div></div>':'';
+  const credits=Math.max(0, Math.round((cartTotal()-off-total)*100)/100);
+  const cred=appliedCreditsFlag&&credits>0?'<div class="sumrow"><div>💳 Credits</div><div class="r" style="color:#16a34a">−$'+credits.toFixed(2)+'</div></div>':'';
+  return rows+code+cred+'<div class="sumrow"><div>'+totalLabel+'</div><div class="r">$'+total.toFixed(2)+'</div></div>';
+}
 function effectiveTotal(){
   let t = cartTotal();
   if(appliedDiscountPct>0) t = Math.max(0, t - discountableTotal()*appliedDiscountPct/100);
@@ -3810,9 +3830,7 @@ function buildPaymentPage(){
     document.getElementById('discountBox').style.display='none';
     pmGrid.innerHTML='<div class="pm" data-id="postpaid" style="grid-column:1/-1"><div class="ico">📒</div><div class="lbl">Pay later</div><div class="sub">Added to your account — nothing to pay now</div></div>';
     pmGrid.firstChild.onclick=()=>selMethod('postpaid',total);
-    document.getElementById('sumCard').innerHTML=Object.entries(cart).map(([id,{name,price,qty}])=>
-      `<div class="sumrow"><div>${name}${qty>1?` ×${qty}`:''}</div><div class="r">$${((hasCoworkerDiscount(id)?coworkerPrice(price,id):price)*qty).toFixed(2)}</div></div>`
-    ).join('')+`<div class="sumrow"><div>Total (pay later)</div><div class="r">$${total.toFixed(2)}</div></div>`;
+    document.getElementById('sumCard').innerHTML=summaryRowsHtml('Total (pay later)', total);
     return;
   }
   const addSectionLabel=(text)=>{
@@ -3857,9 +3875,7 @@ function buildPaymentPage(){
       pmGrid.appendChild(d);
     });
   const sc=document.getElementById('sumCard');
-  sc.innerHTML=Object.entries(cart).map(([id,{name,price,qty}])=>
-    `<div class="sumrow"><div>${name}${qty>1?` ×${qty}`:''}</div><div class="r">$${((hasCoworkerDiscount(id)?coworkerPrice(price,id):price)*qty).toFixed(2)}</div></div>`
-  ).join('')+`<div class="sumrow"><div>Total</div><div class="r">$${total.toFixed(2)}</div></div>`;
+  sc.innerHTML=summaryRowsHtml('Total', total);
   // (state already reset at top of buildPaymentPage)
 }
 
