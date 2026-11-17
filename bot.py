@@ -19720,6 +19720,75 @@ async def restoreorder_file_received(update: Update, context: ContextTypes.DEFAU
         shutil.rmtree(os.path.dirname(path), ignore_errors=True)
 
 
+# ── /setavatar: the bot sets its own profile picture (admin only, 17 Nov 2026) ──
+
+TELEGRAM_API_BASE = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org")
+SETAVATAR_HELP = ("🖼 To change my profile picture: send me the picture (a photo, or a square MP4 / GIF for a moving one), "
+                  "then reply to that message with /setavatar.")
+
+
+def _avatar_source(msg):
+    """(file_id, "animated" | "static", filename) of the picture or video in a message, or None."""
+    if msg is None:
+        return None
+    if msg.animation:
+        return msg.animation.file_id, "animated", "avatar.mp4"
+    if msg.video:
+        return msg.video.file_id, "animated", "avatar.mp4"
+    if msg.photo:
+        return msg.photo[-1].file_id, "static", "avatar.jpg"
+    doc = msg.document
+    if doc:
+        mime, name = (doc.mime_type or "").lower(), (doc.file_name or "").lower()
+        if mime.startswith("video/") or mime == "image/gif" or name.endswith((".mp4", ".gif", ".mov")):
+            return doc.file_id, "animated", "avatar.mp4"
+        if mime.startswith("image/") or name.endswith((".png", ".jpg", ".jpeg")):
+            return doc.file_id, "static", "avatar.jpg"
+    return None
+
+
+async def set_avatar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin only: reply /setavatar to a photo (still) or an MP4 / GIF (moving) and the bot makes it its own profile
+    picture (Bot API setMyProfilePhoto). Telegram's answer is shown as it is; when it refuses, nothing changes."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    source = _avatar_source(update.message.reply_to_message)
+    if not source:
+        await update.message.reply_text(SETAVATAR_HELP)
+        return
+    file_id, kind, filename = source
+    import httpx
+    try:
+        tg_file = await context.bot.get_file(file_id)
+        data = bytes(await tg_file.download_as_bytearray())
+        photo = ({"type": "animated", "animation": "attach://avatar", "main_frame_timestamp": 0.0} if kind == "animated"
+                 else {"type": "static", "photo": "attach://avatar"})
+        async with httpx.AsyncClient(timeout=120) as http:
+            r = await http.post(
+                f"{TELEGRAM_API_BASE}/bot{BOT_TOKEN}/setMyProfilePhoto", data={"photo": json.dumps(photo)},
+                files={"avatar": (filename, data, "video/mp4" if kind == "animated" else "image/jpeg")})
+        try:
+            answer = r.json()
+        except ValueError:
+            answer = {"ok": False, "description": f"HTTP {r.status_code}"}
+    except Exception as exc:
+        # Never the exception's text: an httpx error can carry the request URL, which has the bot token in it.
+        logger.warning("/setavatar failed: %s", exc.__class__.__name__)
+        await update.message.reply_text(f"❌ Couldn't set the picture ({exc.__class__.__name__}). Nothing was changed.")
+        return
+    what = "moving picture" if kind == "animated" else "picture"
+    if answer.get("ok"):
+        logger.info("/setavatar: profile %s set (%s bytes)", what, len(data))
+        await update.message.reply_text(f"✅ Done: that's my profile {what} now. Telegram can take a minute to show it everywhere.")
+    else:
+        said = str(answer.get("description") or "no reason given")[:300]
+        logger.info("/setavatar: Telegram refused the %s: %s", what, said)
+        await update.message.reply_text(
+            f"❌ Telegram refused the {what}: {said}\nNothing was changed."
+            + ("\n\nTelegram may not allow moving pictures for bots; a photo still works (here or @BotFather → /setuserpic)."
+               if kind == "animated" else ""))
+
+
 async def restore_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only /restore: begins the restore flow. The actual file is
     handled by restore_file_received once uploaded."""
@@ -20042,6 +20111,7 @@ def main():
     app.add_handler(CommandHandler("myorders", my_orders))
     app.add_handler(CommandHandler("coworker", coworker_login_start))
     app.add_handler(CommandHandler("backupdb", backup_db))
+    app.add_handler(CommandHandler("setavatar", set_avatar))
     app.add_handler(CommandHandler("restore", restore_start))
     app.add_handler(CommandHandler("restoreorder", restoreorder_start))
     app.add_handler(CommandHandler("sites", automation_moved))
