@@ -12458,7 +12458,7 @@ def _sheet_auth(data: dict) -> tuple:
 
 async def http_admin_sheet(request):
     """POST {action, password | bio, …}: status | setpw {password, new} | rows {tab: main|imd, q} | file |
-    bio_on {password} → {token} | bio_off. Admin only, and everything but status and setting the first password needs
+    bio_on {password} → {token} | bio_off | add {tab, cells: [A…M]} | edit {tab, n, cells, expect: the row as shown}. Admin only, and everything but status and setting the first password needs
     the sheet password or a phone's fingerprint key (bio)."""
     from aiohttp import web
     headers = _post_cors_headers()
@@ -12514,6 +12514,33 @@ async def http_admin_sheet(request):
             shown = hits[-300:][::-1]   # newest first
             return web.json_response({"ok": True, "tab": tab, "header": header, "total": len(body), "matches": len(hits),
                                       "rows": [{"n": n, "cells": r} for n, r in shown]}, headers=headers)
+        if action in ("add", "edit"):   # the owner's own rows, typed in the Mini App (18 Nov 2026)
+            tab = dsheet.IMD_TAB if data.get("tab") == "imd" else dsheet.MAIN_TAB
+            if not isinstance(data.get("cells"), list) or len(data["cells"]) > len(dsheet.HEADER) or (
+                    action == "edit" and (len(data["cells"]) != len(dsheet.HEADER) or not isinstance(data.get("expect"), list))):
+                return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+            cells = dsheet.clean_cells(data["cells"])
+            if action == "add":
+                if not (cells[0] or cells[5]):
+                    return web.json_response({"ok": False, "error": "Fill in the subscription or the username."}, status=400, headers=headers)
+                cells = dsheet.fill_expiry(cells)
+                n = await dsheet.add_row(tab, cells)
+                logger.info("Delivered sheet: the admin added row %s on %s (%s)", n, tab, cells[0])
+                return web.json_response({"ok": True, "n": n, "cells": cells}, headers=headers)
+            try:
+                n = int(data.get("n"))
+            except (TypeError, ValueError):
+                return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+            expect = data["expect"]
+            try:
+                changed = await dsheet.edit_row(tab, n, cells, expect)
+            except dsheet.RowChanged as exc:
+                return web.json_response({"ok": False, "error": f"Not saved: {exc}. Search again and edit the new version."},
+                                         status=409, headers=headers)
+            except LookupError as exc:
+                return web.json_response({"ok": False, "error": f"Not saved: {exc}."}, status=404, headers=headers)
+            logger.info("Delivered sheet: the admin edited row %s on %s (columns %s)", n, tab, ",".join(changed) or "none")
+            return web.json_response({"ok": True, "n": n, "changed": changed}, headers=headers)
         if action == "file":
             data_x = await dsheet.export_xlsx()
             locked = dsheet.encrypt_xlsx(data_x, password)

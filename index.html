@@ -921,6 +921,14 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
     <div style="padding:0 15px"><button class="btn sec" onclick="closeSheet()">Close</button></div>
   </div>
 </div>
+<!-- Admin: add or edit one row of the delivered sheet -->
+<div class="overlay" id="sheetFormOverlay" onclick="if(event.target===this)closeSheetForm()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="sheetFormTitle">Add a row</div>
+    <div id="sheetFormContent" style="padding:12px 15px 6px"></div>
+  </div>
+</div>
 <!-- Admin: serials -->
 <div class="overlay" id="serOverlay" onclick="if(event.target===this)closeAdminSerials()">
   <div class="sheet">
@@ -4526,12 +4534,14 @@ async function drawSheet(){
   if(!document.getElementById('sheetRows')){
     box.innerHTML='<button class="btn" id="sheetFile">📥 Send me the .xlsx (password-protected)</button><div id="sheetFileMsg" class="t-meta" style="min-height:16px;margin:4px 0 6px"></div>'
       +'<div class="seg" id="sheetSeg"><button data-t="main">Delivered</button><button data-t="imd">iMD</button></div>'
+      +'<button class="tk-btn" id="sheetAdd" style="margin:8px 0">➕ Add a row (credentials, subscription)</button>'
       +'<div class="search-wrap" style="margin-bottom:8px"><span class="search-ico">🔍</span><input id="sheetSearch" type="text" placeholder="Search name, username, order #, customer…" aria-label="Search the sheet"></div>'
       +'<div id="sheetInfo" class="t-meta" style="margin-bottom:6px"></div><div id="sheetRows"></div><div id="sheetBioBox" style="margin-top:10px"></div>';
     box.querySelectorAll('#sheetSeg button').forEach(b=>b.onclick=()=>{ sheetTab=b.dataset.t; loadSheetRows(); });
     const s=document.getElementById('sheetSearch'); s.value=sheetQ;
     s.oninput=()=>{ clearTimeout(sheetTimer); sheetTimer=setTimeout(()=>{ sheetQ=s.value.trim(); loadSheetRows(); },350); };
     document.getElementById('sheetFile').onclick=sendSheetFile;
+    document.getElementById('sheetAdd').onclick=()=>openSheetForm(null);
   }
   loadSheetRows();
 }
@@ -4583,6 +4593,7 @@ async function loadSheetRows(){
   info.textContent=(sheetQ?d.matches+' of '+d.total+' rows match':d.total+' rows')+(d.rows.length<d.matches?' · showing the newest '+d.rows.length:'')+' · newest first';
   if(!d.rows.length){ rowsEl.innerHTML='<div class="search-empty">Nothing found.</div>'; return; }
   const H=d.header||[];
+  sheetHeader=H; sheetShown={}; d.rows.forEach(r=>{ sheetShown[r.n]=r.cells; });
   const cell=(r,i)=>escHtml((r.cells[i]||'').trim());
   rowsEl.innerHTML=d.rows.map(r=>{
     const extra=[[2,'Renewal'],[3,'Created'],[4,'Ends'],[7,'Access'],[8,'Coworker'],[9,'Order'],[10,'Telegram'],[11,'@'],[12,'Renewals']]
@@ -4590,8 +4601,45 @@ async function loadSheetRows(){
     return '<div class="t-card"><div class="t-top"><div class="t-title">'+cell(r,0)+(cell(r,1)?' · '+cell(r,1):'')+'</div><span class="t-meta">row '+r.n+'</span></div>'
       +'<div class="fld-list"><div class="fld"><span class="fld-l">'+escHtml(H[5]||'Username')+'</span><span class="fld-v">'+cell(r,5)+'</span></div>'
       +'<div class="fld"><span class="fld-l">'+escHtml(H[6]||'Pass')+'</span><span class="fld-v">'+cell(r,6)+'</span></div></div>'
-      +'<div class="t-meta" style="margin-top:6px;line-height:1.6">'+extra+'</div></div>';
+      +'<div class="t-meta" style="margin-top:6px;line-height:1.6">'+extra+'</div>'
+      +'<button class="tk-btn" style="margin-top:8px" onclick="openSheetForm('+r.n+')">✏️ Edit</button></div>';
   }).join('');
+}
+// ➕ / ✏️ the owner's own rows (18 Nov 2026): written to the Google Sheet right away. An edit only changes the cells
+// that were changed, and is refused if the row changed in the sheet since it was shown here.
+let sheetHeader=[], sheetShown={};
+const SHEET_FIELDS=[[0,'Subscription','e.g. UTD VIP'],[1,'Duration','1y, 6m, 3m'],[5,'Username',''],[6,'Password',''],
+  [3,'Date created','dd/mm/yy'],[4,'Date end','dd/mm/yy (empty: worked out from Duration)'],[2,'Renewal date','Auto, End or ddmmyy'],
+  [7,'Access / Uni','iMD tab: the serial'],[8,'Coworker','Me'],[9,'Order',''],[10,'Telegram ID',''],[11,'Telegram username',''],[12,'Renewals','R numbers']];
+function closeSheetForm(){ document.getElementById('sheetFormOverlay').classList.remove('on'); }
+function openSheetForm(n){
+  const old=n?(sheetShown[n]||[]):null, tabName=sheetTab==='imd'?'iMD':'Delivered';
+  const t=new Date(), today=String(t.getDate()).padStart(2,'0')+'/'+String(t.getMonth()+1).padStart(2,'0')+'/'+String(t.getFullYear()).slice(2);
+  const val=i=>old?(old[i]||''):(i===3?today:i===8?'Me':'');
+  document.getElementById('sheetFormTitle').textContent=(n?'✏️ Edit row '+n:'➕ Add a row')+' · '+tabName;
+  document.getElementById('sheetFormContent').innerHTML=SHEET_FIELDS.map(([i,l,ph])=>
+      '<div style="font-size:12px;color:var(--hint);margin:2px 0 3px">'+escHtml((sheetHeader[i]||'').trim()||l)+' ('+String.fromCharCode(65+i)+')'+(ph?' · '+escHtml(ph):'')+'</div>'
+      +'<textarea id="sf'+i+'" class="cw-input" rows="1" placeholder="'+escHtml(l)+'" aria-label="'+escHtml(l)+'" autocomplete="off" style="margin-bottom:8px;resize:vertical;font-family:inherit"></textarea>').join('')
+    +'<div id="sheetFormMsg" class="t-meta" style="min-height:16px;margin:2px 0 6px"></div>'
+    +'<button class="btn" id="sheetFormSave">'+(n?'Save changes':'Add to the sheet')+'</button>'
+    +'<button class="btn sec" style="margin-top:8px" onclick="closeSheetForm()">Cancel</button>';
+  // values set through the DOM, never into the HTML: a cell can hold quotes, < > and line breaks
+  SHEET_FIELDS.forEach(([i])=>{ const el=document.getElementById('sf'+i); el.value=val(i); if(el.value.includes('\n')) el.rows=Math.min(6,el.value.split('\n').length); });
+  document.getElementById('sheetFormOverlay').classList.add('on');
+  document.getElementById('sheetFormSave').onclick=()=>saveSheetForm(n,old);
+  if(!n) setTimeout(()=>document.getElementById('sf0').focus(),150);
+}
+async function saveSheetForm(n,old){
+  const m=document.getElementById('sheetFormMsg'), btn=document.getElementById('sheetFormSave');
+  const cells=[]; for(let i=0;i<13;i++) cells.push(document.getElementById('sf'+i).value.trim());
+  if(!n&&!cells[0]&&!cells[5]){ m.style.color='#dc2626'; m.textContent='Fill in the subscription or the username.'; return; }
+  btn.disabled=true; m.style.color='var(--hint)'; m.textContent='Saving to the sheet…';
+  let d;
+  try{ d=await adminPost('/api/admin_sheet',Object.assign(n?{action:'edit',tab:sheetTab,n:n,cells:cells,expect:old}:{action:'add',tab:sheetTab,cells:cells},sheetCred)); }
+  catch(e){ m.style.color='#dc2626'; m.textContent=e.message; btn.disabled=false; return; }
+  closeSheetForm();
+  showToast(n?(d.changed.length?'✅ Row '+n+' saved.':'Nothing changed.'):(d.n?'✅ Added as row '+d.n+'.':'✅ Added to the sheet.'));
+  loadSheetRows();
 }
 async function sendSheetFile(){
   const btn=document.getElementById('sheetFile'), m=document.getElementById('sheetFileMsg');

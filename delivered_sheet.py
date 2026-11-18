@@ -366,6 +366,78 @@ async def _apply_edit(tab: str, payload: dict) -> str:
     return f"row {n}: username/password updated"
 
 
+# ── the owner's own rows from the Mini App (18 Nov 2026) ─────────────
+
+class RowChanged(Exception):
+    """The row isn't what the Mini App showed any more (edited or moved in Google Sheets meanwhile)."""
+
+
+def clean_cells(cells) -> list:
+    """13 cells as text (A–M), each trimmed and at most 500 characters; missing ones are empty."""
+    vals = [("" if v is None else str(v)).strip()[:500] for v in list(cells or [])[:len(HEADER)]]
+    return vals + [""] * (len(HEADER) - len(vals))
+
+
+def fill_expiry(cells: list) -> list:
+    """E left empty: worked out from B (1y, 6m, '1 Year') and D (dd/mm/yy), like a delivered row."""
+    if not cells[4] and cells[1] and cells[3]:
+        d = parse_sheet_date(cells[3])
+        dur = cells[1] if re.fullmatch(r"\d+[ymwd]", cells[1]) else duration_code(cells[1])
+        end = expiry_date(d, dur) if d else None
+        if end:
+            cells = cells[:4] + [end.strftime("%d/%m/%y")] + cells[5:]
+    return cells
+
+
+async def add_row(tab: str, cells: list) -> int:
+    """A row the owner typed in the Mini App, at the bottom of the tab; not pink (pink is for rows the bot added).
+    Returns its row number."""
+    async with _flush_lock:   # not in the middle of the outbox's own writes
+        return await _add_row(tab, cells)
+
+
+async def _add_row(tab: str, cells: list) -> int:
+    gid = await _ensure_tab(tab)
+    resp = await _call("POST", f"{SHEETS_API}/{sheet_id()}/values/{_a1(tab, 'A:M')}:append",
+                       params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"}, json={"values": [cells]})
+    m = re.search(r"!A(\d+)", resp.json().get("updates", {}).get("updatedRange", ""))
+    n = int(m.group(1)) if m else None
+    if n:   # a new row can take the colour of the one above it (often a pink bot row)
+        white = {"red": 1.0, "green": 1.0, "blue": 1.0}
+        try:
+            await _call("POST", f"{SHEETS_API}/{sheet_id()}:batchUpdate", json={"requests": [{"repeatCell": {
+                "range": {"sheetId": gid, "startRowIndex": n - 1, "endRowIndex": n, "startColumnIndex": 0, "endColumnIndex": len(HEADER)},
+                "cell": {"userEnteredFormat": {"backgroundColor": white}}, "fields": "userEnteredFormat.backgroundColor"}}]})
+        except Exception as exc:   # the row is in: don't make the owner add it twice over a colour
+            log.warning("Delivered sheet: row %s added, its colour not reset: %s", n, exc)
+    return n
+
+
+async def edit_row(tab: str, n: int, cells: list, expect: list = None) -> list:
+    """Row n gets the cells the owner changed in the Mini App; the others are left as they are (a date the owner
+    typed in Google Sheets stays a date). `expect` is the row as the Mini App showed it: if the sheet has something
+    else there now, nothing is written (RowChanged). Returns the changed column letters."""
+    async with _flush_lock:   # the outbox can't change the row between the check and the write
+        return await _edit_row(tab, n, cells, expect)
+
+
+async def _edit_row(tab: str, n: int, cells: list, expect) -> list:
+    rows = await read_tab(tab)
+    if n < 2 or n > len(rows):
+        raise LookupError(f"row {n} isn't in the sheet")
+    now = clean_cells(rows[n - 1])
+    if expect is not None and clean_cells(expect) != now:
+        raise RowChanged(f"row {n} was changed in the sheet since you opened it")
+    data, letters = [], []
+    for i, (old, new) in enumerate(zip(now, cells)):
+        if old != new:
+            letters.append(chr(65 + i))
+            data.append({"range": f"'{tab}'!{chr(65 + i)}{n}", "values": [[new]]})
+    if data:
+        await _call("POST", f"{SHEETS_API}/{sheet_id()}/values:batchUpdate", json={"valueInputOption": "RAW", "data": data})
+    return letters
+
+
 async def find_username(username: str) -> list:
     """Rows of the main tab whose username (F) is this one, ignoring case and spaces: [{row, account, uni, ...}],
     newest (lowest in the sheet) first. For @Utdreg_bot's ➕ New renewal (16 Nov 2026)."""
