@@ -421,8 +421,33 @@ async def _apply_renewal(tab: str, payload: dict) -> str:
 _flush_lock = asyncio.Lock()
 
 
+def _row_key(row) -> tuple:
+    """What identifies a delivered row in the sheet: product, delivery date, username, order number."""
+    cell = lambda i: str(row[i]).strip().lower() if len(row) > i and row[i] is not None else ""
+    return cell(0), cell(3), cell(5), cell(9)
+
+
+async def _rows_not_in_sheet(tab: str, rows: list) -> list:
+    """The rows that aren't in the tab yet. Used only when retrying: Google may have saved a row and still
+    answered with an error (or too late), and appending it again would add it twice."""
+    there = {_row_key(r) for r in await read_tab(tab)}
+    return [r for r in rows if _row_key(r) not in there]
+
+
+async def _send_rows(tab: str, rows: list, retry: bool) -> str:
+    if retry:
+        missing = await _rows_not_in_sheet(tab, rows)
+        if not missing:
+            return f"already in the sheet ({len(rows)} row{'s' if len(rows) != 1 else ''}), not added again"
+        rows = missing
+    first = await _append_pink_rows(tab, rows)
+    return f"row {first}" if len(rows) == 1 else f"{len(rows)} rows from row {first}"
+
+
 async def flush(db_path: str, notify=None, quiet: set = ()) -> int:
-    """Sends what's waiting, oldest first; stops at the first failure (kept for the next try). Returns how many went.
+    """Sends what's waiting, oldest first. A failed entry is kept for the next try; the ones after it are still
+    sent unless the next one fails too (then Google is down: stop and try again later), so one bad entry can't
+    hold up the queue. A retried row is only added if it isn't in the sheet already. Returns how many went.
     Entries in `quiet` aren't reported when not found: the caller tells the admin itself (@Utdreg_bot's reply)."""
     if not configured():
         return 0
@@ -430,15 +455,17 @@ async def flush(db_path: str, notify=None, quiet: set = ()) -> int:
         conn = sqlite3.connect(db_path)
         pending = conn.execute("SELECT id, kind, tab, payload, tries FROM sheet_outbox WHERE done_at IS NULL ORDER BY id").fetchall()
         conn.close()
-        sent = 0
+        sent = failed_in_a_row = 0
+        header_ok = False
         for oid, kind, tab, payload, tries in pending:
             try:
-                if not sent:
+                if not header_ok:
                     await _ensure_header(MAIN_TAB)
+                    header_ok = True
                 data = json.loads(payload)
                 note = (await _apply_renewal(tab, data) if kind == "renewal" else await _apply_edit(tab, data) if kind == "edit"
-                        else f"{len(data)} rows from row {await _append_pink_rows(tab, data)}" if kind == "rows"
-                        else f"row {await _append_pink(tab, data)}")
+                        else await _send_rows(tab, data, retry=tries > 0) if kind == "rows"
+                        else await _send_rows(tab, [data], retry=tries > 0))
                 conn = sqlite3.connect(db_path)
                 conn.execute("UPDATE sheet_outbox SET done_at = ?, error = ? WHERE id = ?",
                              (datetime.utcnow().isoformat(timespec="seconds"), note, oid))
@@ -451,6 +478,7 @@ async def flush(db_path: str, notify=None, quiet: set = ()) -> int:
                 if kind == "edit" and notify and "isn't in the sheet" in note:
                     await notify(f"📑 Delivered sheet: the edited details of {note}, so they weren't changed there.")
                 sent += 1
+                failed_in_a_row = 0
             except Exception as exc:
                 conn = sqlite3.connect(db_path)
                 conn.execute("UPDATE sheet_outbox SET tries = tries + 1, error = ? WHERE id = ?", (str(exc)[:300], oid))
@@ -460,7 +488,9 @@ async def flush(db_path: str, notify=None, quiet: set = ()) -> int:
                 if notify and tries + 1 == 5:
                     await notify(f"⚠️ Delivered sheet: couldn't write to the Google Sheet for a while ({str(exc)[:200]}). "
                                  "The rows are kept and sent once it works again.")
-                break
+                failed_in_a_row += 1
+                if failed_in_a_row >= 2:
+                    break   # two in a row: Google itself is failing, not this entry
         return sent
 
 

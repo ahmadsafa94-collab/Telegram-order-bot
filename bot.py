@@ -1702,6 +1702,22 @@ def db_next_needs_info(order_id: int):
     return rows[0] if rows else None
 
 
+class UnitAlreadyDelivered(Exception):
+    """The unit was delivered (by another tap, the Mini App or the automation) before this delivery ran."""
+
+
+_UNIT_LOCKS: dict = {}
+
+
+def unit_lock(fulfilment_id: int) -> asyncio.Lock:
+    """One delivery of a unit at a time (chat buttons, the admin Mini App and the iMD automation all deliver).
+    Each delivery path re-reads the unit inside this lock before sending anything."""
+    lock = _UNIT_LOCKS.get(fulfilment_id)
+    if lock is None:
+        lock = _UNIT_LOCKS[fulfilment_id] = asyncio.Lock()
+    return lock
+
+
 def db_set_fulfilment_state(fulfilment_id: int, state: str):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE fulfilment SET state = ? WHERE id = ?", (state, fulfilment_id))
@@ -3360,24 +3376,81 @@ def db_bulk_insert_serials(duration: str, codes: list) -> int:
     return after - before
 
 
-def db_pop_serial(duration: str):
-    """Reserves one available serial for this duration (marks it 'pending'
-    so it can't be double-assigned). Returns (serial_id, code) or None if
-    the pool is empty. Call db_finalize_serial afterward to either confirm
-    it as used or release it back to available."""
+# Serial lifecycle (serials.status, 18 Nov 2026):
+#   available ─► pending (taken for a run; used_for_order = the order) ─┬─► used
+#                                                                       ├─► not_working (iMD rejected it)
+#                                                                       ├─► available (iMD rejected the username/email)
+#                                                                       └─► held (iMD's answer was unclear, or the bot
+#                                                                            restarted mid-run: it may have been used)
+#   held ─► pending (🔁 Retry of that order uses it again) / used (the order delivered by hand) /
+#           available (♻️ Back to the pool, in 🔑 Serials)
+# A held serial is never given to another order, so the serial the admin is told to use by hand stays theirs.
+
+
+def db_pop_serial(duration: str, order_id: int = None):
+    """Reserves one serial for this duration (marks it 'pending' so it can't be double-assigned): the one held
+    for this order if there is one, otherwise the oldest available. Returns (serial_id, code) or None if the
+    pool is empty. Call db_finalize_serial or db_hold_serial afterward."""
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute(
-        "SELECT id, code FROM serials WHERE duration = ? AND status = 'available' ORDER BY id LIMIT 1",
-        (duration,),
-    ).fetchone()
+    row = None
+    if order_id is not None:
+        row = conn.execute(
+            "SELECT id, code FROM serials WHERE duration = ? AND status = 'held' AND used_for_order = ? ORDER BY id LIMIT 1",
+            (duration, order_id),
+        ).fetchone()
+    if not row:
+        row = conn.execute(
+            "SELECT id, code FROM serials WHERE duration = ? AND status = 'available' ORDER BY id LIMIT 1",
+            (duration,),
+        ).fetchone()
     if not row:
         conn.close()
         return None
     serial_id, code = row
-    conn.execute("UPDATE serials SET status = 'pending' WHERE id = ?", (serial_id,))
+    conn.execute("UPDATE serials SET status = 'pending', used_for_order = ? WHERE id = ?", (order_id, serial_id))
     conn.commit()
     conn.close()
     return serial_id, code
+
+
+def db_hold_serial(serial_id: int, order_id: int):
+    """Sets a serial aside for this order: iMD may have used it, so no other order gets it."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE serials SET status = 'held', used_for_order = ? WHERE id = ?", (order_id, serial_id))
+    conn.commit()
+    conn.close()
+
+
+def db_use_held_serials(order_id: int) -> int:
+    """The order's iMD unit was delivered by hand: the serial held for it counts as used."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("UPDATE serials SET status = 'used', used_at = ? WHERE status = 'held' AND used_for_order = ?",
+                       (datetime.utcnow().isoformat(), order_id))
+    conn.commit()
+    conn.close()
+    return cur.rowcount
+
+
+def db_release_held_serial(serial_id: int) -> bool:
+    """♻️ Back to the pool: the admin checked that iMD didn't use it."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("UPDATE serials SET status = 'available', used_for_order = NULL WHERE id = ? AND status = 'held'",
+                       (serial_id,))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def db_hold_interrupted_serials() -> list:
+    """At start no iMD run is going on, so a 'pending' serial was taken by a run the restart cut short. iMD may
+    have used it: it's held for its order (it used to stay 'pending', out of every list, for good).
+    Returns [(code, order_id)]."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT code, used_for_order FROM serials WHERE status = 'pending' ORDER BY id").fetchall()
+    conn.execute("UPDATE serials SET status = 'held' WHERE status = 'pending'")
+    conn.commit()
+    conn.close()
+    return rows
 
 
 def db_finalize_serial(serial_id: int, order_id: int, success: bool, mark_not_working: bool = False):
@@ -3395,7 +3468,7 @@ def db_finalize_serial(serial_id: int, order_id: int, success: bool, mark_not_wo
             (serial_id,),
         )
     else:
-        conn.execute("UPDATE serials SET status = 'available' WHERE id = ?", (serial_id,))
+        conn.execute("UPDATE serials SET status = 'available', used_for_order = NULL WHERE id = ?", (serial_id,))
     conn.commit()
     conn.close()
 
@@ -4091,7 +4164,21 @@ ADMIN_FLOW_KEYS = [
     "awaiting_coworker_editprice_pct",
     "awaiting_coworker_editprice_imd_field", "coworker_editprice_imd_duration",
     "awaiting_coworker_editlogin_field", "coworker_editlogin_id",
+    # The manual iMD login step (🔑 / 🔁 renew/register, 📤 Send Credentials on iMD) and whether the unit was
+    # already delivered when 📤 Send Credentials was tapped (18 Nov 2026).
+    "imd_manual_cred", "credentials_known_delivered",
 ]
+
+# How long a typed-answer step waits for its answer. After that the next message isn't taken as the answer
+# (it used to wait for ever, so an unrelated message days later could be taken as a username).
+STEP_TIMEOUT_SECONDS = 30 * 60
+
+
+def step_is_stale(started_at) -> bool:
+    """True when a step started at `started_at` (time.time(); None/True for steps saved before times were kept)
+    has waited longer than STEP_TIMEOUT_SECONDS."""
+    return isinstance(started_at, (int, float)) and not isinstance(started_at, bool) \
+        and time.time() - started_at > STEP_TIMEOUT_SECONDS
 
 def clear_admin_flow_state(user_data: dict):
     for key in ADMIN_FLOW_KEYS:
@@ -4487,6 +4574,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # option) needs a reliable way out, and this is it. Cart is kept
     # (setdefault below), everything else customer-side is cleared.
     clear_customer_flow_state(context.user_data)
+    context.user_data.pop("stashed_collection_state", None)   # a step paused for a ticket is reset too
     context.user_data.setdefault("cart", {})
     user_id = update.effective_user.id
     is_new = not db_user_exists(user_id)
@@ -4591,7 +4679,7 @@ async def main_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_my_credits(update, context)
 
     elif text == BOOK_REQUEST_LABEL:
-        context.user_data["awaiting_book_link"] = True
+        context.user_data["awaiting_book_link"] = time.time()
         await update.message.reply_text(
             "Please send the link of the book you're looking for:",
             reply_markup=_cancel_button(),
@@ -5104,6 +5192,12 @@ async def book_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     request_id = int(query.data.split(":", 1)[1])
+    request = db_get_book_request(request_id)
+    if request and request[5] in ("ordered", "cancelled"):
+        # An old 💰 button: a new price would offer the customer a second order.
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID,
+                                       text=f"Book request #{request_id} is already {request[5]}, so it can't get a new price.")
+        return
     clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_book_price_for"] = request_id
     await context.bot.send_message(
@@ -5132,6 +5226,10 @@ async def book_price_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("That book request no longer exists.")
         return
     _, user_id, username, link, _, status, order_id, created_at, priced_at, resolved_at = request
+    if status in ("ordered", "cancelled"):
+        await update.message.reply_text(f"Book request #{request_id} is already {status}, so the price wasn't changed "
+                                        "and the customer wasn't messaged.")
+        return
 
     db_set_book_price(request_id, price)
     await update.message.reply_text(f"✅ Price set — the customer has been notified.")
@@ -5540,6 +5638,46 @@ async def customer_cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYP
         text="Use the buttons below any time.",
         reply_markup=main_menu_keyboard(query.from_user.id),
     )
+    # A step paused for a ticket (e.g. the email for a paid order) comes back now that the ticket was
+    # cancelled, instead of popping up after some later ticket.
+    await restore_collection_state(context, context.user_data, query.from_user.id)
+
+
+_REGISTRATION_KEYS = ("awaiting_registration_field", "registration_order", "registration_data", "registration_is_renew",
+                      "registration_duration", "registration_item_id", "registration_fulfilment_id",
+                      "registration_retry_field")
+_GENERIC_KEYS = ("awaiting_generic_field", "generic_data", "generic_order_id", "generic_item_id",
+                 "generic_fulfilment_id", "generic_account_type")
+
+
+def _drop_browse_steps(user_data: dict):
+    """A question about the customer's paid order (email, username…) was just asked: an open 🔬 iMD search or
+    📚 Request a Book must not take the answer."""
+    user_data.pop("awaiting_imd_search", None)
+    user_data.pop("awaiting_book_link", None)
+
+
+def _end_customer_steps_for_unit(context, user_id: int, fulfilment_id: int):
+    """The unit was delivered by hand: the customer's question for it (send your email, username…) is over, so an
+    answer that comes later doesn't set it back to "being prepared" or run iMD again. Steps for other units stay."""
+    store = getattr(context.application, "user_data", None)
+    if store is None:
+        return
+    data = store[user_id]
+    if data.get("registration_fulfilment_id") == fulfilment_id:
+        for key in _REGISTRATION_KEYS:
+            data.pop(key, None)
+    if data.get("generic_fulfilment_id") == fulfilment_id:
+        for key in _GENERIC_KEYS:
+            data.pop(key, None)
+    stash = data.get("stashed_collection_state") or {}
+    if fulfilment_id in (stash.get("registration_fulfilment_id"), stash.get("generic_fulfilment_id")):
+        data.pop("stashed_collection_state", None)
+
+
+def _unit_delivered(fulfilment_id) -> bool:
+    row = db_get_fulfilment(fulfilment_id) if fulfilment_id else None
+    return bool(row) and row[5] == "delivered"
 
 
 def stash_collection_state(user_data: dict) -> bool:
@@ -5562,6 +5700,8 @@ async def restore_collection_state(context: ContextTypes.DEFAULT_TYPE, user_data
     stash = user_data.pop("stashed_collection_state", None)
     if not stash:
         return
+    if _unit_delivered(stash.get("registration_fulfilment_id")) or _unit_delivered(stash.get("generic_fulfilment_id")):
+        return  # delivered by hand meanwhile: its question is over
     user_data.update(stash)
 
     reg_field = stash.get("awaiting_registration_field")
@@ -6634,6 +6774,11 @@ async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if not order:
         await pre_checkout_query.answer(ok=False, error_message="Order not found — please start over.")
         return
+    if order[5] not in PAYABLE_ORDER_STATUSES:
+        # An old invoice for an order that was paid another way (or cancelled): don't charge again.
+        await pre_checkout_query.answer(
+            ok=False, error_message=f"Order #{order_id} is {ORDER_STATUS_MEANINGS.get(order[5], order[5])}, so it can't be paid again.")
+        return
 
     await pre_checkout_query.answer(ok=True)
 
@@ -6648,7 +6793,21 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     payload = update.message.successful_payment.invoice_payload
     order_id = int(payload.split("_", 1)[1])
 
-    db_update_status(order_id, "paid")
+    if not db_update_status(order_id, "paid") and db_get_order(order_id):
+        # Charged although the order was already paid (pre-checkout normally refuses this): nothing is delivered
+        # twice; the admin refunds it.
+        charge = update.message.successful_payment.telegram_payment_charge_id
+        logger.warning("Stars payment for order #%s, which was already paid (charge %s)", order_id, charge)
+        await update.message.reply_text(f"Order #{order_id} was already paid, so nothing new is sent. We'll refund these Stars.")
+        if ADMIN_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(f"⚠️ Stars paid again for order #{order_id}, which was already paid. Nothing was delivered twice. "
+                          f"Refund it: user {update.effective_user.id}, charge {charge}."))
+            except Exception:
+                logger.exception("Couldn't tell the admin about the second Stars payment for order #%s", order_id)
+        return
     db_set_payment_method(order_id, "Telegram Stars")
 
     await update.message.reply_text(
@@ -7772,6 +7931,8 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # what count is currently shown on the button.
     raw = update.message.text or ""
     text = raw.split(" 🔴")[0].strip()
+    # A panel tap means the admin moved on: an unanswered manual iMD login step must not take a later message.
+    context.user_data.pop("imd_manual_cred", None)
 
     if text == A_SERIALS:
         await serials_menu(update, context)
@@ -12231,7 +12392,11 @@ async def http_admin_deliver(request):
                                  status=409, headers=headers)
     application = request.app["application"]
     try:
-        result = await _deliver_credentials(_HttpContext(application, ADMIN_CHAT_ID), fid, text.strip(), access=access)
+        result = await _deliver_credentials(_HttpContext(application, ADMIN_CHAT_ID), fid, text.strip(), access=access,
+                                            only_if_undelivered=True)
+    except UnitAlreadyDelivered:
+        # Delivered from the chat (or a second tap here) while this request was on its way.
+        return web.json_response({"ok": False, "error": "Already delivered."}, status=409, headers=headers)
     except Exception:
         logger.exception("Admin Shop delivery of unit %s failed", fid)
         return web.json_response({"ok": False, "error": "Could not send it to the customer (they may have blocked the bot). Nothing was marked delivered."},
@@ -13830,7 +13995,7 @@ async def imd_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Please contact support — the admin needs to sync the catalog first."
         )
         return
-    context.user_data["awaiting_imd_search"] = True
+    context.user_data["awaiting_imd_search"] = time.time()
     live_search_button = InlineKeyboardMarkup([[
         InlineKeyboardButton("⚡ Live Search", switch_inline_query_current_chat="")
     ]])
@@ -15866,6 +16031,9 @@ async def pending_clear_delivered(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("That item no longer exists.", reply_markup=back)
         return
     db_set_fulfilment_state(fulfilment_id, "delivered")
+    if row[3] in IMD_TRIGGER_ITEMS:
+        db_use_held_serials(row[1])
+    _end_customer_steps_for_unit(context, row[2], fulfilment_id)
     await query.edit_message_text(f"✅ Order #{row[1]} cleared from Pending Orders. The delivery stays as it was.", reply_markup=back)
 
 
@@ -15947,13 +16115,23 @@ async def imd_manual_deliver(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     message = build_imd_delivery_message(username, password, duration=duration)
 
-    await context.bot.send_message(chat_id=user_id, text=message)
-    await send_delivery_promo(context, user_id)
-    db_save_delivery(order_id, message)
-    db_add_delivery(order_id, user_id, item_id, message)
-    await post_subscription_to_channel(context, order_id, item_id, message)
-    db_set_fulfilment_state(fulfilment_id, "delivered")
+    async with unit_lock(fulfilment_id):
+        current = db_get_fulfilment(fulfilment_id)
+        if current and current[5] == "delivered":
+            # A second tap, or an old button after the unit was delivered another way.
+            await query.edit_message_text(
+                f"✅ Order #{order_id} was already delivered{_delivered_when(order_id, item_id)}. Nothing was sent again.",
+                reply_markup=back)
+            return
+        await context.bot.send_message(chat_id=user_id, text=message)
+        db_set_fulfilment_state(fulfilment_id, "delivered")
+        await send_delivery_promo(context, user_id)
+        db_save_delivery(order_id, message)
+        db_add_delivery(order_id, user_id, item_id, message)
+        await post_subscription_to_channel(context, order_id, item_id, message)
+        db_use_held_serials(order_id)
     context.application.bot_data.get("pending_registrations", {}).pop(order_id, None)
+    _end_customer_steps_for_unit(context, user_id, fulfilment_id)
 
     await query.edit_message_text(
         f"✅ iMD details sent to the customer (Order #{order_id}).", reply_markup=back
@@ -16054,6 +16232,7 @@ async def imd_manual_mode_choice(update: Update, context: ContextTypes.DEFAULT_T
     clear_admin_flow_state(context.user_data)
     context.user_data["imd_manual_cred"] = {
         "fulfilment_id": fulfilment_id, "step": "username", "is_renew": is_renew, "mode": mode,
+        "at": time.time(),
     }
     prompt = "previous username" if is_renew else "username"
     note = (
@@ -16073,6 +16252,14 @@ async def imd_manual_cred_reply(update: Update, context: ContextTypes.DEFAULT_TY
     state = context.user_data.get("imd_manual_cred")
     if not state:
         return  # admin isn't in the middle of an iMD manual delivery
+    if step_is_stale(state.get("at")):
+        # Left unanswered: this message is about something else, so it is not used as a login.
+        context.user_data.pop("imd_manual_cred", None)
+        await update.message.reply_text(
+            "⏱ The manual iMD step for that order waited more than 30 minutes, so I didn't use this message "
+            "as its login and nothing was sent or run. Tap the button on the order again to start over.")
+        return
+    state["at"] = time.time()   # each answer gives the next question its own 30 minutes
 
     fulfilment_id = state["fulfilment_id"]
     row = db_get_fulfilment(fulfilment_id)
@@ -16176,13 +16363,18 @@ async def _finish_imd_manual_delivery(context: ContextTypes.DEFAULT_TYPE, order_
     message = build_imd_delivery_message(username, password, duration=duration)
     name = MENU.get(item_id, (item_id,))[0]
 
-    await context.bot.send_message(chat_id=user_id, text=message)
-    await send_delivery_promo(context, user_id)
-    db_save_delivery(order_id, message)
-    db_add_delivery(order_id, user_id, item_id, message)
-    await post_subscription_to_channel(context, order_id, item_id, message)
-    db_set_fulfilment_state(fulfilment_id, "delivered")
+    # Delivering a delivered unit again is on purpose here (🔁 renew/register again); the lock only keeps it
+    # from running alongside another delivery of the same unit.
+    async with unit_lock(fulfilment_id):
+        await context.bot.send_message(chat_id=user_id, text=message)
+        db_set_fulfilment_state(fulfilment_id, "delivered")
+        await send_delivery_promo(context, user_id)
+        db_save_delivery(order_id, message)
+        db_add_delivery(order_id, user_id, item_id, message)
+        await post_subscription_to_channel(context, order_id, item_id, message)
+        db_use_held_serials(order_id)
     context.application.bot_data.get("pending_registrations", {}).pop(order_id, None)
+    _end_customer_steps_for_unit(context, user_id, fulfilment_id)
 
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
@@ -16231,6 +16423,7 @@ async def show_serials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Telegram's tap-to-copy."""
     available = db_list_serials(status="available")
     not_working = db_list_serials(status="not_working")
+    held = db_list_serials(status="held")
 
     lines = []
 
@@ -16258,7 +16451,13 @@ async def show_serials(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"\n  {label}:")
                 lines.extend(f"    ✕ `{code}`" for code in codes)
 
-    if not available and not not_working:
+    if held:
+        lines.append("\n\n⏸ Set aside (iMD's answer was unclear or the bot restarted mid-run, so it may be used)")
+        for duration, code, status, used_for_order in held:
+            label = SERIAL_POOL_LABELS.get(duration, duration)
+            lines.append(f"    `{code}` — {label}" + (f", order #{used_for_order}" if used_for_order else ""))
+
+    if not available and not not_working and not held:
         await update.message.reply_text("No serials in either pool.")
         return
 
@@ -16274,6 +16473,38 @@ async def show_serials(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chunk_len += len(line) + 1
     if chunk:
         await safe_reply_markdown(update.message, "\n".join(chunk))
+    if held:
+        await update.message.reply_text(
+            "If iMD didn't use a set-aside serial, put it back in the pool:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"♻️ {code} back to the pool",
+                                                                     callback_data=f"serialfree:{_serial_id(code)}")]
+                                               for _, code, _, _ in held[:20]]),
+        )
+
+
+def _serial_id(code: str):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT id FROM serials WHERE code = ?", (code,)).fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+async def serial_release(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """♻️ Back to the pool on a set-aside serial."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    serial_id = int(query.data.split(":", 1)[1])
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT code FROM serials WHERE id = ?", (serial_id,)).fetchone()
+    conn.close()
+    code = row[0] if row else "?"
+    if db_release_held_serial(serial_id):
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"♻️ {code} is back in the pool.")
+    else:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"{code} isn't set aside anymore; left as it is.")
 
 
 async def serials_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -16680,6 +16911,12 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ticket_field_reply(update, context)
         return
 
+    # One-shot "browse" steps: forgotten after 30 minutes, so a question days later isn't taken as a book link
+    # or a search.
+    for key in ("awaiting_book_link", "awaiting_imd_search"):
+        if step_is_stale(context.user_data.get(key)):
+            context.user_data.pop(key, None)
+
     if context.user_data.get("awaiting_book_link"):
         await book_link_reply(update, context)
         return
@@ -16970,6 +17207,7 @@ async def generic_type_selected(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["generic_data"] = {}
 
     fields = GENERIC_FIELDS if account_type == "new" else RENEWAL_FIELDS
+    _drop_browse_steps(context.user_data)
     context.user_data["awaiting_generic_field"] = fields[0][0]
 
     label = "New Account" if account_type == "new" else "Renewal"
@@ -17041,6 +17279,12 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data.pop("awaiting_generic_field", None)
     context.user_data.pop("generic_data", None)
     context.user_data.pop("generic_account_type", None)
+
+    if _unit_delivered(fulfilment_id):
+        await update.message.reply_text(
+            f"✅ This subscription (order #{order_id}) was already delivered here, so nothing else is needed. "
+            "If something isn't working, tell us.")
+        return
 
     await update.message.reply_text(
         "✅ Details received — we'll get your subscription set up and notify you here.",
@@ -17273,6 +17517,7 @@ async def imd_registration_type_choice(update: Update, context: ContextTypes.DEF
     await query.answer()
     is_renew = query.data.split(":", 1)[1] == "renew"
     context.user_data["registration_is_renew"] = is_renew
+    _drop_browse_steps(context.user_data)
 
     if is_renew:
         context.user_data["awaiting_registration_field"] = "prev_username"
@@ -17392,6 +17637,13 @@ async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TY
         item_id = item_id or found_item
     context.user_data.pop("awaiting_registration_field", None)
     context.user_data.pop("registration_data", None)
+
+    if _unit_delivered(fulfilment_id):
+        # Answered an old question after the account was delivered by hand: don't set it up again.
+        await update.message.reply_text(
+            f"✅ This subscription (order #{order_id}) was already delivered here, so nothing else is needed. "
+            "If something isn't working, tell us.")
+        return
 
     await update.message.reply_text(
         "Thanks! We're setting up your account now — you'll get your login details here shortly."
@@ -17603,7 +17855,7 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
     step_suffix = f" (2-Year, Step {imd2y_step} of 2)" if duration == "2y" else ""
     action_label = ("Renewal" if step_is_renew else "Registration") + step_suffix
 
-    popped = db_pop_serial(pool_duration)
+    popped = db_pop_serial(pool_duration, order_id=order_id)   # the serial held for this order first
     if not popped:
         pool_label = "1 Year" if pool_duration == "1y" else "6 Months"
         logger.warning("iMD result for order #%s (%s): not run, no %s serials in stock", order_id, action_label, pool_label)
@@ -17770,9 +18022,13 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
             )
         return
 
-    # Everything else (username_error, email_error, etc.) — serial goes back
-    # to the pool (it's not the serial's fault).
-    db_finalize_serial(serial_id, order_id, success=False)
+    # iMD said no to the username or email: the serial wasn't used, it goes back to the pool. Anything else
+    # (an unclear page, a browser error) may have used it on iMD, so it's held for this order: never handed to
+    # another order, used again by 🔁 Retry, counted as used once the order is delivered by hand.
+    if status in ("username_error", "email_error"):
+        db_finalize_serial(serial_id, order_id, success=False)
+    else:
+        db_hold_serial(serial_id, order_id)
 
     # ---- Username problem: ask the customer to supply a different one.
     # Only reachable for step 1 (step 2's username/email errors are
@@ -17814,6 +18070,7 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
             customer_data["registration_fulfilment_id"] = data.get("fulfilment_id")
             customer_data["registration_data"] = {k: v for k, v in data.items() if k not in ("is_renew", "duration")}
             customer_data["registration_retry_field"] = retry_field
+            _drop_browse_steps(customer_data)
             customer_data["awaiting_registration_field"] = retry_field
             await context.bot.send_message(
                 chat_id=customer_user_id, text=customer_note, reply_markup=_cancel_button()
@@ -17840,6 +18097,7 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
             customer_data["registration_fulfilment_id"] = data.get("fulfilment_id")
             customer_data["registration_data"] = {k: v for k, v in data.items() if k not in ("is_renew", "duration")}
             customer_data["registration_retry_field"] = "email"
+            _drop_browse_steps(customer_data)
             customer_data["awaiting_registration_field"] = "email"
             await context.bot.send_message(
                 chat_id=customer_user_id,
@@ -17881,11 +18139,12 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
         chat_id=ADMIN_CHAT_ID,
         text=(
             f"⚠️ COULD NOT CONFIRM — Order #{order_id} ({action_label})\n\n"
-            f"Nothing was sent to the customer and serial {serial_code} went back to the pool.\n\n"
+            f"Nothing was sent to the customer. Serial {serial_code} is set aside for this order (iMD may have used it), "
+            "so no other order gets it; 🔁 Retry tries it again.\n\n"
             f"{step2_note}"
             f"Username: {who}\n"
             f"{raw_email_line}"
-            f"Serial to use: {serial_code} (still available in the pool)\n\n"
+            f"Serial to use: {serial_code} (set aside for this order; it counts as used once you deliver)\n\n"
             f"Register this manually on iMD, then tap 📤 Send iMD Details Now to deliver it.\n\n{detail}"
         ),
         reply_markup=InlineKeyboardMarkup(fallback_buttons),
@@ -18095,6 +18354,26 @@ def extract_valid_until(page_text: str):
     return value or None
 
 
+async def hold_interrupted_serials(application):
+    """At start: serials taken by an iMD run the restart cut short are held for their order; the admin is told."""
+    try:
+        rows = db_hold_interrupted_serials()
+    except Exception:
+        logger.exception("Couldn't check for serials left pending by a restart")
+        return
+    if not rows or not ADMIN_CHAT_ID:
+        return
+    lines = "\n".join(f"• {code}" + (f" (order #{oid})" if oid else "") for code, oid in rows)
+    logger.info("Serials held after the restart: %s", ", ".join(code for code, _ in rows))
+    try:
+        await application.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=("🔄 The bot restarted while iMD was being used, so these serials may or may not have been used. "
+                  f"They're set aside for their order (🔑 Serials shows them; 🔁 Retry on the order uses the same one):\n{lines}"))
+    except Exception:
+        logger.exception("Couldn't tell the admin about held serials")
+
+
 def build_imd_delivery_message(username: str, password: str = None, date_str: str = None, duration: str = None) -> str:
     """The exact account-delivery message format used for iMD orders.
     Omits the password line for renewals (password left as None), and
@@ -18146,6 +18425,10 @@ async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _, order_id, user_id, item_id, unit_no, state, info_json = row
     name = MENU.get(item_id, (item_id,))[0]
+    delivered = state == "delivered"
+    # An old 📤 button (or a second tap) on a unit that is already delivered: say so first, so the customer
+    # doesn't get the account twice by accident. Sending another one stays possible on purpose.
+    already = f"⚠️ This was already delivered{_delivered_when(order_id, item_id)}.\n" if delivered else ""
 
     if item_id in IMD_TRIGGER_ITEMS and not query.data.startswith("delivertext:"):
         # Typed text is forwarded to the customer as-is, so a bare username
@@ -18153,7 +18436,7 @@ async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # For iMD, offer the real thing first.
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
-            text=f"{name} (Order #{order_id}): what should I do?",
+            text=f"{already}{name} (Order #{order_id}): what should I do?",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🤖 Renew an account on iMD now", callback_data=f"imdmanmode:{fulfilment_id}:renew:auto")],
                 [InlineKeyboardButton("🤖 Register a new account on iMD now", callback_data=f"imdmanmode:{fulfilment_id}:new:auto")],
@@ -18162,13 +18445,43 @@ async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if delivered and not query.data.startswith("delivertext:"):
+        buttons = [[InlineKeyboardButton("📤 Send another delivery anyway", callback_data=f"delivertext:{fulfilment_id}")]]
+        last = _latest_delivery_id(order_id, item_id)
+        if last:
+            buttons.append([InlineKeyboardButton("✏️ Edit what was sent", callback_data=f"editdeliv:{last}")])
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"{already}{name} (Order #{order_id}): nothing was sent again. What should I do?",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
     clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_credentials_fulfilment"] = fulfilment_id
+    context.user_data["credentials_known_delivered"] = delivered
     note = "\nYour message is sent to the customer exactly as typed; iMD isn't touched." if item_id in IMD_TRIGGER_ITEMS else ""
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
         text=f"Reply with the account details for {name} (Order #{order_id}).{note}",
     )
+
+
+def _latest_delivery_id(order_id: int, item_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT id FROM deliveries WHERE order_id = ? AND item_id = ? ORDER BY id DESC LIMIT 1",
+                       (order_id, item_id)).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def _delivered_when(order_id: int, item_id: str) -> str:
+    """' on 2026-11-18 09:30 UTC' for the unit's latest delivery, or ''."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT delivered_at FROM deliveries WHERE order_id = ? AND item_id = ? ORDER BY id DESC LIMIT 1",
+                       (order_id, item_id)).fetchone()
+    conn.close()
+    return f" on {row[0][:16].replace('T', ' ')} UTC" if row and row[0] else ""
 
 
 async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -18178,6 +18491,7 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     fulfilment_id = context.user_data.pop("awaiting_credentials_fulfilment", None)
+    known_delivered = context.user_data.pop("credentials_known_delivered", False)
     if not fulfilment_id:
         return  # admin isn't in the middle of delivering anything
 
@@ -18189,31 +18503,53 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
         )
 
-    if not await _deliver_credentials(context, fulfilment_id, update.message.text, on_delivered=confirm):
+    try:
+        # Not delivered when 📤 was tapped: if it got delivered meanwhile (Mini App, automation), don't send twice.
+        delivered = await _deliver_credentials(context, fulfilment_id, update.message.text, on_delivered=confirm,
+                                               only_if_undelivered=not known_delivered)
+    except UnitAlreadyDelivered:
+        row = db_get_fulfilment(fulfilment_id)
+        last = _latest_delivery_id(row[1], row[3]) if row else None
+        await update.message.reply_text(
+            f"⚠️ Order #{row[1] if row else '?'} was delivered meanwhile, so your text was NOT sent to the customer.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Edit what was sent", callback_data=f"editdeliv:{last}")]])
+            if last else None,
+        )
+        return
+    if not delivered:
         await update.message.reply_text("That item no longer exists.")
 
 
-async def _deliver_credentials(context, fulfilment_id: int, credentials_text: str, on_delivered=None, access: str = None):
+async def _deliver_credentials(context, fulfilment_id: int, credentials_text: str, on_delivered=None, access: str = None,
+                               only_if_undelivered: bool = False):
     """Sends the account details to the customer and marks that unit delivered, exactly
     as the 📤 Send Credentials chat flow always did. Used by that flow and by the admin
     Shop's Pending Orders tab. Returns (item name, order id, delivery id), or None when the
-    unit does not exist. A failed message to the customer raises, and nothing is marked."""
-    row = db_get_fulfilment(fulfilment_id)
-    if not row:
-        return None
+    unit does not exist. A failed message to the customer raises, and nothing is marked.
+    With only_if_undelivered, a unit that is delivered by the time this runs raises
+    UnitAlreadyDelivered and nothing is sent (two deliveries at once send one)."""
+    async with unit_lock(fulfilment_id):
+        row = db_get_fulfilment(fulfilment_id)
+        if not row:
+            return None
 
-    _, order_id, user_id, item_id, unit_no, state, info_json = row
-    name = MENU.get(item_id, (item_id,))[0]
+        _, order_id, user_id, item_id, unit_no, state, info_json = row
+        name = MENU.get(item_id, (item_id,))[0]
+        if only_if_undelivered and state == "delivered":
+            raise UnitAlreadyDelivered(fulfilment_id)
 
-    sent_message = await context.bot.send_message(
-        chat_id=user_id,
-        text=f"🔑 Here are your account details for {name} (Order #{order_id}):\n\n{credentials_text}",
-    )
-    await send_delivery_promo(context, user_id)
-    db_save_delivery(order_id, credentials_text)
-    delivery_id = db_add_delivery(order_id, user_id, item_id, credentials_text, sent_message.message_id, access=access)
-    await post_subscription_to_channel(context, order_id, item_id, credentials_text)
-    db_set_fulfilment_state(fulfilment_id, "delivered")
+        sent_message = await context.bot.send_message(
+            chat_id=user_id,
+            text=f"🔑 Here are your account details for {name} (Order #{order_id}):\n\n{credentials_text}",
+        )
+        # Marked first, so a second delivery waiting on the lock sees it at once.
+        db_set_fulfilment_state(fulfilment_id, "delivered")
+        await send_delivery_promo(context, user_id)
+        db_save_delivery(order_id, credentials_text)
+        delivery_id = db_add_delivery(order_id, user_id, item_id, credentials_text, sent_message.message_id, access=access)
+        await post_subscription_to_channel(context, order_id, item_id, credentials_text)
+        if item_id in IMD_TRIGGER_ITEMS:
+            db_use_held_serials(order_id)
     if on_delivered:
         await on_delivered(name, order_id, delivery_id)
 
@@ -20105,6 +20441,7 @@ def main():
     async def post_init(application):
         """The Shop opens from the menu button configured in BotFather, so the bot
         must not touch the menu button here (it used to reset it)."""
+        await hold_interrupted_serials(application)
         await start_api_server(application)
 
     async def post_shutdown(application):
@@ -20358,6 +20695,7 @@ def main():
     app.add_handler(CallbackQueryHandler(coworker_detail, pattern=r"^coworker:"))
     app.add_handler(CallbackQueryHandler(coworker_preview_shop, pattern=r"^coworker_preview:"))
     app.add_handler(CallbackQueryHandler(imd_manual_deliver, pattern=r"^imddeliver:"))
+    app.add_handler(CallbackQueryHandler(serial_release, pattern=r"^serialfree:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_start, pattern=r"^imdmancred:"))
     app.add_handler(CallbackQueryHandler(imd_manual_cred_type_choice, pattern=r"^imdmantype:"))
     app.add_handler(CallbackQueryHandler(imd_manual_mode_choice, pattern=r"^imdmanmode:"))
