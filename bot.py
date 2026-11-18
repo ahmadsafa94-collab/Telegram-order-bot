@@ -1710,8 +1710,8 @@ _UNIT_LOCKS: dict = {}
 
 
 def unit_lock(fulfilment_id: int) -> asyncio.Lock:
-    """One delivery of a unit at a time (chat buttons, the admin Mini App and the iMD automation all deliver).
-    Each delivery path re-reads the unit inside this lock before sending anything."""
+    """One delivery of a unit at a time for the hand deliveries (📤 Send Credentials, 📤 Send iMD Details Now, the
+    admin Mini App, the manual iMD login). The iMD automation's own success path doesn't take it."""
     lock = _UNIT_LOCKS.get(fulfilment_id)
     if lock is None:
         lock = _UNIT_LOCKS[fulfilment_id] = asyncio.Lock()
@@ -5700,8 +5700,13 @@ async def restore_collection_state(context: ContextTypes.DEFAULT_TYPE, user_data
     stash = user_data.pop("stashed_collection_state", None)
     if not stash:
         return
-    if _unit_delivered(stash.get("registration_fulfilment_id")) or _unit_delivered(stash.get("generic_fulfilment_id")):
-        return  # delivered by hand meanwhile: its question is over
+    # A unit delivered by hand meanwhile: its question is over (the rest, e.g. a receipt upload, comes back).
+    if _unit_delivered(stash.get("registration_fulfilment_id")):
+        stash = {k: v for k, v in stash.items() if k not in _REGISTRATION_KEYS}
+    if _unit_delivered(stash.get("generic_fulfilment_id")):
+        stash = {k: v for k, v in stash.items() if k not in _GENERIC_KEYS}
+    if not stash:
+        return
     user_data.update(stash)
 
     reg_field = stash.get("awaiting_registration_field")
@@ -6774,10 +6779,10 @@ async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if not order:
         await pre_checkout_query.answer(ok=False, error_message="Order not found — please start over.")
         return
-    if order[5] not in PAYABLE_ORDER_STATUSES:
-        # An old invoice for an order that was paid another way (or cancelled): don't charge again.
-        await pre_checkout_query.answer(
-            ok=False, error_message=f"Order #{order_id} is {ORDER_STATUS_MEANINGS.get(order[5], order[5])}, so it can't be paid again.")
+    if db_order_payment_confirmed(order_id):
+        # An old invoice for an order that was already paid another way: don't charge again. (Every other
+        # status can still be paid by Stars, as before.)
+        await pre_checkout_query.answer(ok=False, error_message=f"Order #{order_id} is already paid, so it can't be paid again.")
         return
 
     await pre_checkout_query.answer(ok=True)

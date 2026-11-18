@@ -427,16 +427,33 @@ def _row_key(row) -> tuple:
     return cell(0), cell(3), cell(5), cell(9)
 
 
-async def _rows_not_in_sheet(tab: str, rows: list) -> list:
+async def _rows_not_in_sheet(db_path: str, tab: str, oid: int, rows: list) -> list:
     """The rows that aren't in the tab yet. Used only when retrying: Google may have saved a row and still
-    answered with an error (or too late), and appending it again would add it twice."""
-    there = {_row_key(r) for r in await read_tab(tab)}
-    return [r for r in rows if _row_key(r) not in there]
+    answered with an error (or too late), and appending it again would add it twice. Counted, not just looked up:
+    a row only counts as already there if the sheet has more rows like it than the queue has sent (two units of
+    the same product on one order, or a second delivery the same day, are separate rows)."""
+    from collections import Counter
+    in_sheet = Counter(_row_key(r) for r in await read_tab(tab))
+    conn = sqlite3.connect(db_path)
+    sent = Counter()
+    for kind, payload in conn.execute("SELECT kind, payload FROM sheet_outbox WHERE tab = ? AND kind IN ('row', 'rows') "
+                                      "AND done_at IS NOT NULL AND id != ?", (tab, oid)):
+        data = json.loads(payload)
+        sent.update(_row_key(r) for r in (data if kind == "rows" else [data]))
+    conn.close()
+    missing = []
+    for r in rows:
+        k = _row_key(r)
+        if in_sheet[k] > sent[k]:
+            in_sheet[k] -= 1        # this one landed on the earlier try
+        else:
+            missing.append(r)
+    return missing
 
 
-async def _send_rows(tab: str, rows: list, retry: bool) -> str:
+async def _send_rows(db_path: str, oid: int, tab: str, rows: list, retry: bool) -> str:
     if retry:
-        missing = await _rows_not_in_sheet(tab, rows)
+        missing = await _rows_not_in_sheet(db_path, tab, oid, rows)
         if not missing:
             return f"already in the sheet ({len(rows)} row{'s' if len(rows) != 1 else ''}), not added again"
         rows = missing
@@ -457,15 +474,18 @@ async def flush(db_path: str, notify=None, quiet: set = ()) -> int:
         conn.close()
         sent = failed_in_a_row = 0
         header_ok = False
+        held_back = False
         for oid, kind, tab, payload, tries in pending:
+            if held_back and kind in ("edit", "renewal"):
+                break   # it may change a row that is still waiting: keep the order, try again later
             try:
                 if not header_ok:
                     await _ensure_header(MAIN_TAB)
                     header_ok = True
                 data = json.loads(payload)
                 note = (await _apply_renewal(tab, data) if kind == "renewal" else await _apply_edit(tab, data) if kind == "edit"
-                        else await _send_rows(tab, data, retry=tries > 0) if kind == "rows"
-                        else await _send_rows(tab, [data], retry=tries > 0))
+                        else await _send_rows(db_path, oid, tab, data, retry=tries > 0) if kind == "rows"
+                        else await _send_rows(db_path, oid, tab, [data], retry=tries > 0))
                 conn = sqlite3.connect(db_path)
                 conn.execute("UPDATE sheet_outbox SET done_at = ?, error = ? WHERE id = ?",
                              (datetime.utcnow().isoformat(timespec="seconds"), note, oid))
@@ -489,6 +509,7 @@ async def flush(db_path: str, notify=None, quiet: set = ()) -> int:
                     await notify(f"⚠️ Delivered sheet: couldn't write to the Google Sheet for a while ({str(exc)[:200]}). "
                                  "The rows are kept and sent once it works again.")
                 failed_in_a_row += 1
+                held_back = True
                 if failed_in_a_row >= 2:
                     break   # two in a row: Google itself is failing, not this entry
         return sent
