@@ -452,7 +452,8 @@ _UTD_AI_ONLY_RE = re.compile(r"(?:\butd|\bup\s*-?\s*(?:to|2)\s*-?\s*date?)[\s_\-
 _OTHER_PRODUCT_RE = re.compile(
     r"\b(?:amboss|mksap|acp|access\s*medicine|bmj|board\s*vitals|clinical\s*key|dyna\s*med|embase|jama|lexi\s*comp|"
     r"toolkit|micromedex|nejm|sanford|science\s*direct|scopus|springer|stat\s*dx|visual\s*dx|imd|medscape|osmosis|"
-    r"uworld|pathoma|kaplan|epocrates|elsevier|ovid|wiley|cochrane|aafp|nbme|lecturio|sketchy|anki|chatgpt|gpt)\b", re.I)
+    r"uworld|pathoma|kaplan|epocrates|elsevier|ovid|wiley|cochrane|aafp|nbme|lecturio|sketchy|anki|chatgpt|gpt|"
+    r"web\s*of\s*science|pepid|grammarly|turnitin|complete\s*anatomy)\b", re.I)
 
 
 def is_uptodate_row(account: str) -> bool:
@@ -462,15 +463,50 @@ def is_uptodate_row(account: str) -> bool:
     return bool(_UTD_ROW_RE.search(a)) and not _UTD_AI_ONLY_RE.search(a)
 
 
+def _norm(text: str) -> str:
+    """Letters and digits only, lower case: 'IMD_VIP', 'imd vip' and 'iMD-VIP' are the same."""
+    return re.sub(r"[^0-9a-z]", "", (text or "").lower())
+
+
+_catalog_keys = None
+
+
+def _other_product_keys() -> list:
+    """Every non-UpToDate product the shop sells (panel_catalog.json, names without the duration), normalised."""
+    global _catalog_keys
+    if _catalog_keys is None:
+        keys = set()
+        try:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel_catalog.json")
+            with open(path, encoding="utf-8") as fh:
+                for prod in json.load(fh).get("products", []):
+                    name = title_only(prod.get("name") or "")
+                    if name and not _UTD_ROW_RE.search(name):
+                        keys.add(_norm(name))
+        except Exception as exc:
+            log.warning("Delivered sheet: couldn't read the product list: %s", exc)
+        _catalog_keys = sorted(k for k in keys if len(k) >= 4)
+    return _catalog_keys
+
+
 def row_kind(account: str) -> str:
     """'utd' (named as an UpToDate account), 'other' (another product, or UpToDate AI codes alone: never renewed
-    here) or 'unknown' (any other name, e.g. just the university: may be the UpToDate account)."""
+    here) or 'unknown' (any other name, e.g. just the university: may be the UpToDate account). Another product is
+    one of the known names (`_OTHER_PRODUCT_RE`) or one the shop sells: its name inside A, or A (5+ letters) inside
+    its name, ignoring spaces, dashes and underscores ('Complete Anatomy', 'IMD_VIP', 'Dynamedex')."""
     a = account or ""
     if _UTD_AI_ONLY_RE.search(a):
         return "other"
     if _UTD_ROW_RE.search(a):
         return "utd"
-    return "other" if _OTHER_PRODUCT_RE.search(a) else "unknown"
+    if _OTHER_PRODUCT_RE.search(a) or _OTHER_PRODUCT_RE.search(re.sub(r"[_\-]", " ", a)):
+        return "other"
+    n = _norm(a)
+    if n and any(k in n or (len(n) >= 5 and n in k) for k in _other_product_keys()):
+        return "other"
+    if any(w in n for w in ("imdvip", "amboss", "lexicomp", "lexidrug", "clinicalkey", "statdx", "uworld", "visualdx")):
+        return "other"
+    return "unknown"
 
 
 def _renewal_rank(row) -> int:
@@ -481,9 +517,9 @@ def _renewal_rank(row) -> int:
 
 
 def _renewal_order(account: str, renewal: str, row_no: int) -> tuple:
-    """Sort key (highest first) for the row a renewal changes: named UpToDate rows before rows with another name,
-    then a row we renew (C a date or empty) before End / Auto, then the newest. Other products' rows aren't candidates."""
-    return (row_kind(account) == "utd", _renewal_rank(["", "", renewal]), row_no)
+    """Sort key (highest first) for the row a renewal changes: a row we renew (C a date or empty) before End / Auto,
+    then a row named UpToDate before one with another name, then the newest. Other products' rows aren't candidates."""
+    return (_renewal_rank(["", "", renewal]), row_kind(account) == "utd", row_no)
 
 
 async def find_username(username: str) -> list:
