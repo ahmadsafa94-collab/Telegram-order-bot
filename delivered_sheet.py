@@ -447,14 +447,30 @@ async def _edit_row(tab: str, n: int, cells: list, expect) -> list:
 _UTD_ROW_RE = re.compile(r"(?:\butd|\bu2d\b|\bup\s*-?\s*(?:to|2)\s*-?\s*dat|آپتودیت|ابتوديت)", re.I)
 # UpToDate AI codes on their own ("Uptodate AI (Official)", "UpToDate Advanced AI"): AI right after the name. An account
 # with the AI add-on ("UTD VIP + AI") is still an UpToDate account.
-_UTD_AI_ONLY_RE = re.compile(r"(?:\butd|\bup\s*-?\s*(?:to|2)\s*-?\s*date?)[\s_\-]*(?:advanced[\s_\-]*)?a\.?\s?i\b", re.I)
+_UTD_AI_ONLY_RE = re.compile(r"(?:\butd|\bup\s*-?\s*(?:to|2)\s*-?\s*date?)[\s_\-]*(?:(?:advanced|expert)[\s_\-]*)?a\.?\s?i\b", re.I)
+# Other products the shop sells (and a few more): a row named after one of these is never an UpToDate account.
+_OTHER_PRODUCT_RE = re.compile(
+    r"\b(?:amboss|mksap|acp|access\s*medicine|bmj|board\s*vitals|clinical\s*key|dyna\s*med|embase|jama|lexi\s*comp|"
+    r"toolkit|micromedex|nejm|sanford|science\s*direct|scopus|springer|stat\s*dx|visual\s*dx|imd|medscape|osmosis|"
+    r"uworld|pathoma|kaplan|epocrates|elsevier|ovid|wiley|cochrane|aafp|nbme|lecturio|sketchy|anki|chatgpt|gpt)\b", re.I)
 
 
 def is_uptodate_row(account: str) -> bool:
     """Column A names an UpToDate account (UTD VIP, Uptodate Online, UTD VIP + AI …), not UpToDate AI codes alone nor
-    another product: the only rows @Utdreg_bot renews (18 Nov 2026)."""
+    another product (18 Nov 2026)."""
     a = account or ""
     return bool(_UTD_ROW_RE.search(a)) and not _UTD_AI_ONLY_RE.search(a)
+
+
+def row_kind(account: str) -> str:
+    """'utd' (named as an UpToDate account), 'other' (another product, or UpToDate AI codes alone: never renewed
+    here) or 'unknown' (any other name, e.g. just the university: may be the UpToDate account)."""
+    a = account or ""
+    if _UTD_AI_ONLY_RE.search(a):
+        return "other"
+    if _UTD_ROW_RE.search(a):
+        return "utd"
+    return "other" if _OTHER_PRODUCT_RE.search(a) else "unknown"
 
 
 def _renewal_rank(row) -> int:
@@ -462,6 +478,12 @@ def _renewal_rank(row) -> int:
     date or empty) before one that ended ("End") or renews by itself ("Auto"); among those, just the newest."""
     c = (row[2] if len(row) > 2 else "").strip().lower()
     return 0 if c in ("auto", "end") else 1
+
+
+def _renewal_order(account: str, renewal: str, row_no: int) -> tuple:
+    """Sort key (highest first) for the row a renewal changes: named UpToDate rows before rows with another name,
+    then a row we renew (C a date or empty) before End / Auto, then the newest. Other products' rows aren't candidates."""
+    return (row_kind(account) == "utd", _renewal_rank(["", "", renewal]), row_no)
 
 
 async def find_username(username: str) -> list:
@@ -473,8 +495,9 @@ async def find_username(username: str) -> list:
     hits = [{"row": i + 1, "account": cell(r, 0), "duration": cell(r, 1), "renewal": cell(r, 2), "created": cell(r, 3),
              "ends": cell(r, 4), "uni": cell(r, 7)}
             for i, r in enumerate(rows) if i > 0 and want and cell(r, 5).lower() == want]
-    # the same order as a renewal picks its row: the first one is the row an approved renewal changes
-    rank = lambda h: (is_uptodate_row(h["account"]), _renewal_rank([h["account"], h["duration"], h["renewal"]]) if is_uptodate_row(h["account"]) else 0, h["row"])
+    # the same order as a renewal picks its row: the first one is the row an approved renewal changes; other
+    # products' rows come last
+    rank = lambda h: (row_kind(h["account"]) != "other",) + _renewal_order(h["account"], h["renewal"], h["row"])
     return sorted(hits, key=rank, reverse=True)
 
 
@@ -499,20 +522,21 @@ def next_renewal(renewed: date, expiry) -> str:
 
 
 async def _apply_renewal(tab: str, payload: dict) -> str:
-    """Only an UpToDate row is changed (18 Nov 2026): the same username can also be on another product's row (the
-    owner's own rows from the Mini App, or an older order). Of that username's UpToDate rows, the newest one we renew
-    (C a date or empty), else the newest one ("End" or "Auto") (`_renewal_rank`)."""
+    """The row of that UpToDate account gets the next renewal date (owner, 18 Nov 2026). The same username can also be
+    on another product's row (Amboss, iMD, UpToDate AI codes …), which is never changed. A row named UTD / UpToDate
+    comes first, then a row with any other name (e.g. only the university); among them the newest one we renew
+    (C a date or empty), else the newest (`_renewal_order`)."""
     rows = await read_tab(tab)
     want = (payload.get("username") or "").strip().lower()
     cell = lambda r, i: (r[i] if len(r) > i else "").strip()
     mine = [i for i, r in enumerate(rows) if i > 0 and want and cell(r, 5).lower() == want]
-    utd = [i for i in mine if is_uptodate_row(cell(rows[i], 0))]
+    utd = [i for i in mine if row_kind(cell(rows[i], 0)) != "other"]
     if not utd:
         if mine:
             others = ", ".join(f"row {i + 1}: {cell(rows[i], 0) or '(no name)'}" for i in mine[::-1][:3])
             return f"{payload.get('username')} isn't in column F on an UpToDate row (only {others})"
         return f"{payload.get('username')} isn't in column F"
-    hit = max(utd, key=lambda i: (_renewal_rank(rows[i]), i))
+    hit = max(utd, key=lambda i: _renewal_order(cell(rows[i], 0), cell(rows[i], 2), i))
     row = rows[hit]
     renewed = datetime.fromisoformat(payload["date"]).date() if payload.get("date") else date.today()
     expiry = parse_sheet_date(row[4]) if len(row) > 4 else None
