@@ -20017,7 +20017,9 @@ def utd_automation_init():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("CREATE TABLE IF NOT EXISTS utd_aliases (alias TEXT PRIMARY KEY, fulfilment_id INTEGER NOT NULL)")
     conn.execute("CREATE TABLE IF NOT EXISTS automation_outbox (fulfilment_id INTEGER PRIMARY KEY, info_hash TEXT, "
-                 "sent_at TEXT, tries INTEGER NOT NULL DEFAULT 0, error TEXT, alerted INTEGER NOT NULL DEFAULT 0)")
+                 "sent_at TEXT, tries INTEGER NOT NULL DEFAULT 0, error TEXT, alerted INTEGER NOT NULL DEFAULT 0, closed_sent TEXT)")
+    if "closed_sent" not in [r[1] for r in conn.execute("PRAGMA table_info(automation_outbox)")]:
+        conn.execute("ALTER TABLE automation_outbox ADD COLUMN closed_sent TEXT")
     conn.commit()
     conn.close()
     if db_get_meta("automation_push_from") is None:
@@ -20081,6 +20083,19 @@ def _utd_units_to_push() -> list:
     return out
 
 
+def _utd_units_closed() -> list:
+    """Units sent to @Utdreg_bot that were since delivered here (by hand or by @Utdreg_bot) or whose order was
+    cancelled: (fulfilment id, order id, why), to take them off its 📥 Pending orders."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT f.id, f.order_id, CASE WHEN f.state = 'delivered' THEN 'delivered' ELSE 'cancelled' END FROM automation_outbox a "
+        "JOIN fulfilment f ON f.id = a.fulfilment_id JOIN orders o ON o.id = f.order_id "
+        "WHERE a.sent_at IS NOT NULL AND a.closed_sent IS NULL "
+        "AND (f.state = 'delivered' OR o.status NOT IN ('paid', 'delivered'))").fetchall()
+    conn.close()
+    return rows
+
+
 async def automation_push_job(context: ContextTypes.DEFAULT_TYPE):
     """Every minute: each new or changed paid UpToDate unit goes to @Utdreg_bot's 📥 Pending orders. A unit @Utdreg_bot
     can't take yet is tried again; the admin hears once if it keeps failing."""
@@ -20120,7 +20135,16 @@ async def automation_push_job(context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         if status in (502, 503):
-            break   # @Utdreg_bot is down: the rest wait for the next minute
+            return   # @Utdreg_bot is down: the rest wait for the next minute
+    for fid, order_id, why in _utd_units_closed():
+        status, body = await _automation_post("/api/order_pending", {"fulfilment_id": fid, "order_id": order_id, "closed": why})
+        if status == 200 and body.get("ok"):
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE automation_outbox SET closed_sent = ? WHERE fulfilment_id = ?",
+                         (datetime.utcnow().isoformat(timespec="seconds"), fid))
+            conn.commit(); conn.close()
+        elif status in (502, 503):
+            return
 
 
 async def http_deliver_unit(request):
