@@ -344,7 +344,9 @@ def enqueue_edit(db_path: str, tab: str, order_id: int, old_user: str, user: str
 
 async def _apply_edit(tab: str, payload: dict) -> str:
     """The row of that order (column J), the one with the old username if the order has several; else the newest
-    row with the old username. F and G get the new username and password (an empty one is left as it is)."""
+    row with the old username, only if just one row has it (18 Nov 2026: with the owner's own rows a username can be on
+    several products; guessing could change the wrong one). F and G get the new username and password (an empty one is
+    left as it is)."""
     rows = await read_tab(tab)
     order, old = str(payload.get("order_id") or ""), (payload.get("old_user") or "").strip().lower()
     cell = lambda r, i: (r[i] if len(r) > i else "").strip()
@@ -353,7 +355,11 @@ async def _apply_edit(tab: str, payload: dict) -> str:
     if hit is None and len(same_order) == 1:
         hit = same_order[0]
     if hit is None and old:
-        hit = max((i for i, r in enumerate(rows) if i > 0 and cell(r, 5).lower() == old), default=None)
+        same_user = [i for i, r in enumerate(rows) if i > 0 and cell(r, 5).lower() == old]
+        if len(same_user) > 1:
+            return (f"order #{order} isn't in the sheet (rows {', '.join(str(i + 1) for i in same_user[::-1][:6])} have the username "
+                    f"{payload.get('old_user')}, {len(same_user)} in all; change the right one by hand)")
+        hit = same_user[0] if same_user else None
     if hit is None:
         return f"order #{order} isn't in the sheet"
     n, data = hit + 1, []
@@ -438,16 +444,38 @@ async def _edit_row(tab: str, n: int, cells: list, expect) -> list:
     return letters
 
 
+_UTD_ROW_RE = re.compile(r"(?:\butd|\bu2d\b|\bup\s*-?\s*(?:to|2)\s*-?\s*dat|آپتودیت|ابتوديت)", re.I)
+# UpToDate AI codes on their own ("Uptodate AI (Official)", "UpToDate Advanced AI"): AI right after the name. An account
+# with the AI add-on ("UTD VIP + AI") is still an UpToDate account.
+_UTD_AI_ONLY_RE = re.compile(r"(?:\butd|\bup\s*-?\s*(?:to|2)\s*-?\s*date?)[\s_\-]*(?:advanced[\s_\-]*)?a\.?\s?i\b", re.I)
+
+
+def is_uptodate_row(account: str) -> bool:
+    """Column A names an UpToDate account (UTD VIP, Uptodate Online, UTD VIP + AI …), not UpToDate AI codes alone nor
+    another product: the only rows @Utdreg_bot renews (18 Nov 2026)."""
+    a = account or ""
+    return bool(_UTD_ROW_RE.search(a)) and not _UTD_AI_ONLY_RE.search(a)
+
+
+def _renewal_rank(row) -> int:
+    """Which of a username's UpToDate rows a renewal goes to (higher first, then the newest): a row we renew (C a
+    date or empty) before one that ended ("End") or renews by itself ("Auto"); among those, just the newest."""
+    c = (row[2] if len(row) > 2 else "").strip().lower()
+    return 0 if c in ("auto", "end") else 1
+
+
 async def find_username(username: str) -> list:
     """Rows of the main tab whose username (F) is this one, ignoring case and spaces: [{row, account, uni, ...}],
-    newest (lowest in the sheet) first. For @Utdreg_bot's ➕ New renewal (16 Nov 2026)."""
+    UpToDate rows first, each group newest (lowest in the sheet) first. For @Utdreg_bot's ➕ New renewal (16 Nov 2026)."""
     rows = await read_tab(MAIN_TAB)
     want = (username or "").strip().lower()
     cell = lambda r, i: (r[i] if len(r) > i else "").strip()
     hits = [{"row": i + 1, "account": cell(r, 0), "duration": cell(r, 1), "renewal": cell(r, 2), "created": cell(r, 3),
              "ends": cell(r, 4), "uni": cell(r, 7)}
             for i, r in enumerate(rows) if i > 0 and want and cell(r, 5).lower() == want]
-    return hits[::-1]
+    # the same order as a renewal picks its row: the first one is the row an approved renewal changes
+    rank = lambda h: (is_uptodate_row(h["account"]), _renewal_rank([h["account"], h["duration"], h["renewal"]]) if is_uptodate_row(h["account"]) else 0, h["row"])
+    return sorted(hits, key=rank, reverse=True)
 
 
 # ── renewals (@Utdreg_bot) ───────────────────────────────────────────
@@ -471,11 +499,20 @@ def next_renewal(renewed: date, expiry) -> str:
 
 
 async def _apply_renewal(tab: str, payload: dict) -> str:
+    """Only an UpToDate row is changed (18 Nov 2026): the same username can also be on another product's row (the
+    owner's own rows from the Mini App, or an older order). Of that username's UpToDate rows, the newest one we renew
+    (C a date or empty), else the newest one ("End" or "Auto") (`_renewal_rank`)."""
     rows = await read_tab(tab)
     want = (payload.get("username") or "").strip().lower()
-    hit = max((i for i, r in enumerate(rows) if i > 0 and len(r) > 5 and r[5].strip().lower() == want), default=None)
-    if hit is None:
+    cell = lambda r, i: (r[i] if len(r) > i else "").strip()
+    mine = [i for i, r in enumerate(rows) if i > 0 and want and cell(r, 5).lower() == want]
+    utd = [i for i in mine if is_uptodate_row(cell(rows[i], 0))]
+    if not utd:
+        if mine:
+            others = ", ".join(f"row {i + 1}: {cell(rows[i], 0) or '(no name)'}" for i in mine[::-1][:3])
+            return f"{payload.get('username')} isn't in column F on an UpToDate row (only {others})"
         return f"{payload.get('username')} isn't in column F"
+    hit = max(utd, key=lambda i: (_renewal_rank(rows[i]), i))
     row = rows[hit]
     renewed = datetime.fromisoformat(payload["date"]).date() if payload.get("date") else date.today()
     expiry = parse_sheet_date(row[4]) if len(row) > 4 else None
