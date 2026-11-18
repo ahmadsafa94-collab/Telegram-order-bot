@@ -3557,11 +3557,57 @@ def db_update_order_credentials(order_id: int, credentials_text: str):
     conn.close()
 
 
-def db_update_status(order_id: int, status: str):
+# ── The order lifecycle (orders.status), in one place ───────────────────────────────────────────
+# Every status an order can have and every move between them. db_update_status is the only
+# writer besides db_save_delivery (→ delivered) and db_cancel_unpaid_orders (unpaid → cancelled),
+# and it refuses any move that isn't listed here, so a stale button, a double tap or two things
+# finishing at once can't pay an order twice or pull a paid order back to "waiting for payment".
+#
+#   awaiting_payment ─┬─► awaiting_receipt ─► awaiting_confirmation ─┬─► paid ─► delivered
+#   (order created)   │   (I've Paid)         (receipt sent)         │   (confirmed)  (first unit sent)
+#                     └──────────────► cancelled / rejected ◄────────┘
+#
+# Not paid yet (the three awaiting_* statuses, cancelled, rejected): any of them can become any
+#   other, e.g. a rejected order's corrected receipt goes back to awaiting_confirmation, and the
+#   admin can still approve a rejected or cancelled order.
+# paid / delivered: never back to an unpaid status and never "paid" a second time. The one way
+#   out is rejected ("🚩 Flag as fraudulent / reverse" on an auto-confirmed order).
+ORDER_OPEN_STATUSES = ("awaiting_payment", "awaiting_receipt", "awaiting_confirmation")
+ORDER_CLOSED_STATUSES = ("cancelled", "rejected")
+ORDER_PAID_STATUSES = ("paid", "delivered")
+ORDER_STATUSES = ORDER_OPEN_STATUSES + ORDER_CLOSED_STATUSES + ORDER_PAID_STATUSES
+_ORDER_NOT_PAID = frozenset(ORDER_OPEN_STATUSES + ORDER_CLOSED_STATUSES)
+ORDER_TRANSITIONS = {
+    **{status: _ORDER_NOT_PAID | {"paid"} for status in _ORDER_NOT_PAID},
+    "paid": frozenset({"delivered", "rejected"}),
+    "delivered": frozenset({"delivered", "rejected"}),
+}
+
+
+def order_can_move(current: str, new: str) -> bool:
+    """True if an order in status `current` may become `new` (see ORDER_TRANSITIONS). A status
+    this table doesn't know (an old row, a restored order) may move anywhere, as before."""
+    if current not in ORDER_TRANSITIONS:
+        return True
+    return new in ORDER_TRANSITIONS[current]
+
+
+def db_update_status(order_id: int, status: str) -> bool:
+    """Moves an order to `status` if the order lifecycle allows it from where the order is now,
+    in one atomic UPDATE. Returns True when the order moved; False (and nothing changes) when the
+    move isn't allowed or the order doesn't exist, e.g. "paid" on an order that is already paid.
+    Callers that do something once per payment (credits, discount use, delivery) must act only on
+    True."""
+    allowed_from = [s for s in ORDER_TRANSITIONS if status in ORDER_TRANSITIONS[s]]
+    placeholders = ",".join("?" for _ in allowed_from)
+    # Statuses outside the table (an old row) stay movable, exactly as before this table existed.
+    known = ",".join("?" for _ in ORDER_STATUSES)
+    guard = f"(status IN ({placeholders}) OR status NOT IN ({known}))"
+    guard_args = (*allowed_from, *ORDER_STATUSES)
     conn = sqlite3.connect(DB_PATH)
     if status == "paid":
-        # COALESCE so re-confirming an already-paid order (e.g. a double
-        # tap) never clobbers the original payment timestamp or costs.
+        # Costs are frozen at the moment of payment; COALESCE keeps the first
+        # payment timestamp and costs if a row somehow already carries them.
         costs_json = None
         row = conn.execute("SELECT items_json FROM orders WHERE id = ?", (order_id,)).fetchone()
         if row:
@@ -3569,19 +3615,28 @@ def db_update_status(order_id: int, status: str):
                 item_ids = list(json.loads(row[0]).keys())
             except (TypeError, ValueError, AttributeError):
                 item_ids = []
-            known = db_get_item_costs()
+            known_costs = db_get_item_costs()
             # Only costs that are set; an item without one is priced at
             # report time, so setting its cost later still counts it.
-            costs_json = json.dumps({i: known[i] for i in item_ids if i in known})
-        conn.execute(
+            costs_json = json.dumps({i: known_costs[i] for i in item_ids if i in known_costs})
+        cur = conn.execute(
             "UPDATE orders SET status = ?, paid_at = COALESCE(paid_at, ?), "
-            "costs_json = COALESCE(costs_json, ?) WHERE id = ?",
-            (status, datetime.utcnow().isoformat(), costs_json, order_id),
+            f"costs_json = COALESCE(costs_json, ?) WHERE id = ? AND {guard}",
+            (status, datetime.utcnow().isoformat(), costs_json, order_id, *guard_args),
         )
     else:
-        conn.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
+        cur = conn.execute(f"UPDATE orders SET status = ? WHERE id = ? AND {guard}",
+                           (status, order_id, *guard_args))
+    moved = cur.rowcount > 0
+    current = None
+    if not moved:
+        row = conn.execute("SELECT status FROM orders WHERE id = ?", (order_id,)).fetchone()
+        current = row[0] if row else None
     conn.commit()
     conn.close()
+    if not moved:
+        logger.info("Order #%s stays %s: not moved to %s (order lifecycle)", order_id, current or "missing", status)
+    return moved
 
 
 
@@ -6834,7 +6889,10 @@ async def payer_name_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     order_id = order[0]
-    _record_receipt_submission(order_id, items, payer_name)
+    if not _record_receipt_submission(order_id, items, payer_name):
+        # Confirmed while the customer was still sending the receipt: it stays paid.
+        await update.message.reply_text(f"✅ Order #{order_id} is already paid. Nothing else is needed.")
+        return
 
     await update.message.reply_text(
         f"Thanks! Receipt received for order #{order_id}. "
@@ -6847,8 +6905,10 @@ async def payer_name_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _record_receipt_submission(order_id: int, items: list, payer_name: str):
     """Marks the order as awaiting confirmation with the payer's name and a
     representative receipt photo. Shared by payer_name_reply (receipt sent
-    in this bot) and /api/submit_receipt (receipt sent via the reply bot)."""
-    db_update_status(order_id, "awaiting_confirmation")
+    in this bot) and /api/submit_receipt (receipt sent via the reply bot).
+    Returns False, changing nothing, when the order is already paid or delivered."""
+    if not db_update_status(order_id, "awaiting_confirmation"):
+        return False
     db_set_payer_name(order_id, payer_name)
 
     # Keep one representative photo for the Payments channel post (which
@@ -6856,6 +6916,7 @@ def _record_receipt_submission(order_id: int, items: list, payer_name: str):
     first_photo = next((i["file_id"] for i in items if i["type"] == "photo"), None)
     if first_photo:
         db_set_receipt_photo(order_id, first_photo)
+    return True
 
 
 async def _verify_submitted_receipts(context: ContextTypes.DEFAULT_TYPE, order, items: list, payer_name: str):
@@ -6943,7 +7004,8 @@ async def _verify_submitted_receipts(context: ContextTypes.DEFAULT_TYPE, order, 
 
         if amount_ok and reference_ok and wallet_ok and recipient_name_ok and not duplicate_ref:
             auto_confirmed = True
-            await finalize_order_confirmation(context, order_id, user_id, items_json)
+            if await finalize_order_confirmation(context, order_id, user_id, items_json) is False:
+                return  # the admin confirmed it while the receipt was being checked: nothing to add
             try:
                 await send_receipt_items_to_admin(
                     context, items,
@@ -7601,7 +7663,12 @@ async def finalize_order_confirmation(context: ContextTypes.DEFAULT_TYPE, order_
     conn.close()
     credits_applied, discount_code = row if row else (None, None)
 
-    db_update_status(order_id, "paid")
+    if not db_update_status(order_id, "paid"):
+        # Already paid (a second tap on Confirm, or the admin and the automatic check both
+        # confirming it), or the order is gone: everything below happened the first time and
+        # must not happen again (credits, discount use, referral credit, delivery, messages).
+        logger.info("Order #%s: confirmation skipped, it is already confirmed or missing", order_id)
+        return False
 
     if credits_applied:
         db_deduct_credits(user_id, credits_applied)
@@ -7628,6 +7695,7 @@ async def finalize_order_confirmation(context: ContextTypes.DEFAULT_TYPE, order_
     await start_order_fulfilment(context, order_id, user_id, items)
     await award_referral_credit(context, user_id)
     await post_receipt_to_payments_channel(context, order_id)
+    return True
 
 
 async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7653,6 +7721,11 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # isolated. Falls back from caption to text since this button now
         # appears on both photo (receipt review) and plain-text (Payment
         # Pending) messages.
+        if status in ORDER_PAID_STATUSES:
+            # A second tap, or a Confirm button on another message for the same order.
+            await _safe_edit_confirmation(
+                query, f"✅ Order #{order_id} was already confirmed as paid. Nothing was done twice.")
+            return
         await _safe_edit_confirmation(query, f"✅ Order #{order_id} confirmed as paid.")
         await finalize_order_confirmation(context, order_id, user_id, items_json)
 
@@ -10560,6 +10633,7 @@ ORDER_STATUS_MEANINGS = {
     "awaiting_receipt": "customer said they paid but hasn't uploaded the receipt in the shop bot yet",
     "awaiting_confirmation": "receipt uploaded, payment being verified",
     "paid": "payment confirmed",
+    "delivered": "delivered",
     "rejected": "payment was rejected (receipt didn't check out)",
     "cancelled": "order cancelled",
 }
@@ -10873,7 +10947,16 @@ async def http_submit_receipt(request):
             customer_data.pop(key, None)
             customer_data.pop("pending_receipt_items", None)
 
-    _record_receipt_submission(order_id, items, payer_name)
+    if not _record_receipt_submission(order_id, items, payer_name):
+        # Confirmed while the receipt was uploading (the check above ran before the uploads).
+        now = db_get_order(order_id)
+        now_status = now[5] if now else status
+        return web.json_response(
+            {"error": "this order isn't waiting for a payment", "status": now_status,
+             "status_meaning": ORDER_STATUS_MEANINGS.get(now_status, now_status),
+             "needs_details": db_order_needs_details(order_id)},
+            status=409,
+        )
     context = CallbackContext(application, chat_id=user_id, user_id=user_id)
     application.create_task(_verify_submitted_receipts(context, order, items, payer_name))
     # needs_details: the support chatbot tells the customer the shop bot will ask for their
