@@ -1473,6 +1473,7 @@ def db_init():
     conn.commit()
     conn.close()
 
+    utd_automation_init()
     load_bundled_imd_catalog()
     backfill_imd_years()
     db_heal_delivered_pending()
@@ -1481,7 +1482,7 @@ def db_init():
 
 
 def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, message_id: int = None,
-                    access: str = None) -> int:
+                    access: str = None, sheet_row: bool = True) -> int:
     """Records one delivered subscription. An order with several products
     produces several rows here, so 'My Subscriptions' can list them
     separately instead of lumping a whole order into one entry.
@@ -1498,7 +1499,8 @@ def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, mes
     delivery_id = cur.lastrowid
     conn.commit()
     conn.close()
-    _queue_sheet_row(order_id, user_id, item_id, message, access)
+    if sheet_row:   # a renewal @Utdreg_bot already wrote into its existing row doesn't get a second one
+        _queue_sheet_row(order_id, user_id, item_id, message, access)
     return delivery_id
 
 
@@ -13925,6 +13927,8 @@ async def start_api_server(application):
     api_app.router.add_post("/api/admin_sheet", http_admin_sheet)
     api_app.router.add_options("/api/admin_sheet", http_set_coworker_price_options)
     api_app.router.add_post("/api/delivered_sheet_renewal", http_delivered_sheet_renewal)
+    api_app.router.add_post("/api/deliver_unit", http_deliver_unit)
+    api_app.router.add_post("/api/delivered_sheet_registration", http_delivered_sheet_registration)
     api_app.router.add_post("/api/delivered_sheet_lookup", http_delivered_sheet_lookup)
     api_app.router.add_options("/api/admin_deliver", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_chat_action", http_admin_chat_action)
@@ -18526,7 +18530,7 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _deliver_credentials(context, fulfilment_id: int, credentials_text: str, on_delivered=None, access: str = None,
-                               only_if_undelivered: bool = False):
+                               only_if_undelivered: bool = False, sheet_row: bool = True):
     """Sends the account details to the customer and marks that unit delivered, exactly
     as the 📤 Send Credentials chat flow always did. Used by that flow and by the admin
     Shop's Pending Orders tab. Returns (item name, order id, delivery id), or None when the
@@ -18551,7 +18555,8 @@ async def _deliver_credentials(context, fulfilment_id: int, credentials_text: st
         db_set_fulfilment_state(fulfilment_id, "delivered")
         await send_delivery_promo(context, user_id)
         db_save_delivery(order_id, credentials_text)
-        delivery_id = db_add_delivery(order_id, user_id, item_id, credentials_text, sent_message.message_id, access=access)
+        delivery_id = db_add_delivery(order_id, user_id, item_id, credentials_text, sent_message.message_id, access=access,
+                                      sheet_row=sheet_row)
         await post_subscription_to_channel(context, order_id, item_id, credentials_text)
         if item_id in IMD_TRIGGER_ITEMS:
             db_use_held_serials(order_id)
@@ -19968,6 +19973,236 @@ async def _automation_post(path: str, payload: dict):
         return 502, {"error": f"couldn't reach the automation bot ({exc.__class__.__name__})"}
 
 
+# ── UpToDate orders → @Utdreg_bot (18 Nov 2026) ─────────────────────
+# Every paid UpToDate plan unit (a new account or a renewal) goes by itself to @Utdreg_bot as a pending order
+# (POST /api/order_pending), where the owner starts its flow when he decides. A new account's email is sent as the
+# owner's own plus-address, utdmedic+<tag>@outlook.com, so UpToDate's mails (the verification code) reach his inbox.
+# When he approves the result there, @Utdreg_bot delivers it through here (POST /api/deliver_unit), or adds a sheet row
+# for a registration that came from no order (POST /api/delivered_sheet_registration).
+
+UTD_ALIAS_DOMAIN = "outlook.com"
+UTD_ALIAS_USER = "utdmedic"
+_MAIL_PROVIDERS = {"gmail", "googlemail", "hotmail", "outlook", "live", "msn", "yahoo", "ymail", "icloud", "me", "mac",
+                   "proton", "protonmail", "pm", "aol", "gmx", "yandex", "zoho", "mail", "windowslive", "rocketmail",
+                   "qq", "163", "126", "naver", "daum", "web", "t-online", "libero", "orange", "free", "laposte",
+                   "rediffmail", "inbox", "rambler", "bk", "list", "seznam", "wp", "o2", "interia"}
+AUTOMATION_PUSH_TRIES_ALERT = 10
+
+
+def _utd_tag(text: str) -> str:
+    tag = re.sub(r"[^a-z0-9._-]", "", (text or "").lower())
+    tag = re.sub(r"\.{2,}", ".", tag).strip(".-_")
+    return tag[:40]
+
+
+def utd_alias_email(email: str, username: str = "", order_id: int = 0) -> str:
+    """The customer's email as the owner's plus-address: sample@hotmail.com → utdmedic+sample@outlook.com. When the
+    email looks made up (not a known mail provider or a university), the username is the tag instead:
+    random@random.com with username sample_26 → utdmedic+sample_26@outlook.com."""
+    email = (email or "").strip().lower()
+    if re.fullmatch(rf"{UTD_ALIAS_USER}\+[^@\s]+@{re.escape(UTD_ALIAS_DOMAIN)}", email):
+        return email
+    local, at, domain = email.partition("@")
+    labels = [x for x in domain.split(".") if x]
+    real = bool(at and local and len(labels) >= 2 and (labels[0] in _MAIL_PROVIDERS or "edu" in labels or "ac" in labels[1:]))
+    tag = _utd_tag(local.split("+", 1)[0]) if real else ""
+    if len(tag) < 3:
+        tag = _utd_tag(username.split("@", 1)[0] if username else "")
+    if len(tag) < 3:
+        tag = f"o{order_id}"
+    return f"{UTD_ALIAS_USER}+{tag}@{UTD_ALIAS_DOMAIN}"
+
+
+def utd_automation_init():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("CREATE TABLE IF NOT EXISTS utd_aliases (alias TEXT PRIMARY KEY, fulfilment_id INTEGER NOT NULL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS automation_outbox (fulfilment_id INTEGER PRIMARY KEY, info_hash TEXT, "
+                 "sent_at TEXT, tries INTEGER NOT NULL DEFAULT 0, error TEXT, alerted INTEGER NOT NULL DEFAULT 0)")
+    conn.commit()
+    conn.close()
+    if db_get_meta("automation_push_from") is None:
+        # Only units created from now on go by themselves (the owner, 18 Nov 2026); older ones keep 🤖 Run automation.
+        conn = sqlite3.connect(DB_PATH)
+        top = conn.execute("SELECT COALESCE(MAX(id), 0) FROM fulfilment").fetchone()[0]
+        conn.close()
+        db_set_meta("automation_push_from", str(top))
+
+
+def _utd_unique_alias(alias: str, fulfilment_id: int, order_id: int) -> str:
+    """Two customers can give the same tag (john@gmail.com, john@yahoo.com): UpToDate would refuse the second email,
+    so a taken one gets -<order number>."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        for candidate in (alias, alias.replace("@", f"-{order_id}@", 1), alias.replace("@", f"-{fulfilment_id}@", 1)):
+            row = conn.execute("SELECT fulfilment_id FROM utd_aliases WHERE alias = ?", (candidate,)).fetchone()
+            if row is None:
+                conn.execute("INSERT INTO utd_aliases (alias, fulfilment_id) VALUES (?, ?)", (candidate, fulfilment_id))
+                conn.commit()
+                return candidate
+            if row[0] == fulfilment_id:
+                return candidate
+        return alias
+    finally:
+        conn.close()
+
+
+def _utd_order_payload(row, info: dict) -> dict:
+    """What @Utdreg_bot gets for an UpToDate plan unit: kind new/renew, the order's details, and for a new account the
+    email as the owner's plus-address (the customer's own stays in original_email; the order itself isn't changed)."""
+    fid, order_id, user_id, item_id = row[0], row[1], row[2], row[3]
+    info = dict(info or {})
+    kind = "renew" if info.get("account_type") == "renew" else "new"
+    if kind == "new":
+        real = (info.get("email") or "").strip()
+        info["original_email"] = real
+        info["email"] = _utd_unique_alias(utd_alias_email(real, info.get("username") or "", order_id), fid, order_id)
+    return {"fulfilment_id": fid, "order_id": order_id, "user_id": user_id, "item_id": item_id,
+            "item_name": MENU.get(item_id, (item_id,))[0], "kind": kind, "info": info,
+            "username": db_get_username(user_id) or ""}
+
+
+def _utd_units_to_push() -> list:
+    """Paid UpToDate plan units with their details given, not yet sent to @Utdreg_bot (or changed since)."""
+    start = int(db_get_meta("automation_push_from") or 0)
+    marks = ",".join("?" * len(UPTODATE_PLAN_ITEMS))
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        f"SELECT f.id, f.order_id, f.user_id, f.item_id, f.unit_no, f.state, f.info_json, a.info_hash, a.tries, a.alerted "
+        f"FROM fulfilment f JOIN orders o ON o.id = f.order_id LEFT JOIN automation_outbox a ON a.fulfilment_id = f.id "
+        f"WHERE f.id > ? AND f.item_id IN ({marks}) AND f.state = 'awaiting_delivery' AND o.status IN ('paid', 'delivered') "
+        f"AND COALESCE(f.info_json, '') NOT IN ('', '{{}}') ORDER BY f.id",
+        (start, *sorted(UPTODATE_PLAN_ITEMS))).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        digest = hashlib.sha256((r[6] or "").encode()).hexdigest()
+        if digest != r[7]:
+            out.append((r, digest))
+    return out
+
+
+async def automation_push_job(context: ContextTypes.DEFAULT_TYPE):
+    """Every minute: each new or changed paid UpToDate unit goes to @Utdreg_bot's 📥 Pending orders. A unit @Utdreg_bot
+    can't take yet is tried again; the admin hears once if it keeps failing."""
+    if not AUTOMATION_API_URL or not CATALOG_API_KEY:
+        return
+    for r, digest in _utd_units_to_push():
+        try:
+            info = json.loads(r[6]) if r[6] else {}
+        except ValueError:
+            info = {}
+        payload = _utd_order_payload(r[:7], info)
+        payload["update"] = r[7] is not None
+        status, body = await _automation_post("/api/order_pending", payload)
+        conn = sqlite3.connect(DB_PATH)
+        if status == 200 and body.get("ok"):
+            conn.execute("INSERT INTO automation_outbox (fulfilment_id, info_hash, sent_at, tries, error) VALUES (?, ?, ?, 0, NULL) "
+                         "ON CONFLICT(fulfilment_id) DO UPDATE SET info_hash = excluded.info_hash, sent_at = excluded.sent_at, "
+                         "tries = 0, error = NULL", (r[0], digest, datetime.utcnow().isoformat(timespec="seconds")))
+            conn.commit(); conn.close()
+            logger.info("Order #%s unit %s (%s) sent to @Utdreg_bot as a pending %s", r[1], r[0], r[3], payload["kind"])
+            continue
+        error = str(body.get("error") or status)[:200]
+        tries = (r[8] or 0) + 1
+        conn.execute("INSERT INTO automation_outbox (fulfilment_id, info_hash, tries, error) VALUES (?, NULL, ?, ?) "
+                     "ON CONFLICT(fulfilment_id) DO UPDATE SET tries = excluded.tries, error = excluded.error",
+                     (r[0], tries, error))
+        conn.commit(); conn.close()
+        logger.warning("Order #%s unit %s not sent to @Utdreg_bot (try %s): %s", r[1], r[0], tries, error)
+        if tries >= AUTOMATION_PUSH_TRIES_ALERT and not r[9]:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE automation_outbox SET alerted = 1 WHERE fulfilment_id = ?", (r[0],))
+            conn.commit(); conn.close()
+            try:
+                await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=(
+                    f"⚠️ UpToDate order #{r[1]} couldn't be sent to @Utdreg_bot ({tries} tries): {error}. I keep trying; "
+                    "🤖 Run automation on the order sends it by hand."))
+            except Exception:
+                pass
+        if status in (502, 503):
+            break   # @Utdreg_bot is down: the rest wait for the next minute
+
+
+async def http_deliver_unit(request):
+    """POST from @Utdreg_bot (X-Api-Key) when the admin approved a registration (kind new) or renewal (kind renew) that
+    came from this order unit: {fulfilment_id, order_id, kind, username, password, access, number, sheet_row}. Delivers
+    it to the customer exactly as 📤 Send Credentials does (marked delivered, the delivered sheet's row unless
+    sheet_row is false). Answers {ok, status: delivered | already_delivered}."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        body = await request.json()
+        fid, order_id = int(body["fulfilment_id"]), int(body["order_id"])
+        kind = "renew" if body.get("kind") == "renew" else "new"
+        username, password = str(body["username"]).strip(), str(body.get("password") or "").strip()
+        access = str(body.get("access") or "").strip()[:100]
+    except (KeyError, TypeError, ValueError):
+        return web.json_response({"error": "invalid request body"}, status=400)
+    if not username or not password:
+        return web.json_response({"error": "username and password are needed"}, status=400)
+    row = db_get_fulfilment(fid)
+    if not row or row[1] != order_id:
+        return web.json_response({"error": "no such order unit"}, status=404)
+    if row[3] not in UPTODATE_PLAN_ITEMS:
+        return web.json_response({"error": "not an UpToDate plan"}, status=409)
+    order = db_get_order(order_id)
+    if not order or order[5] not in ("paid", "delivered"):
+        return web.json_response({"error": "the order isn't paid"}, status=409)
+    if row[5] == "delivered":
+        return web.json_response({"ok": True, "status": "already_delivered"})
+    text = ("✅ Your UpToDate account is renewed.\n\n" if kind == "renew" else "") + f"Username: {username}\nPassword: {password}"
+    try:
+        result = await _deliver_credentials(_HttpContext(request.app["application"], ADMIN_CHAT_ID), fid, text,
+                                            access=access or None, only_if_undelivered=True,
+                                            sheet_row=bool(body.get("sheet_row", True)))
+    except UnitAlreadyDelivered:
+        return web.json_response({"ok": True, "status": "already_delivered"})
+    except Exception as exc:
+        logger.warning("@Utdreg_bot delivery of order #%s unit %s failed: %s", order_id, fid, exc.__class__.__name__)
+        return web.json_response({"ok": False, "error": "couldn't send it to the customer (they may have blocked the bot); "
+                                                         "nothing was marked delivered"}, status=502)
+    if not result:
+        return web.json_response({"error": "no such order unit"}, status=404)
+    logger.info("Order #%s unit %s delivered for @Utdreg_bot (%s %s)", order_id, fid, kind, str(body.get("number") or "")[:20])
+    return web.json_response({"ok": True, "status": "delivered", "delivery_id": result[2]})
+
+
+async def http_delivered_sheet_registration(request):
+    """POST {username, password, access, number, item_id?} from @Utdreg_bot (X-Api-Key): a new UpToDate account it
+    registered with no shop order behind it goes in the delivered sheet as a new row (J = the N number). Sent once
+    per N number."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        body = await request.json()
+        username, password = str(body["username"]).strip(), str(body.get("password") or "").strip()
+        number = str(body["number"]).strip()[:20]
+        access = str(body.get("access") or "").strip()[:100]
+        item_id = str(body.get("item_id") or "up_online_app")
+    except (KeyError, TypeError, ValueError):
+        return web.json_response({"error": "invalid request body"}, status=400)
+    if not username or not number:
+        return web.json_response({"error": "username and number are needed"}, status=400)
+    if item_id not in UPTODATE_PLAN_ITEMS:
+        item_id = "up_online_app"
+    if any(len(r) > 9 and str(r[9]) == number for r in dsheet.queued_rows(DB_PATH, dsheet.MAIN_TAB)):
+        return web.json_response({"ok": True, "status": "already_added"})
+    name = MENU.get(item_id, (item_id,))[0]
+    row = dsheet.build_row(name, item_id, datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET),
+                           f"Username: {username}\nPassword: {password}", access, "Me", number, "", "")
+    dsheet.enqueue_row(DB_PATH, dsheet.MAIN_TAB, row)
+    status = "queued"
+    if dsheet.configured():
+        task = asyncio.ensure_future(dsheet.flush(DB_PATH))
+        done, _ = await asyncio.wait({task}, timeout=25)
+        if done:
+            status = "added" if any(len(r) > 9 and str(r[9]) == number for r in dsheet.queued_rows(DB_PATH, dsheet.MAIN_TAB)) else "queued"
+    logger.info("Delivered sheet: new UpToDate account %s (%s) queued for @Utdreg_bot", number, access)
+    return web.json_response({"ok": True, "status": status})
+
+
 async def _automation_get(path: str, params: dict):
     """GETs from the automation bot. Returns (status, json body or {"error": reason})."""
     import httpx
@@ -20020,10 +20255,10 @@ async def automation_run_callback(update: Update, context: ContextTypes.DEFAULT_
         info = json.loads(row[6]) if row[6] else {}
     except ValueError:
         info = {}
-    status, body = await _automation_post("/api/run_request", {
+    payload = _utd_order_payload(row, info) if row[3] in UPTODATE_PLAN_ITEMS else {
         "fulfilment_id": fid, "order_id": row[1], "user_id": row[2], "item_id": row[3],
-        "item_name": MENU.get(row[3], (row[3],))[0], "info": info,
-    })
+        "item_name": MENU.get(row[3], (row[3],))[0], "info": info}
+    status, body = await _automation_post("/api/run_request", payload)
     if status == 200 and body.get("ok"):
         await query.message.reply_text(f"🤖 Sent order #{row[1]} to @Utdreg_bot: choose the site there.")
     else:
@@ -20536,6 +20771,8 @@ def main():
         )
         # The delivered-subscriptions sheet: queued rows and renewals go to Google every 30 s.
         app.job_queue.run_repeating(sheet_outbox_job, interval=30, first=20, name="delivered_sheet")
+        # Paid UpToDate orders go to @Utdreg_bot's 📥 Pending orders by themselves (18 Nov 2026).
+        app.job_queue.run_repeating(automation_push_job, interval=60, first=45, name="automation_push")
         # Daily sales Excel to the admin 5 minutes after local midnight.
         app.job_queue.run_daily(
             daily_sales_excel_job,
