@@ -3572,6 +3572,9 @@ def db_update_order_credentials(order_id: int, credentials_text: str):
 #   admin can still approve a rejected or cancelled order.
 # paid / delivered: never back to an unpaid status and never "paid" a second time. The one way
 #   out is rejected ("🚩 Flag as fraudulent / reverse" on an auto-confirmed order).
+# Delivered before it was paid (the admin sent the credentials early, e.g. to a trusted customer:
+#   status delivered, paid_at empty): its payment can still be confirmed, once. It stays
+#   "delivered" and gets its paid_at; db_order_payment_confirmed tells the two apart.
 ORDER_OPEN_STATUSES = ("awaiting_payment", "awaiting_receipt", "awaiting_confirmation")
 ORDER_CLOSED_STATUSES = ("cancelled", "rejected")
 ORDER_PAID_STATUSES = ("paid", "delivered")
@@ -3590,6 +3593,15 @@ def order_can_move(current: str, new: str) -> bool:
     if current not in ORDER_TRANSITIONS:
         return True
     return new in ORDER_TRANSITIONS[current]
+
+
+def db_order_payment_confirmed(order_id: int) -> bool:
+    """True once the order's payment was confirmed: it is paid, or delivered with a payment time.
+    (An order delivered before it was paid is "delivered" with no paid_at.)"""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT status, paid_at FROM orders WHERE id = ?", (order_id,)).fetchone()
+    conn.close()
+    return bool(row) and (row[0] == "paid" or (row[0] == "delivered" and bool(row[1])))
 
 
 def db_update_status(order_id: int, status: str) -> bool:
@@ -3619,9 +3631,11 @@ def db_update_status(order_id: int, status: str) -> bool:
             # Only costs that are set; an item without one is priced at
             # report time, so setting its cost later still counts it.
             costs_json = json.dumps({i: known_costs[i] for i in item_ids if i in known_costs})
+        # An order delivered before it was paid stays "delivered" and gets its payment time now.
         cur = conn.execute(
-            "UPDATE orders SET status = ?, paid_at = COALESCE(paid_at, ?), "
-            f"costs_json = COALESCE(costs_json, ?) WHERE id = ? AND {guard}",
+            "UPDATE orders SET status = CASE WHEN status = 'delivered' THEN 'delivered' ELSE ? END, "
+            "paid_at = COALESCE(paid_at, ?), costs_json = COALESCE(costs_json, ?) "
+            f"WHERE id = ? AND ({guard} OR (status = 'delivered' AND paid_at IS NULL))",
             (status, datetime.utcnow().isoformat(), costs_json, order_id, *guard_args),
         )
     else:
@@ -6906,8 +6920,9 @@ def _record_receipt_submission(order_id: int, items: list, payer_name: str):
     """Marks the order as awaiting confirmation with the payer's name and a
     representative receipt photo. Shared by payer_name_reply (receipt sent
     in this bot) and /api/submit_receipt (receipt sent via the reply bot).
-    Returns False, changing nothing, when the order is already paid or delivered."""
-    if not db_update_status(order_id, "awaiting_confirmation"):
+    Returns False, changing nothing, when the order's payment is already confirmed. An order
+    delivered before it was paid keeps its status; its receipt still goes to the checks."""
+    if not db_update_status(order_id, "awaiting_confirmation") and db_order_payment_confirmed(order_id):
         return False
     db_set_payer_name(order_id, payer_name)
 
@@ -7003,9 +7018,10 @@ async def _verify_submitted_receipts(context: ContextTypes.DEFAULT_TYPE, order, 
             recipient_name_ok = bool(verdict.get("recipient_ok"))
 
         if amount_ok and reference_ok and wallet_ok and recipient_name_ok and not duplicate_ref:
-            auto_confirmed = True
-            if await finalize_order_confirmation(context, order_id, user_id, items_json) is False:
-                return  # the admin confirmed it while the receipt was being checked: nothing to add
+            # False: the admin confirmed it while the receipt was being checked. The receipt then
+            # goes to the admin as a normal review copy below, not as "auto-confirmed".
+            auto_confirmed = await finalize_order_confirmation(context, order_id, user_id, items_json) is not False
+        if auto_confirmed:
             try:
                 await send_receipt_items_to_admin(
                     context, items,
@@ -7721,7 +7737,7 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # isolated. Falls back from caption to text since this button now
         # appears on both photo (receipt review) and plain-text (Payment
         # Pending) messages.
-        if status in ORDER_PAID_STATUSES:
+        if db_order_payment_confirmed(order_id):
             # A second tap, or a Confirm button on another message for the same order.
             await _safe_edit_confirmation(
                 query, f"✅ Order #{order_id} was already confirmed as paid. Nothing was done twice.")
