@@ -20003,11 +20003,11 @@ async def _automation_post(path: str, payload: dict):
 # ── UpToDate orders → @Utdreg_bot (18 Nov 2026) ─────────────────────
 # Every paid UpToDate plan unit (a new account or a renewal) goes by itself to @Utdreg_bot as a pending order
 # (POST /api/order_pending), where the owner starts its flow when he decides. A new account's email is sent as the
-# owner's own plus-address, utdmedic+<tag>@outlook.com, so UpToDate's mails (the verification code) reach his inbox.
+# owner's own plus-address, utdmedic+<tag>@gmail.com, so UpToDate's mails (the verification code) reach his inbox.
 # When he approves the result there, @Utdreg_bot delivers it through here (POST /api/deliver_unit), or adds a sheet row
 # for a registration that came from no order (POST /api/delivered_sheet_registration).
 
-UTD_ALIAS_DOMAIN = "outlook.com"
+UTD_ALIAS_DOMAIN = "gmail.com"   # the owner's Gmail, utdmedic@gmail.com (18 Nov 2026; was outlook.com)
 UTD_ALIAS_USER = "utdmedic"
 _MAIL_PROVIDERS = {"gmail", "googlemail", "hotmail", "outlook", "live", "msn", "yahoo", "ymail", "icloud", "me", "mac",
                    "proton", "protonmail", "pm", "aol", "gmx", "yandex", "zoho", "mail", "windowslive", "rocketmail",
@@ -20023,9 +20023,9 @@ def _utd_tag(text: str) -> str:
 
 
 def utd_alias_email(email: str, username: str = "", order_id: int = 0) -> str:
-    """The customer's email as the owner's plus-address: sample@hotmail.com → utdmedic+sample@outlook.com. When the
+    """The customer's email as the owner's plus-address: sample@hotmail.com → utdmedic+sample@gmail.com. When the
     email looks made up (not a known mail provider or a university), the username is the tag instead:
-    random@random.com with username sample_26 → utdmedic+sample_26@outlook.com."""
+    random@random.com with username sample_26 → utdmedic+sample_26@gmail.com."""
     email = (email or "").strip().lower()
     if re.fullmatch(rf"{UTD_ALIAS_USER}\+[^@\s]+@{re.escape(UTD_ALIAS_DOMAIN)}", email):
         return email
