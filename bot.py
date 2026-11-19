@@ -13184,6 +13184,13 @@ async def http_admin_coworker_prices(request):
                               "items": items}, headers=_imd_search_cors_headers())
 
 
+def _coworker_default_for(coworker, item_id: str) -> float:
+    """What this coworker pays for an item with no own price: the same rule checkout uses (their %, or % off after
+    cost for All Subscriptions tab items)."""
+    return coworker_default_price(item_id, MENU[item_id][1], coworker[3], db_get_coworker_cost_pct(coworker[0]),
+                                  db_get_item_costs())
+
+
 def coworker_priced_items() -> list:
     """Every subscription on sale that a coworker can get a price for (19 Nov 2026): the main ones (iMD, Uptodate,
     Amboss, the AI bots, More Subscriptions…) in the shop's order, then the All Subscriptions tab A-Z."""
@@ -13321,7 +13328,7 @@ async def http_admin_coworker_action(request):
         if price is not None:
             if isinstance(price, bool) or not isinstance(price, (int, float)) or not math.isfinite(price) \
                     or price <= 0 or price > 10000:
-                return _admin_bad("Enter a price above 0.")
+                return _admin_bad("Enter a price between 0 and 10,000.")
             price = round(float(price), 2)
         db_set_coworker_item_price(cid, item_id, price)
         costs = db_get_item_costs()
@@ -13743,7 +13750,7 @@ async def http_set_coworker_price(request):
             return web.json_response({"ok": False, "error": "Enter a price above 0."}, status=400, headers=headers)
         price = round(float(price), 2)
     db_set_coworker_item_price(coworker_id, item_id, price)
-    default = round(MENU[item_id][1] * (1 - coworker[3] / 100), 2)
+    default = _coworker_default_for(coworker, item_id)
     return web.json_response(
         {"ok": True, "item_id": item_id, "custom": price is not None,
          "price": price if price is not None else default, "default": default},
@@ -15046,7 +15053,7 @@ async def coworker_price_edit_start(update: Update, context: ContextTypes.DEFAUL
     clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_coworker_item_price"] = f"{coworker_id}:{item_id}"
     name, base = MENU[item_id]
-    default = round(base * (1 - coworker[3] / 100), 2)
+    default = _coworker_default_for(coworker, item_id)
     custom = db_get_coworker_price_overrides(coworker_id).get(item_id)
     current = f"{CURRENCY}{custom:.2f} (custom)" if custom is not None else f"{CURRENCY}{default:.2f} (default, {coworker[3]:.0f}% off)"
     await context.bot.send_message(
@@ -15077,7 +15084,7 @@ async def coworker_price_reset(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("That coworker or subscription no longer exists.")
         return
     db_set_coworker_item_price(coworker_id, item_id, None)
-    shown = round(MENU[item_id][1] * (1 - coworker[3] / 100), 2)
+    shown = _coworker_default_for(coworker, item_id)
     ids = [r[0] for r in _coworker_price_rows(coworker_id)]
     page = ids.index(item_id) // CW_PRICES_PER_PAGE if item_id in ids else 0
     await query.edit_message_text(
@@ -15113,7 +15120,7 @@ async def coworker_price_edit_reply(update: Update, context: ContextTypes.DEFAUL
     db_set_coworker_item_price(coworker_id, item_id, price)
     name = MENU[item_id][0]
     if price is None:
-        shown = round(MENU[item_id][1] * (1 - coworker[3] / 100), 2)
+        shown = _coworker_default_for(coworker, item_id)
         msg = f"✅ {name} is back to {coworker[1]}'s default: {CURRENCY}{shown:.2f}."
     else:
         msg = f"✅ {coworker[1]} now sees {name} at {CURRENCY}{price:.2f}."

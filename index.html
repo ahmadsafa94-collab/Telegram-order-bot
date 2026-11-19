@@ -3455,6 +3455,7 @@ async function saveCwPrice(useDefault){
     let toast;
     if(PREVIEW_CW){
       if(data.custom) COWORKER_ITEM_PRICES[id]=data.price; else delete COWORKER_ITEM_PRICES[id];
+      if(typeof loadCoworkerPanelPrices==='function') loadCoworkerPanelPrices();   // the panel prices include own prices
       toast=data.custom?CW_NAME+' now sees $'+data.price:'Back to '+CW_NAME+"'s default $"+data.default;
     }else{
       // The regular price itself changed: update everything built from it.
