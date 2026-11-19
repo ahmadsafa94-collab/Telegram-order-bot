@@ -6238,17 +6238,18 @@ def pre_payment_view(order_id: int):
     if not order:
         return "Order not found.", None
     total = order[4]
+    # Discount codes are for customers only, not coworkers (owner, 19 Nov 2026).
+    coworker = bool(db_get_user_coworker(order[1]))
     text = (
         f"*Order #{order_id} created*\n\n"
         f"*Total: {CURRENCY}{total:.2f}*\n\n"
-        "Have credits or a discount code? Apply them here before choosing "
-        "how to pay."
+        + ("Have credits? Apply them here before choosing how to pay." if coworker else
+           "Have credits or a discount code? Apply them here before choosing how to pay.")
     )
-    buttons = [
-        [InlineKeyboardButton("💳 Use my credits to pay", callback_data=f"credits_start:{order_id}")],
-        [InlineKeyboardButton("🏷 Enter discount code", callback_data=f"discount_start:{order_id}")],
-        [InlineKeyboardButton("➡️ Continue to Payment Methods", callback_data=f"back_to_checkout:{order_id}")],
-    ]
+    buttons = [[InlineKeyboardButton("💳 Use my credits to pay", callback_data=f"credits_start:{order_id}")]]
+    if not coworker:
+        buttons.append([InlineKeyboardButton("🏷 Enter discount code", callback_data=f"discount_start:{order_id}")])
+    buttons.append([InlineKeyboardButton("➡️ Continue to Payment Methods", callback_data=f"back_to_checkout:{order_id}")])
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -6763,6 +6764,9 @@ async def credits_partial(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def discount_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """'🏷 Enter discount code' — asks for the code as a text reply."""
     query = update.callback_query
+    if db_get_user_coworker(query.from_user.id):
+        await query.answer("Discount codes are for customers only.", show_alert=True)
+        return
     await query.answer()
     order_id = int(query.data.split(":", 1)[1])
     context.user_data["awaiting_discount_code_for_order"] = order_id
@@ -6778,6 +6782,9 @@ async def discount_code_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Customer's typed discount code."""
     order_id = context.user_data.pop("awaiting_discount_code_for_order", None)
     if not order_id:
+        return
+    if db_get_user_coworker(update.effective_user.id):
+        await update.message.reply_text("Discount codes are for customers only, not coworker accounts.")
         return
     code = update.message.text.strip()
     order = db_get_order(order_id)
@@ -19633,10 +19640,12 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
     if coworker_login:
         coworker_id = coworker_login[0]
         total = round(sum(_coworker_unit_price_by_id(i, coworker_id) * q for i, q in order_items.items()), 2)
-        # Postpaid coworkers are billed later: no payment step, no discount code or credits.
+        # Discount codes are for customers only, never coworkers (owner, 19 Nov 2026).
+        data = {**data, "discount_code": ""}
+        # Postpaid coworkers are billed later: no payment step, no credits either.
         postpaid = db_get_coworker_mode(coworker_id) == "postpaid"
         if postpaid:
-            data = {**data, "discount_code": "", "use_credits": False}
+            data = {**data, "use_credits": False}
     else:
         total = sum(MENU[i][1] * q for i, q in order_items.items())
     if pay_method.lower() == "postpaid" and not postpaid:

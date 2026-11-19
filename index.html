@@ -1094,6 +1094,8 @@ if (ADMIN_EDIT && API_BASE && AUTH_UID && AUTH_TOK) {
 const CREDITS_BALANCE = (SUBS_DATA && SUBS_DATA.cr) || 0;
 // A coworker account (or the admin previewing one) has no credits or free-accounts program.
 const IS_COWORKER = !!(SUBS_DATA && SUBS_DATA.cwid);
+// Discount codes are for customers only, not coworkers (owner, 19 Nov 2026): no code box on the payment page.
+if(IS_COWORKER) setTimeout(()=>{ const b=document.getElementById('discountBox'); if(b) b.style.display='none'; },0);
 const POSTPAID = !!(SUBS_DATA && SUBS_DATA.cwpost);
 const DISCOUNT_CODES = (SUBS_DATA && SUBS_DATA.dc) || {};
 const CREDIT_VALUE_USD = 4;
@@ -3748,6 +3750,7 @@ function renderImdResults(data){
   resEl.innerHTML=html;
 }
 async function applyDiscountCode(){
+  if(IS_COWORKER){ appliedDiscountCode=''; return; }
   const raw=(document.getElementById('discountInput').value||'').trim().toUpperCase();
   const msg=document.getElementById('discountMsg');
   if(!raw){ msg.textContent=''; return; }
