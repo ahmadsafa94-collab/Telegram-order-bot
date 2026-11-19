@@ -4187,6 +4187,84 @@ def clear_admin_flow_state(user_data: dict):
         user_data.pop(key, None)
 
 
+# What each admin step is waiting for, in words, for /cancel's answer.
+ADMIN_STEP_WORDS = {
+    "awaiting_credentials_fulfilment": "the account details",
+    "imd_manual_cred": "the iMD login",
+    "awaiting_admin_message_for_order": "your message to the customer",
+    "awaiting_comment_for_order": "your comment",
+    "awaiting_reject_comment_for_order": "the rejection reason",
+    "awaiting_resend_message_for_fulfilment": "the message to send again",
+    "awaiting_edit_delivery": "the corrected delivery",
+    "awaiting_edit_delivery_notify": "whether to tell the customer about the edit",
+    "awaiting_ticket_resolution": "the ticket answer",
+    "awaiting_ticket_edit_answer": "the edited ticket answer",
+    "awaiting_admin_input": "your input",
+    "awaiting_new_sub_field": "the new subscription's details",
+    "awaiting_book_price_for": "the book price",
+    "awaiting_book_message_for": "your message about the book",
+    "awaiting_stock_edit_field": "the stock edit",
+    "awaiting_stock_cost_for": "the cost",
+    "awaiting_discount_field": "the discount code details",
+    "awaiting_restore_file": "the backup file",
+    "awaiting_restoreorder_file": "the order backup file",
+}
+
+
+def _admin_step_order(user_data: dict):
+    """The order number the admin's current step is about, if it is about one."""
+    for key in ("awaiting_admin_message_for_order", "awaiting_comment_for_order", "awaiting_reject_comment_for_order"):
+        if isinstance(user_data.get(key), int) and not isinstance(user_data.get(key), bool):
+            return user_data[key]
+    fid = user_data.get("awaiting_credentials_fulfilment") or (user_data.get("imd_manual_cred") or {}).get("fulfilment_id")
+    if fid:
+        try:
+            row = db_get_fulfilment(int(fid))
+            return row[1] if row else None
+        except Exception:
+            return None
+    return None
+
+
+async def _admin_cancel_now(context, user_data: dict) -> str:
+    """Clears whatever the admin's next message was going to answer; returns what to tell them."""
+    active = [k for k in ADMIN_FLOW_KEYS if (k.startswith("awaiting_") or k == "imd_manual_cred") and user_data.get(k)]
+    if not active:
+        return "Nothing to cancel: I wasn't waiting for anything from you."
+    what = next((ADMIN_STEP_WORDS[k] for k in active if k in ADMIN_STEP_WORDS), "your answer")
+    order_id = _admin_step_order(user_data)
+    clear_admin_flow_state(user_data)
+    logger.info("Admin /cancel: stopped waiting for %s (%s)", what, ", ".join(active))
+    return f"❌ Cancelled: no longer waiting for {what}" + (f" (order #{order_id})" if order_id else "") + \
+        ". Nothing was sent. Your next message is treated as a normal message."
+
+
+async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/cancel (admin, 19 Nov 2026): stops whatever step is waiting for the admin's next message (account details,
+    a message to a customer, a comment, a stock edit…), so that message isn't taken as the answer."""
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+    await update.message.reply_text(await _admin_cancel_now(context, context.user_data))
+
+
+async def admin_cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """The ❌ Cancel button under a step's question: same as typing /cancel."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    said = await _admin_cancel_now(context, context.user_data)
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=said)
+
+
+ADMIN_CANCEL_ROW = [InlineKeyboardButton("❌ Cancel", callback_data="admincancel")]
+
+
 def _badge(label: str, count: int) -> str:
     """Appends a 🔴 and the count to a button label when there's something
     new to see — the simplest possible notification that works inside a
@@ -18499,7 +18577,8 @@ async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     note = "\nYour message is sent to the customer exactly as typed; iMD isn't touched." if item_id in IMD_TRIGGER_ITEMS else ""
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
-        text=f"Reply with the account details for {name} (Order #{order_id}).{note}",
+        text=f"Reply with the account details for {name} (Order #{order_id}).{note}\n\nTo stop, tap ❌ Cancel or type /cancel.",
+        reply_markup=InlineKeyboardMarkup([ADMIN_CANCEL_ROW]),
     )
 
 
@@ -20837,6 +20916,8 @@ def main():
         )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancel", admin_cancel))
+    app.add_handler(CallbackQueryHandler(admin_cancel_button, pattern=r"^admincancel$"))
     app.add_handler(CommandHandler("myorders", my_orders))
     app.add_handler(CommandHandler("coworker", coworker_login_start))
     app.add_handler(CommandHandler("backupdb", backup_db))
