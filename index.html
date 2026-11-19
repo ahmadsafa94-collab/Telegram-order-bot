@@ -4062,7 +4062,8 @@ tg.MainButton.onClick(submitOrder);
 const ADS = [
   // Black Friday (owner, 16 Nov 2026): shown until the end of November; tapping copies BLACKFRIDAY26 and puts it in
   // the discount box at checkout.
-  ...(Date.now() < Date.parse('2026-11-30T21:00:00Z') ? [{
+  // Not for coworkers: discount codes are for customers only (19 Nov 2026).
+  ...(!IS_COWORKER && Date.now() < Date.parse('2026-11-30T21:00:00Z') ? [{
     promo: true, dark: true,
     kicker: 'Black Friday',
     title: '15% off Uptodate, Amboss, ACP MKSAP & Boardvitals',
