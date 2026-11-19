@@ -4208,7 +4208,20 @@ ADMIN_STEP_WORDS = {
     "awaiting_discount_field": "the discount code details",
     "awaiting_restore_file": "the backup file",
     "awaiting_restoreorder_file": "the order backup file",
+    "restore_staged_path": "the restore confirmation",
+    "awaiting_customer_reply_for_order": "your reply (as a customer)",
+    "awaiting_book_reply_for": "your book reply (as a customer)",
+    "awaiting_payer_name_for_order": "the payer name (as a customer)",
+    "awaiting_discount_code_for_order": "the discount code (as a customer)",
+    "awaiting_receipt_for_order": "the receipt (as a customer)",
 }
+# Steps the admin can be in while using the bot as a customer (🛍 Customer Menu / the Mini App); /cancel stops them too.
+ADMIN_AS_CUSTOMER_KEYS = [
+    "awaiting_customer_reply_for_order", "awaiting_book_reply_for", "awaiting_payer_name_for_order",
+    "awaiting_discount_code_for_order", "awaiting_ticket_field", "awaiting_book_link", "awaiting_imd_search",
+    "awaiting_registration_field", "awaiting_generic_field", "awaiting_coworker_field",
+    "awaiting_receipt_for_order", "collecting_receipts_for_order",
+]
 
 
 def _admin_step_order(user_data: dict):
@@ -4228,23 +4241,36 @@ def _admin_step_order(user_data: dict):
 
 async def _admin_cancel_now(context, user_data: dict) -> str:
     """Clears whatever the admin's next message was going to answer; returns what to tell them."""
-    active = [k for k in ADMIN_FLOW_KEYS if (k.startswith("awaiting_") or k == "imd_manual_cred") and user_data.get(k)]
+    active = [k for k in ADMIN_FLOW_KEYS + ADMIN_AS_CUSTOMER_KEYS
+              if (k.startswith(("awaiting_", "collecting_")) or k in ("imd_manual_cred", "restore_staged_path")) and user_data.get(k)]
     if not active:
         return "Nothing to cancel: I wasn't waiting for anything from you."
     what = next((ADMIN_STEP_WORDS[k] for k in active if k in ADMIN_STEP_WORDS), "your answer")
-    order_id = _admin_step_order(user_data)
+    try:
+        order_id = _admin_step_order(user_data)
+    except Exception:
+        order_id = None
+    still = ""
+    if "awaiting_reject_comment_for_order" in active:
+        still = f" Order #{order_id} was NOT rejected: it is still pending." if order_id else " The order was NOT rejected."
+    elif "awaiting_ticket_resolution" in active:
+        still = " The ticket is still open."
+    elif "restore_staged_path" in active:
+        still = " The database was NOT restored."
     clear_admin_flow_state(user_data)
+    for k in ADMIN_AS_CUSTOMER_KEYS:
+        user_data.pop(k, None)
     logger.info("Admin /cancel: stopped waiting for %s (%s)", what, ", ".join(active))
     return f"❌ Cancelled: no longer waiting for {what}" + (f" (order #{order_id})" if order_id else "") + \
-        ". Nothing was sent. Your next message is treated as a normal message."
+        ". Nothing was sent." + still + " Your next message is treated as a normal message."
 
 
 async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/cancel (admin, 19 Nov 2026): stops whatever step is waiting for the admin's next message (account details,
     a message to a customer, a comment, a stock edit…), so that message isn't taken as the answer."""
-    if update.effective_user.id != ADMIN_CHAT_ID:
+    if not update.effective_user or update.effective_user.id != ADMIN_CHAT_ID or not update.effective_message:
         return
-    await update.message.reply_text(await _admin_cancel_now(context, context.user_data))
+    await update.effective_message.reply_text(await _admin_cancel_now(context, context.user_data))
 
 
 async def admin_cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
