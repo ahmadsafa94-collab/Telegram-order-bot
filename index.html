@@ -2607,11 +2607,43 @@ function drawCoworkerPricesView(){
 }
 function drawCoworkerPricesList(){
   const d=cwPrices, q=cwPricesFilter.toLowerCase(), rows=d.items.filter(i=>!q||i.name.toLowerCase().includes(q));
+  const row=i=>'<div class="t-card cw-prow" style="padding:9px 13px;margin-bottom:6px;cursor:pointer" onclick="openCwItemPrice(\''+i.id+'\')"><div class="t-top"><div class="t-title">'+escHtml(i.name)+
+      '<div class="t-meta">Retail '+money(i.retail)+' · Cost '+(i.cost>0?money(i.cost):'not set')+(i.custom?' · default '+money(i.default):'')+'</div></div>'+
+      '<span class="t-pill '+(i.custom?'open':'ok')+'">'+money(i.price)+(i.custom?' ★':'')+' ✏️</span></div>'+
+      '<div id="cwpe_'+i.id+'"></div></div>';
+  const main=rows.filter(i=>i.section==='main'), all=rows.filter(i=>i.section!=='main');
+  const head=t=>'<div style="font-size:12px;font-weight:700;color:var(--hint);margin:10px 0 6px">'+t+'</div>';
   document.getElementById('cwPriceList').innerHTML=
-    '<div class="t-meta" style="margin:0 0 6px">'+rows.length+' subscription'+(rows.length===1?'':'s')+' · retail / your cost → their price · ★ = custom price</div>'+
-    (rows.map(i=>'<div class="t-card" style="padding:9px 13px;margin-bottom:6px"><div class="t-top"><div class="t-title">'+escHtml(i.name)+
-      '<div class="t-meta">Retail '+money(i.retail)+' · Cost '+(i.cost>0?money(i.cost):'not set')+'</div></div>'+
-      '<span class="t-pill '+(i.custom?'open':'ok')+'">'+money(i.price)+(i.custom?' ★':'')+'</span></div></div>').join('')||'<div class="search-empty">No subscription matches.</div>');
+    '<div class="t-meta" style="margin:0 0 6px">'+rows.length+' subscription'+(rows.length===1?'':'s')+' · tap one to set its own price · ★ = own price (beats the default %)</div>'+
+    (main.length?head('iMD, Uptodate, Amboss & others')+main.map(row).join(''):'')+
+    (all.length?head('All Subscriptions tab')+all.map(row).join(''):'')+
+    (rows.length?'':'<div class="search-empty">No subscription matches.</div>');
+}
+// One subscription's own price for this coworker (19 Nov 2026): it beats their default percentage; "Use default" removes it.
+function openCwItemPrice(itemId){
+  document.querySelectorAll('[id^="cwpe_"]').forEach(e=>{ e.innerHTML=''; });
+  const i=cwPrices.items.find(x=>x.id===itemId), box=document.getElementById('cwpe_'+itemId); if(!i||!box) return;
+  box.innerHTML='<div onclick="event.stopPropagation()" style="margin-top:8px">'+
+    '<div class="t-meta" style="margin-bottom:6px">Default (from the %): '+money(i.default)+'. A price here is used instead.</div>'+
+    '<div style="display:flex;gap:8px"><input id="cwpeIn" class="cw-input" type="number" inputmode="decimal" min="0" step="0.01" placeholder="Price in $" value="'+(i.custom?i.price:'')+'" style="flex:1;margin:0">'+
+    '<button class="btn" style="margin:0;width:auto;padding:9px 14px" onclick="saveCwItemPrice(\''+itemId+'\',false)">Save</button></div>'+
+    (i.custom?'<button class="tk-btn" style="margin-top:6px" onclick="saveCwItemPrice(\''+itemId+'\',true)">↩️ Use default ('+money(i.default)+')</button>':'')+
+    '<div id="cwpeMsg" style="font-size:12px;margin-top:4px;min-height:14px"></div></div>';
+  const inp=document.getElementById('cwpeIn'); if(inp) inp.focus();
+}
+async function saveCwItemPrice(itemId,useDefault){
+  const msg=document.getElementById('cwpeMsg'); let price=null;
+  if(!useDefault){
+    const raw=(document.getElementById('cwpeIn').value||'').trim(); price=parseFloat(raw);
+    if(raw===''||!(price>0)){ msg.style.color='#dc2626'; msg.textContent='Enter a price above 0.'; return; }
+  }
+  msg.style.color='var(--hint)'; msg.textContent='Saving…';
+  try{
+    const r=await adminPost('/api/admin_coworker_action',{action:'price',id:cwPrices.id,item_id:itemId,price});
+    const i=cwPrices.items.find(x=>x.id===itemId); i.custom=r.custom; i.price=r.price; i.default=r.default;
+    drawCoworkerPricesList();
+    showToast(r.custom?'Price saved: '+money(r.price):'Back to the default: '+money(r.default));
+  }catch(e){ msg.style.color='#dc2626'; msg.textContent=e.message; }
 }
 async function saveCostPct(id){
   const raw=document.getElementById('cwCostPct').value.trim(), v=parseFloat(raw);

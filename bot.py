@@ -13175,11 +13175,23 @@ async def http_admin_coworker_prices(request):
     overrides = db_get_coworker_price_overrides(cid)
     cost_pct = db_get_coworker_cost_pct(cid)
     items = []
-    for i in sorted((x for x in PANEL_TAB_ITEM_IDS if x in MENU), key=lambda x: (MENU[x][0].lower(), x)):
+    for i in coworker_priced_items():
+        default = coworker_default_price(i, MENU[i][1], coworker[3], cost_pct, costs)
         items.append({"id": i, "name": MENU[i][0], "retail": MENU[i][1], "cost": costs.get(i, 0.0), "custom": i in overrides,
-                      "price": overrides.get(i, coworker_default_price(i, MENU[i][1], coworker[3], cost_pct, costs))})
+                      "default": default, "price": overrides.get(i, default),
+                      "section": "all" if i in PANEL_TAB_ITEM_IDS else "main"})
     return web.json_response({"ok": True, "name": coworker[1], "pct": coworker[3], "cost_pct": db_get_coworker_cost_pct(cid),
                               "items": items}, headers=_imd_search_cors_headers())
+
+
+def coworker_priced_items() -> list:
+    """Every subscription on sale that a coworker can get a price for (19 Nov 2026): the main ones (iMD, Uptodate,
+    Amboss, the AI bots, More Subscriptions…) in the shop's order, then the All Subscriptions tab A-Z."""
+    main = [i for i in all_toggleable_items() if i in MENU and i not in PANEL_TAB_ITEM_IDS]
+    main += [i for i in sorted(MANUAL_ACCESS_ITEMS) if i in MENU and i not in main
+             and not ITEM_OVERRIDES.get(i, (None, None, None, False))[3]]
+    panel = sorted((x for x in PANEL_TAB_ITEM_IDS if x in MENU), key=lambda x: (MENU[x][0].lower(), x))
+    return list(dict.fromkeys(main + panel))
 
 
 async def http_admin_coworker_ledger(request):
@@ -13293,6 +13305,30 @@ async def http_admin_coworker_action(request):
     def text(key, limit):
         v = data.get(key)
         return v.strip() if isinstance(v, str) and 0 < len(v.strip()) <= limit else None
+
+    if action == "price":
+        # One subscription's own price for this coworker (19 Nov 2026): beats their default % (price=None goes back to it).
+        try:
+            cid = int(data.get("id"))
+        except (TypeError, ValueError):
+            cid = None
+        coworker = db_get_coworker(cid) if cid is not None else None
+        if not coworker:
+            return _admin_bad("That coworker no longer exists.", 404)
+        item_id, price = data.get("item_id"), data.get("price")
+        if not isinstance(item_id, str) or item_id not in MENU:
+            return _admin_bad("Unknown subscription.")
+        if price is not None:
+            if isinstance(price, bool) or not isinstance(price, (int, float)) or not math.isfinite(price) \
+                    or price <= 0 or price > 10000:
+                return _admin_bad("Enter a price above 0.")
+            price = round(float(price), 2)
+        db_set_coworker_item_price(cid, item_id, price)
+        costs = db_get_item_costs()
+        default = coworker_default_price(item_id, MENU[item_id][1], coworker[3], db_get_coworker_cost_pct(cid), costs)
+        logger.info("Admin set coworker %s's price for %s: %s", cid, item_id, price if price is not None else f"default ({default})")
+        return web.json_response({"ok": True, "item_id": item_id, "custom": price is not None,
+                                  "price": price if price is not None else default, "default": default}, headers=headers)
 
     if action == "add":
         name, username, password, pct = text("name", 60), text("username", 40), text("password", 100), _clean_pct(data.get("pct"))
