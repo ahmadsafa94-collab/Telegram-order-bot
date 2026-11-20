@@ -51,6 +51,7 @@ from sales_excel import build_sales_workbook
 import auto_sites
 import renewals
 
+from telegram.error import NetworkError, TimedOut
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -8239,13 +8240,27 @@ def _sales_excel_file(until_local_day):
     return data, caption
 
 
+SALES_EXCEL_TRIES = 3
+
+
 async def send_sales_excel(bot, chat_id: int, until_local_day, title: str):
+    """Telegram is sometimes slow to take a file (TimedOut after 5 s on 20 Nov 2026): longer waits, and up to 3 tries
+    with a pause between them before it counts as failed."""
     data, caption = _sales_excel_file(until_local_day)
-    await bot.send_document(
-        chat_id=chat_id,
-        document=InputFile(io.BytesIO(data), filename="Medic_Accounts_sales.xlsx"),
-        caption=f"{title}\n\n{caption}\n\nCosts per account: 📦 Manage Stock → product → 💲 Edit Cost.",
-    )
+    for attempt in range(1, SALES_EXCEL_TRIES + 1):
+        try:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=InputFile(io.BytesIO(data), filename="Medic_Accounts_sales.xlsx"),
+                caption=f"{title}\n\n{caption}\n\nCosts per account: 📦 Manage Stock → product → 💲 Edit Cost.",
+                read_timeout=60, write_timeout=60, connect_timeout=20,
+            )
+            return
+        except (TimedOut, NetworkError) as exc:
+            if attempt == SALES_EXCEL_TRIES:
+                raise
+            logger.warning("Sales Excel: Telegram didn't take it (%s), try %s of %s", exc, attempt, SALES_EXCEL_TRIES)
+            await asyncio.sleep(10 * attempt)
 
 
 async def admin_sales_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
