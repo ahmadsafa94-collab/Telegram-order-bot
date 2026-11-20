@@ -12401,6 +12401,39 @@ def delivery_template_kind(item_id: str) -> str:
     return "other"
 
 
+UTD_WARN_APP = ("❌🛑 STRICTLY , DO NOT USE the account on the browser (web) or try to change the password as this will lead "
+                "to blocking the account by Uptodate and it cant be restored. Use the account on the mobile app only.")
+UTD_WARN_WEB = ("❌🛑 STRICTLY , DO NOT USE the account of the app on the official website or try to change the password as "
+                "this will lead to blocking the account by Uptodate and it cant be restored. Use the account on the mobile "
+                "app only.")
+UTD_RENEW_NOTE = ("♦️ Uptodate account we gave you will automatically be disabled after 3 months, and we will automatically "
+                  "renew it for you. You dont have to do anything about it. ")
+UTD_LOSE_NOTE = "♦️ If you lose access to the account you bought, just contact us to renew your subscription or fix it."
+UTD_WEB_SUFFIX = "_web"   # the website login is the app username + _web, same password (owner, 20 Nov 2026)
+
+
+def uptodate_delivery_form(item_id: str, username: str, password: str, day=None) -> str:
+    """The ready-made delivery message (the Mini App's 📤 Send form, deliveryTemplate in index.html) filled in with
+    the credentials, for an UpToDate account @Utdreg_bot registered: app + website plans get the website login
+    (username + _web, same password) too (owner, 20 Nov 2026)."""
+    title, duration = delivery_title_duration(MENU.get(item_id, (item_id,))[0])
+    duration = duration or "1 Year"
+    day = day or (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date()
+    date = day.strftime("%d/%m/%Y")
+    guarantee = f"♦️Your subscription is guaranteed the whole duration of {duration.lower()}."
+    if delivery_template_kind(item_id) == "uptodate_web":
+        lines = [f"Subscription:  {title}", f"Date: {date} ({duration})", "", "",
+                 "✅ App credentials: (dont use on website) ", f"Username: {username}", f"Password: {password}", "", "",
+                 "✅ Website Credentials through utd.libook.xyz ", f"Username: {username}{UTD_WEB_SUFFIX}",
+                 f"Password: {password}", "", "", "", "Remarks:", "", UTD_WARN_WEB, "", "", UTD_RENEW_NOTE, "",
+                 guarantee, "", UTD_LOSE_NOTE]
+    else:
+        lines = [f"Subscription: {title} - {duration.lower()}", f"Date: {date}", "", f"Username: {username}",
+                 f"Password: {password}", "", "", "", "Remarks:", "", UTD_WARN_APP, "", "", UTD_RENEW_NOTE, "",
+                 guarantee, "", UTD_LOSE_NOTE]
+    return "\n".join(lines)
+
+
 def delivery_title_duration(name: str):
     """('Uptodate Online - Mobile App', '1 Year') from 'Uptodate Online 1 Year - Mobile App'."""
     m = re.search(r"\b(\d+)\s*(years?|months?)\b", name, re.I)
@@ -20359,7 +20392,9 @@ async def http_deliver_unit(request):
         return web.json_response({"error": "the order isn't paid"}, status=409)
     if row[5] == "delivered":
         return web.json_response({"ok": True, "status": "already_delivered"})
-    text = ("✅ Your UpToDate account is renewed.\n\n" if kind == "renew" else "") + f"Username: {username}\nPassword: {password}"
+    # a new account goes out as the ready-made form, filled in (owner, 20 Nov 2026); a renewal as before
+    text = ("✅ Your UpToDate account is renewed.\n\nUsername: {u}\nPassword: {p}".format(u=username, p=password)
+            if kind == "renew" else uptodate_delivery_form(row[3], username, password))
     try:
         result = await _deliver_credentials(_HttpContext(request.app["application"], ADMIN_CHAT_ID), fid, text,
                                             access=access or None, only_if_undelivered=True,
