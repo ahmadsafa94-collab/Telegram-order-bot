@@ -303,12 +303,12 @@ def enqueue_rows(db_path: str, tab: str, rows: list):
     conn.close()
 
 
-def enqueue_row_below(db_path: str, tab: str, row: list, username: str):
+def enqueue_row_below(db_path: str, tab: str, row: list, username: str, number: str = ""):
     """A row that goes right under `username`'s UpToDate row (the one a renewal changes), e.g. the new year of a
     renewed subscription (owner, 20 Nov 2026); at the bottom when the username isn't there."""
     conn = sqlite3.connect(db_path)
     conn.execute("INSERT INTO sheet_outbox (kind, tab, payload, created_at) VALUES ('row_below', ?, ?, ?)",
-                 (tab, json.dumps({"row": row, "username": username}), datetime.utcnow().isoformat(timespec="seconds")))
+                 (tab, json.dumps({"row": row, "username": username, "number": number}), datetime.utcnow().isoformat(timespec="seconds")))
     conn.commit()
     conn.close()
 
@@ -586,24 +586,31 @@ def _utd_row(rows: list, username: str) -> tuple:
 
 
 async def _insert_below(db_path: str, oid: int, tab: str, payload: dict, retry: bool) -> str:
-    """The row goes in a new (pink) row right under the username's UpToDate row; at the bottom when it isn't there."""
+    """The row goes in a new (pink) row right under the old subscription's row: the one whose M has this renewal's R
+    number (set just before by _apply_renewal), else the username's UpToDate row; at the bottom when it isn't there.
+    Inserted and filled in one request, so a failure never leaves an empty row behind."""
     row = payload["row"]
     if retry and not await _rows_not_in_sheet(db_path, tab, oid, [row]):
         return "already in the sheet, not added again"
     rows = await read_tab(tab)
-    hit, why = _utd_row(rows, payload.get("username"))
+    want, number = (payload.get("username") or "").strip().lower(), (payload.get("number") or "").strip()
+    cell = lambda r, i: (r[i] if len(r) > i else "").strip()
+    marked = [i for i, r in enumerate(rows) if i > 0 and number and cell(r, 5).lower() == want
+              and number in [x.strip() for x in cell(r, 12).split(",")]]
+    hit = marked[-1] if marked else None
     if hit is None:
-        return f"{await _send_rows(db_path, oid, tab, [row], retry=False)} (at the bottom: {why})"
+        hit, why = _utd_row(rows, payload.get("username"))
+        if hit is None:
+            return f"{await _send_rows(db_path, oid, tab, [row], retry=False)} (at the bottom: {why})"
     gid = await _ensure_tab(tab)
     n = hit + 2                                    # the sheet row number of the new row
+    cells = [{"userEnteredValue": {"stringValue": "" if v is None else str(v)},
+              "userEnteredFormat": {"backgroundColor": PINK}} for v in row]
     await _call("POST", f"{SHEETS_API}/{sheet_id()}:batchUpdate", json={"requests": [
         {"insertDimension": {"range": {"sheetId": gid, "dimension": "ROWS", "startIndex": n - 1, "endIndex": n},
-                             "inheritFromBefore": True}},
-        {"repeatCell": {"range": {"sheetId": gid, "startRowIndex": n - 1, "endRowIndex": n, "startColumnIndex": 0,
-                                  "endColumnIndex": len(HEADER)},
-                        "cell": {"userEnteredFormat": {"backgroundColor": PINK}}, "fields": "userEnteredFormat.backgroundColor"}}]})
-    await _call("PUT", f"{SHEETS_API}/{sheet_id()}/values/{_a1(tab, f'A{n}:M{n}')}",
-                params={"valueInputOption": "RAW"}, json={"values": [row]})
+                             "inheritFromBefore": False}},
+        {"updateCells": {"start": {"sheetId": gid, "rowIndex": n - 1, "columnIndex": 0}, "rows": [{"values": cells}],
+                         "fields": "userEnteredValue,userEnteredFormat"}}]})
     return f"row {n} (below row {n - 1}, {payload.get('username')})"
 
 

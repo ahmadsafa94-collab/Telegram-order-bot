@@ -1532,7 +1532,8 @@ def _queue_sheet_row(order_id: int, user_id: int, item_id: str, message: str, ac
     try:
         tab, sheet_row = _sheet_row_for(order_id, user_id, item_id, message, access)
         if below and tab == dsheet.MAIN_TAB:
-            dsheet.enqueue_row_below(DB_PATH, tab, sheet_row, below)
+            username, _, number = below.partition("|")
+            dsheet.enqueue_row_below(DB_PATH, tab, sheet_row, username, number)
         else:
             dsheet.enqueue_row(DB_PATH, tab, sheet_row)
     except Exception:
@@ -20404,7 +20405,8 @@ async def http_deliver_unit(request):
                                             access=access or None, only_if_undelivered=True,
                                             sheet_row=bool(body.get("sheet_row", True)),
                                             # a renewal for another year: its new row right under the old one
-                                            sheet_below=username if kind == "renew" and body.get("sheet_below") else "")
+                                            sheet_below=(f"{username}|{str(body.get('number') or '').strip()[:20]}"
+                                                         if kind == "renew" and body.get("sheet_below") else ""))
     except UnitAlreadyDelivered:
         return web.json_response({"ok": True, "status": "already_delivered"})
     except Exception as exc:
