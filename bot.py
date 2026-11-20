@@ -3493,6 +3493,13 @@ def db_create_order(user_id: int, username: str, items: dict, total: float) -> i
     return order_id
 
 
+def _order_coworker_id(order_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT coworker_id FROM orders WHERE id = ?", (order_id,)).fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None
+
+
 def db_get_order(order_id: int):
     # Explicit column list (not SELECT *) so existing code that unpacks this
     # tuple keeps working even after new columns are added to the table.
@@ -12417,6 +12424,21 @@ UTD_LOSE_NOTE = "♦️ If you lose access to the account you bought, just conta
 UTD_WEB_SUFFIX = "_web"   # the website login is the app username + _web, same password (owner, 20 Nov 2026)
 
 
+UTD_COWORKER_REMARK = ("❌🛑 Use this account on the UpToDate mobile app only (not on the website), and don't change "
+                       "its password: either gets the account blocked by UpToDate.")
+
+
+def coworker_credentials_text(item_id: str, username: str, password: str) -> str:
+    """For a coworker's order just the login (owner, 20 Nov 2026), no template text; an UpToDate plan adds the one
+    remark (app only, no password change), and an app + website plan the website login too."""
+    lines = [f"Username: {username}", f"Password: {password}"]
+    if delivery_template_kind(item_id) == "uptodate_web":
+        lines += ["", "Website (utd.libook.xyz):", f"Username: {username}{UTD_WEB_SUFFIX}", f"Password: {password}"]
+    if delivery_template_kind(item_id).startswith("uptodate"):
+        lines += ["", UTD_COWORKER_REMARK]
+    return "\n".join(lines)
+
+
 def uptodate_delivery_form(item_id: str, username: str, password: str, day=None) -> str:
     """The ready-made delivery message (the Mini App's 📤 Send form, deliveryTemplate in index.html) filled in with
     the credentials, for an UpToDate account @Utdreg_bot registered: app + website plans get the website login
@@ -20397,8 +20419,10 @@ async def http_deliver_unit(request):
         return web.json_response({"error": "the order isn't paid"}, status=409)
     if row[5] == "delivered":
         return web.json_response({"ok": True, "status": "already_delivered"})
-    # a new account and a renewal both go out as the ready-made form, filled in (owner, 20 Nov 2026)
-    text = uptodate_delivery_form(row[3], username, password)
+    # a new account and a renewal both go out as the ready-made form, filled in; a coworker's order just the login
+    # and the app-only remark (owner, 20 Nov 2026)
+    text = (coworker_credentials_text(row[3], username, password) if _order_coworker_id(order_id)
+            else uptodate_delivery_form(row[3], username, password))
     try:
         result = await _deliver_credentials(_HttpContext(request.app["application"], ADMIN_CHAT_ID), fid, text,
                                             access=access or None, only_if_undelivered=True,

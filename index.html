@@ -2104,7 +2104,16 @@ const TPL_WARN_WEB='❌🛑 STRICTLY , DO NOT USE the account of the app on the 
 const TPL_UP_RENEW='♦️ Uptodate account we gave you will automatically be disabled after 3 months, and we will automatically renew it for you. You dont have to do anything about it. ';
 const TPL_LOSE='♦️ If you lose access to the account you bought, just contact us to renew your subscription or fix it.';
 const TPL_AMBOSS=['♦️Though the account is personal, You cant change the username or password to keep the license active.',' ','♦️If you face any problems, kindly contact us to fix it.'];
+const TPL_CW_UTD='❌🛑 Use this account on the UpToDate mobile app only (not on the website), and don\'t change its password: either gets the account blocked by UpToDate.';
 function deliveryTemplate(i){
+  // a coworker's order: just the login (+ the app-only remark for UpToDate), no template text (owner, 20 Nov 2026)
+  if(i.via){
+    const utd=(i.template||'').indexOf('uptodate')===0;
+    const l=['Username: ','Password: '];
+    if(i.template==='uptodate_web') l.push('','Website (utd.libook.xyz):','Username: ','Password: ');
+    if(utd) l.push('',TPL_CW_UTD);
+    return l.join('\n');
+  }
   const date=new Date().toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
   const dur=i.duration||'1 Year', durl=dur.toLowerCase(), title=i.title||i.name;
   const guar='♦️Your subscription is guaranteed the whole duration of '+durl+'.';
