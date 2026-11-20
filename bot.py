@@ -20397,9 +20397,8 @@ async def http_deliver_unit(request):
         return web.json_response({"error": "the order isn't paid"}, status=409)
     if row[5] == "delivered":
         return web.json_response({"ok": True, "status": "already_delivered"})
-    # a new account goes out as the ready-made form, filled in (owner, 20 Nov 2026); a renewal as before
-    text = ("✅ Your UpToDate account is renewed.\n\nUsername: {u}\nPassword: {p}".format(u=username, p=password)
-            if kind == "renew" else uptodate_delivery_form(row[3], username, password))
+    # a new account and a renewal both go out as the ready-made form, filled in (owner, 20 Nov 2026)
+    text = uptodate_delivery_form(row[3], username, password)
     try:
         result = await _deliver_credentials(_HttpContext(request.app["application"], ADMIN_CHAT_ID), fid, text,
                                             access=access or None, only_if_undelivered=True,
