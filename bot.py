@@ -20172,13 +20172,20 @@ async def send_db_backup(bot, chat_id: int, caption_prefix: str = "Database back
     if not os.path.exists(DB_PATH):
         return False
     with open(DB_PATH, "rb") as f:
-        await bot.send_document(
-            chat_id=chat_id,
-            document=f,
-            filename=f"orders_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
-            caption=f"{caption_prefix} — {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}",
-        )
-    return True
+        data = f.read()
+    name = f"orders_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+    caption = f"{caption_prefix} — {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}"
+    # Telegram can be slow to take the file (TimedOut after 5 s on 20 Nov 2026): long waits, up to 3 tries
+    for attempt in range(1, SALES_EXCEL_TRIES + 1):
+        try:
+            await bot.send_document(chat_id=chat_id, document=InputFile(io.BytesIO(data), filename=name), caption=caption,
+                                    read_timeout=120, write_timeout=120, connect_timeout=20)
+            return True
+        except (TimedOut, NetworkError) as exc:
+            if attempt == SALES_EXCEL_TRIES:
+                raise
+            logger.warning("Backup: Telegram didn't take it (%s), try %s of %s", exc, attempt, SALES_EXCEL_TRIES)
+            await asyncio.sleep(10 * attempt)
 
 
 async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
