@@ -1482,7 +1482,7 @@ def db_init():
 
 
 def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, message_id: int = None,
-                    access: str = None, sheet_row: bool = True) -> int:
+                    access: str = None, sheet_row: bool = True, sheet_below: str = "") -> int:
     """Records one delivered subscription. An order with several products
     produces several rows here, so 'My Subscriptions' can list them
     separately instead of lumping a whole order into one entry.
@@ -1500,7 +1500,7 @@ def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, mes
     conn.commit()
     conn.close()
     if sheet_row:   # a renewal @Utdreg_bot already wrote into its existing row doesn't get a second one
-        _queue_sheet_row(order_id, user_id, item_id, message, access)
+        _queue_sheet_row(order_id, user_id, item_id, message, access, below=sheet_below)
     return delivery_id
 
 
@@ -1525,12 +1525,16 @@ def _sheet_row_for(order_id: int, user_id: int, item_id: str, message: str, acce
     return (dsheet.IMD_TAB if imd else dsheet.MAIN_TAB), sheet_row
 
 
-def _queue_sheet_row(order_id: int, user_id: int, item_id: str, message: str, access: str = None):
+def _queue_sheet_row(order_id: int, user_id: int, item_id: str, message: str, access: str = None, below: str = ""):
     """A row for the owner's delivered-subscriptions sheet (sent to Google by sheet_outbox_job). Never lets a
-    delivery fail."""
+    delivery fail. `below`: a username whose UpToDate row the new one goes right under (a paid renewal for another
+    year, owner 20 Nov 2026); at the bottom when that username isn't in the sheet."""
     try:
         tab, sheet_row = _sheet_row_for(order_id, user_id, item_id, message, access)
-        dsheet.enqueue_row(DB_PATH, tab, sheet_row)
+        if below and tab == dsheet.MAIN_TAB:
+            dsheet.enqueue_row_below(DB_PATH, tab, sheet_row, below)
+        else:
+            dsheet.enqueue_row(DB_PATH, tab, sheet_row)
     except Exception:
         logger.exception("Couldn't queue the delivered-sheet row for order #%s (%s)", order_id, item_id)
 
@@ -18745,7 +18749,7 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _deliver_credentials(context, fulfilment_id: int, credentials_text: str, on_delivered=None, access: str = None,
-                               only_if_undelivered: bool = False, sheet_row: bool = True):
+                               only_if_undelivered: bool = False, sheet_row: bool = True, sheet_below: str = ""):
     """Sends the account details to the customer and marks that unit delivered, exactly
     as the 📤 Send Credentials chat flow always did. Used by that flow and by the admin
     Shop's Pending Orders tab. Returns (item name, order id, delivery id), or None when the
@@ -18771,7 +18775,7 @@ async def _deliver_credentials(context, fulfilment_id: int, credentials_text: st
         await send_delivery_promo(context, user_id)
         db_save_delivery(order_id, credentials_text)
         delivery_id = db_add_delivery(order_id, user_id, item_id, credentials_text, sent_message.message_id, access=access,
-                                      sheet_row=sheet_row)
+                                      sheet_row=sheet_row, sheet_below=sheet_below)
         await post_subscription_to_channel(context, order_id, item_id, credentials_text)
         if item_id in IMD_TRIGGER_ITEMS:
             db_use_held_serials(order_id)
@@ -20398,7 +20402,9 @@ async def http_deliver_unit(request):
     try:
         result = await _deliver_credentials(_HttpContext(request.app["application"], ADMIN_CHAT_ID), fid, text,
                                             access=access or None, only_if_undelivered=True,
-                                            sheet_row=bool(body.get("sheet_row", True)))
+                                            sheet_row=bool(body.get("sheet_row", True)),
+                                            # a renewal for another year: its new row right under the old one
+                                            sheet_below=username if kind == "renew" and body.get("sheet_below") else "")
     except UnitAlreadyDelivered:
         return web.json_response({"ok": True, "status": "already_delivered"})
     except Exception as exc:

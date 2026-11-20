@@ -303,13 +303,27 @@ def enqueue_rows(db_path: str, tab: str, rows: list):
     conn.close()
 
 
+def enqueue_row_below(db_path: str, tab: str, row: list, username: str):
+    """A row that goes right under `username`'s UpToDate row (the one a renewal changes), e.g. the new year of a
+    renewed subscription (owner, 20 Nov 2026); at the bottom when the username isn't there."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("INSERT INTO sheet_outbox (kind, tab, payload, created_at) VALUES ('row_below', ?, ?, ?)",
+                 (tab, json.dumps({"row": row, "username": username}), datetime.utcnow().isoformat(timespec="seconds")))
+    conn.commit()
+    conn.close()
+
+
+def _payload_rows(kind: str, payload: str) -> list:
+    data = json.loads(payload)
+    return data if kind == "rows" else [data["row"]] if kind == "row_below" else [data]
+
+
 def queued_rows(db_path: str, tab: str) -> list:
-    """Every row queued for a tab so far (sent or not), from single and batched entries."""
+    """Every row queued for a tab so far (sent or not), from single, batched and placed entries."""
     conn = sqlite3.connect(db_path)
     out = []
-    for kind, payload in conn.execute("SELECT kind, payload FROM sheet_outbox WHERE tab = ? AND kind IN ('row', 'rows')", (tab,)):
-        data = json.loads(payload)
-        out.extend(data if kind == "rows" else [data])
+    for kind, payload in conn.execute("SELECT kind, payload FROM sheet_outbox WHERE tab = ? AND kind IN ('row', 'rows', 'row_below')", (tab,)):
+        out.extend(_payload_rows(kind, payload))
     conn.close()
     return out
 
@@ -557,22 +571,51 @@ def next_renewal(renewed: date, expiry) -> str:
     return nxt.strftime("%d%m%y")
 
 
-async def _apply_renewal(tab: str, payload: dict) -> str:
-    """The row of that UpToDate account gets the next renewal date (owner, 18 Nov 2026). The same username can also be
-    on another product's row (Amboss, iMD, UpToDate AI codes …), which is never changed. A row named UTD / UpToDate
-    comes first, then a row with any other name (e.g. only the university); among them the newest one we renew
-    (C a date or empty), else the newest (`_renewal_order`)."""
-    rows = await read_tab(tab)
-    want = (payload.get("username") or "").strip().lower()
+def _utd_row(rows: list, username: str) -> tuple:
+    """(index in rows of the UpToDate row a renewal of `username` goes to, None) or (None, why not)."""
+    want = (username or "").strip().lower()
     cell = lambda r, i: (r[i] if len(r) > i else "").strip()
     mine = [i for i, r in enumerate(rows) if i > 0 and want and cell(r, 5).lower() == want]
     utd = [i for i in mine if row_kind(cell(rows[i], 0)) != "other"]
     if not utd:
         if mine:
             others = ", ".join(f"row {i + 1}: {cell(rows[i], 0) or '(no name)'}" for i in mine[::-1][:3])
-            return f"{payload.get('username')} isn't in column F on an UpToDate row (only {others})"
-        return f"{payload.get('username')} isn't in column F"
-    hit = max(utd, key=lambda i: _renewal_order(cell(rows[i], 0), cell(rows[i], 2), i))
+            return None, f"{username} isn't in column F on an UpToDate row (only {others})"
+        return None, f"{username} isn't in column F"
+    return max(utd, key=lambda i: _renewal_order(cell(rows[i], 0), cell(rows[i], 2), i)), ""
+
+
+async def _insert_below(db_path: str, oid: int, tab: str, payload: dict, retry: bool) -> str:
+    """The row goes in a new (pink) row right under the username's UpToDate row; at the bottom when it isn't there."""
+    row = payload["row"]
+    if retry and not await _rows_not_in_sheet(db_path, tab, oid, [row]):
+        return "already in the sheet, not added again"
+    rows = await read_tab(tab)
+    hit, why = _utd_row(rows, payload.get("username"))
+    if hit is None:
+        return f"{await _send_rows(db_path, oid, tab, [row], retry=False)} (at the bottom: {why})"
+    gid = await _ensure_tab(tab)
+    n = hit + 2                                    # the sheet row number of the new row
+    await _call("POST", f"{SHEETS_API}/{sheet_id()}:batchUpdate", json={"requests": [
+        {"insertDimension": {"range": {"sheetId": gid, "dimension": "ROWS", "startIndex": n - 1, "endIndex": n},
+                             "inheritFromBefore": True}},
+        {"repeatCell": {"range": {"sheetId": gid, "startRowIndex": n - 1, "endRowIndex": n, "startColumnIndex": 0,
+                                  "endColumnIndex": len(HEADER)},
+                        "cell": {"userEnteredFormat": {"backgroundColor": PINK}}, "fields": "userEnteredFormat.backgroundColor"}}]})
+    await _call("PUT", f"{SHEETS_API}/{sheet_id()}/values/{_a1(tab, f'A{n}:M{n}')}",
+                params={"valueInputOption": "RAW"}, json={"values": [row]})
+    return f"row {n} (below row {n - 1}, {payload.get('username')})"
+
+
+async def _apply_renewal(tab: str, payload: dict) -> str:
+    """The row of that UpToDate account gets the next renewal date (owner, 18 Nov 2026). The same username can also be
+    on another product's row (Amboss, iMD, UpToDate AI codes …), which is never changed. A row named UTD / UpToDate
+    comes first, then a row with any other name (e.g. only the university); among them the newest one we renew
+    (C a date or empty), else the newest (`_renewal_order`)."""
+    rows = await read_tab(tab)
+    hit, why = _utd_row(rows, payload.get("username"))
+    if hit is None:
+        return why
     row = rows[hit]
     renewed = datetime.fromisoformat(payload["date"]).date() if payload.get("date") else date.today()
     expiry = parse_sheet_date(row[4]) if len(row) > 4 else None
@@ -605,10 +648,9 @@ async def _rows_not_in_sheet(db_path: str, tab: str, oid: int, rows: list) -> li
     in_sheet = Counter(_row_key(r) for r in await read_tab(tab))
     conn = sqlite3.connect(db_path)
     sent = Counter()
-    for kind, payload in conn.execute("SELECT kind, payload FROM sheet_outbox WHERE tab = ? AND kind IN ('row', 'rows') "
+    for kind, payload in conn.execute("SELECT kind, payload FROM sheet_outbox WHERE tab = ? AND kind IN ('row', 'rows', 'row_below') "
                                       "AND done_at IS NOT NULL AND id != ?", (tab, oid)):
-        data = json.loads(payload)
-        sent.update(_row_key(r) for r in (data if kind == "rows" else [data]))
+        sent.update(_row_key(r) for r in _payload_rows(kind, payload))
     conn.close()
     missing = []
     for r in rows:
@@ -645,7 +687,7 @@ async def flush(db_path: str, notify=None, quiet: set = ()) -> int:
         header_ok = False
         held_back = False
         for oid, kind, tab, payload, tries in pending:
-            if held_back and kind in ("edit", "renewal"):
+            if held_back and kind in ("edit", "renewal", "row_below"):
                 break   # it may change a row that is still waiting: keep the order, try again later
             try:
                 if not header_ok:
@@ -653,6 +695,7 @@ async def flush(db_path: str, notify=None, quiet: set = ()) -> int:
                     header_ok = True
                 data = json.loads(payload)
                 note = (await _apply_renewal(tab, data) if kind == "renewal" else await _apply_edit(tab, data) if kind == "edit"
+                        else await _insert_below(db_path, oid, tab, data, retry=tries > 0) if kind == "row_below"
                         else await _send_rows(db_path, oid, tab, data, retry=tries > 0) if kind == "rows"
                         else await _send_rows(db_path, oid, tab, [data], retry=tries > 0))
                 conn = sqlite3.connect(db_path)
