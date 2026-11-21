@@ -1295,6 +1295,13 @@ def db_init():
         conn.execute("ALTER TABLE deliveries ADD COLUMN access TEXT")
     except sqlite3.OperationalError:
         pass
+    # A subscription from before the bot, added from the Excel tab (owner, 21 Nov 2026): order_id 0 and the sheet
+    # row it came from (tab + a hash of A, B, D, F, G), so the same row isn't added twice for one customer.
+    try:
+        conn.execute("ALTER TABLE deliveries ADD COLUMN sheet_ref TEXT")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS deliveries_sheet_ref ON deliveries (sheet_ref, user_id)")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS fulfilment (
@@ -1549,7 +1556,7 @@ def backfill_imd_sheet_rows() -> int:
     marks = ",".join("?" * len(IMD_TRIGGER_ITEMS))
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(f"SELECT id, order_id, user_id, item_id, message, delivered_at, access FROM deliveries "
-                        f"WHERE item_id IN ({marks}) ORDER BY delivered_at, id", tuple(sorted(IMD_TRIGGER_ITEMS))).fetchall()
+                        f"WHERE item_id IN ({marks}) AND sheet_ref IS NULL ORDER BY delivered_at, id", tuple(sorted(IMD_TRIGGER_ITEMS))).fetchall()
     conn.close()
     by_order = {}
     for r in rows:
@@ -1615,12 +1622,13 @@ def db_get_delivery_admin(delivery_id: int):
 
 def db_update_delivery_message(delivery_id: int, message: str):
     conn = sqlite3.connect(DB_PATH)
-    old = conn.execute("SELECT order_id, item_id, message FROM deliveries WHERE id = ?", (delivery_id,)).fetchone()
+    old = conn.execute("SELECT order_id, item_id, message, sheet_ref FROM deliveries WHERE id = ?", (delivery_id,)).fetchone()
     conn.execute("UPDATE deliveries SET message = ? WHERE id = ?", (message, delivery_id))
     conn.commit()
     conn.close()
     # The delivered sheet follows: the row of this order (and the old username) gets the new username/password.
-    if old:
+    # A subscription added from the sheet (sheet_ref) has no order: its row is the owner's own, left as it is.
+    if old and not old[3]:
         try:
             old_user, _ = dsheet.credentials(old[2])
             user, password = dsheet.credentials(message)
@@ -1629,6 +1637,127 @@ def db_update_delivery_message(delivery_id: int, message: str):
                                     old[0], old_user, user, password)
         except Exception:
             logger.exception("Couldn't queue the delivered-sheet edit for delivery %s", delivery_id)
+
+
+
+# ── ➕ Add to delivered subscriptions: a subscription from before the bot, from the Excel tab (owner, 21 Nov 2026) ──
+# Only a deliveries row (order_id 0, sheet_ref set): no order, so it stays out of sales, statistics, coworker
+# figures, the admin's Delivered tab and @Utdreg_bot; nothing is queued for the sheet and nothing is sent unless asked.
+
+def sheet_row_ref(tab_key: str, cells) -> str:
+    """'main:…' / 'imd:…': the tab and a hash of A, B, D, F, G (trimmed, lower case)."""
+    c = dsheet.clean_cells(cells)
+    key = "\x1f".join(c[i].lower() for i in (0, 1, 3, 5, 6))
+    return f"{'imd' if tab_key == 'imd' else 'main'}:" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:24]
+
+
+def db_import_sheet_delivery(user_id: int, item_id: str, message: str, start_date, sheet_ref: str) -> int:
+    """The sheet's subscription in the customer's delivered subscriptions, dated from its start (column D).
+    sqlite3.IntegrityError when this row was already added for this customer."""
+    when = datetime.combine(start_date, datetime.min.time()).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.execute(
+            "INSERT INTO deliveries (order_id, user_id, item_id, message, message_id, delivered_at, access, sheet_ref) "
+            "VALUES (0, ?, ?, ?, NULL, ?, NULL, ?)", (user_id, item_id, message, when, sheet_ref))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def db_sheet_imports() -> dict:
+    """{sheet_ref: [{delivery_id, user_id, customer}]} of everything added from the Excel tab."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT d.id, d.sheet_ref, d.user_id, COALESCE(u.username, (SELECT o.username FROM orders o "
+                        "WHERE o.user_id = d.user_id AND o.username IS NOT NULL ORDER BY o.id DESC LIMIT 1)) FROM deliveries d "
+                        "LEFT JOIN users u ON u.user_id = d.user_id WHERE d.sheet_ref IS NOT NULL ORDER BY d.id").fetchall()
+    conn.close()
+    out = {}
+    for did, ref, uid, uname in rows:
+        out.setdefault(ref, []).append({"delivery_id": did, "user_id": uid, "customer": f"@{uname}" if uname else str(uid)})
+    return out
+
+
+_TME_RE = re.compile(r"^(?:https?://)?(?:www\.)?(?:t|telegram)\.me/@?([A-Za-z0-9_]{3,32})/?$", re.I)
+
+
+def resolve_customer_ref(text) -> tuple:
+    """(user_id, label, warning) for a Telegram ID, @username, bare username or t.me link. A username is looked up
+    (any case) among the bot's users, then its orders. ValueError with what to tell the admin otherwise."""
+    t = str(text or "").strip()
+    if not t:
+        raise ValueError("Type the customer's Telegram ID or @username.")
+    if re.fullmatch(r"\d{1,15}", t):
+        uid = int(t)
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT username FROM users WHERE user_id = ?", (uid,)).fetchone()
+        conn.close()
+        if row:
+            return uid, (f"@{row[0]}" if row[0] else str(uid)), ""
+        return uid, str(uid), ("This Telegram ID hasn't used the bot yet. It's added all the same and shows once "
+                               "they open the bot.")
+    m = _TME_RE.match(t)
+    name = m.group(1) if m else t.lstrip("@")
+    if not re.fullmatch(r"[A-Za-z0-9_]{3,32}", name):
+        raise ValueError("That isn't a Telegram ID or username. Type the numeric ID or @username.")
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT user_id, username FROM users WHERE LOWER(username) = LOWER(?) "
+                       "ORDER BY last_seen DESC LIMIT 1", (name,)).fetchone() or \
+        conn.execute("SELECT user_id, username FROM orders WHERE LOWER(username) = LOWER(?) "
+                     "ORDER BY id DESC LIMIT 1", (name,)).fetchone()
+    conn.close()
+    if not row:
+        raise ValueError(f"@{name} isn't known to the bot (no messages or orders under that username). "
+                         "Type their numeric Telegram ID instead.")
+    return row[0], f"@{row[1] or name}", ""
+
+
+def _sheet_duration_words(duration: str) -> str:
+    """'1y' / '1 Year' → '1 Year', '6m' → '6 Months'."""
+    d = (duration or "").strip().lower()
+    code = d if re.fullmatch(r"\d+[ymwd]", d) else dsheet.duration_code(d)
+    m = re.fullmatch(r"(\d+)([ymwd])", code or "")
+    if not m:
+        return ""
+    n = int(m.group(1))
+    unit = {"y": "Year", "m": "Month", "w": "Week", "d": "Day"}[m.group(2)]
+    return f"{n} {unit}{'s' if n != 1 else ''}"
+
+
+def sheet_import_keep_id(cells) -> str:
+    """The item id for 'keep the sheet's name': '<A> · <B>' (shown as is, MENU has no such id)."""
+    c = [re.sub(r"[<>]", "", x) for x in dsheet.clean_cells(cells)]   # shown as is in the customer's Mini App
+    return (f"{c[0]} · {c[1]}" if c[1] else c[0])[:120]
+
+
+def sheet_import_suggest(account: str, duration: str) -> str:
+    """The product whose name without the duration and whose duration match A and B, or ''."""
+    title = dsheet._norm(dsheet.title_only(account or ""))
+    if not title:
+        return ""
+    d = (duration or "").strip().lower()
+    code = d if re.fullmatch(r"\d+[ymwd]", d) else dsheet.duration_code(d)
+    hits = [iid for iid, v in MENU.items()
+            if dsheet._norm(dsheet.title_only(v[0])) == title and dsheet.duration_code(v[0]) == code]
+    return hits[-1] if hits else ""   # the newest of same-named products (legacy ones come first in MENU)
+
+
+def sheet_import_message(item_id: str, cells, start) -> str:
+    """The delivery message as the Mini App's 📤 Send form writes it, with the sheet's login and start date."""
+    c = dsheet.clean_cells(cells)
+    username, password = c[5], c[6]
+    if item_id in MENU and delivery_template_kind(item_id).startswith("uptodate"):
+        return uptodate_delivery_form(item_id, username, password, day=start)
+    if item_id in MENU:
+        title, duration = delivery_title_duration(MENU[item_id][0])
+    else:
+        title, duration = dsheet.title_only(c[0]) or c[0], ""
+    duration = duration or _sheet_duration_words(c[1]) or "1 Year"
+    lines = [f"Subscription: {title} - {duration.lower()}", f"Date: {start.strftime('%d/%m/%Y')}", "",
+             f"Username: {username}", f"Password: {password}", "", "", "", "Remarks:", "",
+             f"♦️Your subscription is guaranteed the whole duration of {duration.lower()}.", "", UTD_LOSE_NOTE]
+    return "\n".join(lines)
 
 
 
@@ -4835,6 +4964,8 @@ def subscriptions_keyboard(user_id: int):
     buttons = []
     for delivery_id, order_id, item_id, message, delivered_at in rows:
         name = MENU.get(item_id, (None,))[0] if item_id else None
+        if not name and not order_id and item_id:   # added from the Excel tab under the sheet's own name
+            name = item_id
         if not name:
             # Legacy rows saved before per-item tracking: fall back to the
             # order's product names so the button is still meaningful
@@ -12646,7 +12777,8 @@ def _sheet_auth(data: dict) -> tuple:
 
 async def http_admin_sheet(request):
     """POST {action, password | bio, …}: status | setpw {password, new} | rows {tab: main|imd, q} | file |
-    bio_on {password} → {token} | bio_off | add {tab, cells: [A…M]} | edit {tab, n, cells, expect: the row as shown}. Admin only, and everything but status and setting the first password needs
+    bio_on {password} → {token} | bio_off | add {tab, cells: [A…M]} | edit {tab, n, cells, expect: the row as shown} |
+    import_preview / import / unimport (➕ Add to delivered subscriptions, see _sheet_import). Admin only, and everything but status and setting the first password needs
     the sheet password or a phone's fingerprint key (bio)."""
     from aiohttp import web
     headers = _post_cors_headers()
@@ -12700,8 +12832,28 @@ async def http_admin_sheet(request):
             q = str(data.get("q") or "").strip().lower()
             hits = [x for x in numbered if q in " ".join(x[1]).lower()] if q else numbered
             shown = hits[-300:][::-1]   # newest first
+            key = "imd" if tab == dsheet.IMD_TAB else "main"
+            imports = db_sheet_imports()
             return web.json_response({"ok": True, "tab": tab, "header": header, "total": len(body), "matches": len(hits),
-                                      "rows": [{"n": n, "cells": r} for n, r in shown]}, headers=headers)
+                                      "rows": [{"n": n, "cells": r, "imported": [
+                                          {"delivery_id": x["delivery_id"], "customer": x["customer"]}
+                                          for x in imports.get(sheet_row_ref(key, r), [])]} for n, r in shown]},
+                                     headers=headers)
+        if action in ("import_preview", "import"):   # ➕ Add to delivered subscriptions (owner, 21 Nov 2026)
+            return await _sheet_import(request, data, action, headers)
+        if action == "unimport":
+            did = data.get("delivery_id")
+            if isinstance(did, bool) or not isinstance(did, int):
+                return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+            conn = sqlite3.connect(DB_PATH)
+            gone = conn.execute("DELETE FROM deliveries WHERE id = ? AND sheet_ref IS NOT NULL", (did,)).rowcount
+            conn.commit()
+            conn.close()
+            if not gone:
+                return web.json_response({"ok": False, "error": "That subscription isn't one added from the sheet "
+                                                                "(or it was already removed)."}, status=404, headers=headers)
+            logger.info("Delivered sheet: the admin removed imported delivery %s", did)
+            return web.json_response({"ok": True}, headers=headers)
         if action in ("add", "edit"):   # the owner's own rows, typed in the Mini App (18 Nov 2026)
             tab = dsheet.IMD_TAB if data.get("tab") == "imd" else dsheet.MAIN_TAB
             if not isinstance(data.get("cells"), list) or len(data["cells"]) > len(dsheet.HEADER) or (
@@ -12740,6 +12892,99 @@ async def http_admin_sheet(request):
         logger.exception("Delivered sheet: %s failed", action)
         return web.json_response({"ok": False, "error": f"Couldn't reach the sheet: {str(exc)[:200]}"}, status=502, headers=headers)
     return web.json_response({"ok": False, "error": "Unknown action"}, status=400, headers=headers)
+
+
+async def _sheet_import(request, data: dict, action: str, headers):
+    """import_preview {tab, n, expect, customer?, item_id?} → what the form shows; import {tab, n, expect, customer,
+    item_id, text, notify} → the subscription in that customer's delivered subscriptions (only a deliveries row)."""
+    from aiohttp import web
+    def fail(error, status=400):
+        return web.json_response({"ok": False, "error": error}, status=status, headers=headers)
+    key = "imd" if data.get("tab") == "imd" else "main"
+    tab = dsheet.IMD_TAB if key == "imd" else dsheet.MAIN_TAB
+    try:
+        n = int(data.get("n"))
+    except (TypeError, ValueError):
+        return fail("Invalid request")
+    if not isinstance(data.get("expect"), list):
+        return fail("Invalid request")
+    rows = await dsheet.read_tab(tab)
+    if n < 2 or n > len(rows):
+        return fail(f"Row {n} isn't in the sheet any more. Search again.", 404)
+    cells = dsheet.clean_cells(rows[n - 1])
+    if dsheet.clean_cells(data["expect"]) != cells:
+        return fail(f"Row {n} was changed in the sheet since you opened it. Search again.", 409)
+    start = dsheet.parse_sheet_date(cells[3])
+    if not start:
+        return fail(f"Column D (Date created) of row {n} isn't a date like 14/03/25, so the start date is unknown. "
+                    "Fix it with ✏️ Edit first.")
+    ref = sheet_row_ref(key, cells)
+    keep_id = sheet_import_keep_id(cells)
+    if not keep_id:
+        return fail("This row has no subscription name in column A.")
+    if action == "import_preview":
+        suggested = sheet_import_suggest(cells[0], cells[1])
+        item_id = data.get("item_id") if isinstance(data.get("item_id"), str) else ""
+        item_id = item_id if item_id in MENU or item_id == keep_id else (suggested or keep_id)
+        prefill = cells[10] if re.fullmatch(r"\d{1,15}", cells[10]) else (f"@{cells[11].lstrip('@')}" if cells[11] else "")
+        who = str(data["customer"]) if isinstance(data.get("customer"), str) else prefill
+        customer = {"text": who}
+        if who:
+            try:
+                uid, label, warn = resolve_customer_ref(who)
+                customer.update(user_id=uid, label=label, warning=warn)
+            except ValueError as exc:
+                customer["error"] = str(exc)
+        note = ""
+        if re.fullmatch(r"\d+", cells[9]):
+            conn = sqlite3.connect(DB_PATH)
+            had = conn.execute("SELECT user_id FROM deliveries WHERE order_id = ? AND sheet_ref IS NULL LIMIT 1",
+                               (int(cells[9]),)).fetchone()
+            conn.close()
+            if had:
+                uname = db_get_username(had[0])
+                note = (f"Order #{cells[9]} in column J was delivered by the bot, so it may already be in "
+                        f"{'@' + uname if uname else had[0]}'s subscriptions.")
+        products = sorted(({"id": iid, "name": v[0]} for iid, v in MENU.items()), key=lambda x: x["name"].lower())
+        return web.json_response({
+            "ok": True, "n": n, "start": start.strftime("%d/%m/%Y"), "suggested": suggested, "keep_id": keep_id,
+            "item_id": item_id, "products": products, "customer": customer, "note": note,
+            "text": sheet_import_message(item_id, cells, start),
+            "imported": [{"delivery_id": x["delivery_id"], "customer": x["customer"]} for x in db_sheet_imports().get(ref, [])],
+        }, headers=headers)
+    item_id, text = data.get("item_id"), data.get("text")
+    if not isinstance(item_id, str) or not (item_id in MENU or item_id == keep_id):
+        return fail("Pick the subscription.")
+    if not isinstance(text, str) or not text.strip() or len(text) > 3500:
+        return fail("Type the message the customer sees for this subscription.")
+    try:
+        user_id, label, _ = resolve_customer_ref(data.get("customer"))
+    except ValueError as exc:
+        return fail(str(exc))
+    if user_id == ADMIN_CHAT_ID:
+        return fail("That's your own account. Type the customer's Telegram ID or @username.")
+    cw = db_get_user_coworker(user_id)
+    if cw:
+        return fail(f"{label} is logged in as the coworker account “{cw[1]}”. Its subscriptions are its orders, so "
+                    "this can't be added there. Add it to the customer's own Telegram account.")
+    try:
+        did = db_import_sheet_delivery(user_id, item_id, text.strip(), start, ref)
+    except sqlite3.IntegrityError:
+        return fail(f"Already added for this customer ({label}).", 409)
+    name = MENU.get(item_id, (item_id,))[0]
+    logger.info("Delivered sheet: row %s of %s added to %s's subscriptions as delivery %s (%s, from %s)",
+                n, tab, user_id, did, item_id, start.isoformat())
+    note = f"Added to {label}'s subscriptions (from {start.strftime('%d/%m/%Y')}). They weren't told."
+    if data.get("notify") is True:
+        try:
+            await request.app["application"].bot.send_message(
+                chat_id=user_id, text=f"📦 Your {name} (from {start.strftime('%d/%m/%Y')}) was added to your "
+                                      "subscriptions. You'll find it under 📋 My Subscriptions.")
+            note = f"Added to {label}'s subscriptions (from {start.strftime('%d/%m/%Y')}) and they were told."
+        except Exception as exc:
+            logger.warning("Delivered sheet: couldn't tell %s about imported delivery %s: %s", user_id, did, exc)
+            note = f"Added to {label}'s subscriptions, but the message to them failed (they may have blocked the bot)."
+    return web.json_response({"ok": True, "delivery_id": did, "customer": label, "note": note}, headers=headers)
 
 
 async def http_delivered_sheet_renewal(request):
@@ -13955,14 +14200,21 @@ def _delivery_only_detail(delivery_id: int, user_id: int, coworker_id):
     customer's own delivery, or an order under their coworker account."""
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
-        "SELECT d.order_id, d.item_id, d.message, d.delivered_at, d.user_id, o.coworker_id "
-        "FROM deliveries d JOIN orders o ON o.id = d.order_id WHERE d.id = ?",
+        "SELECT d.order_id, d.item_id, d.message, d.delivered_at, d.user_id, o.coworker_id, d.sheet_ref "
+        "FROM deliveries d LEFT JOIN orders o ON o.id = d.order_id WHERE d.id = ?",
         (delivery_id,),
     ).fetchone()
     conn.close()
     if not row:
         return None
-    order_id, item_id, message, delivered_at, owner_id, order_coworker = row
+    order_id, item_id, message, delivered_at, owner_id, order_coworker, sheet_ref = row
+    if order_coworker is None and not sheet_ref and not coworker_id:
+        # no order behind it: only a subscription added from the Excel tab (sheet_ref) is shown
+        conn = sqlite3.connect(DB_PATH)
+        exists = conn.execute("SELECT 1 FROM orders WHERE id = ?", (order_id,)).fetchone()
+        conn.close()
+        if not exists:
+            return None
     if coworker_id:
         if order_coworker != coworker_id:
             return None
@@ -13977,6 +14229,7 @@ def _delivery_only_detail(delivery_id: int, user_id: int, coworker_id):
         "price": _coworker_unit_price_by_id(item_id, coworker_id) if item_id in MENU else 0,
         "status": "delivered",
         "credentials": message or "",
+        "imported": bool(sheet_ref),   # from before the bot (no order, no price)
     }
 
 
@@ -14377,6 +14630,7 @@ async def delivered_subscriptions_menu(update: Update, context: ContextTypes.DEF
         "SELECT d.item_id, d.delivered_at, d.user_id, u.username "
         "FROM deliveries d "
         "LEFT JOIN users u ON u.user_id = d.user_id "
+        "WHERE d.sheet_ref IS NULL "   # not the subscriptions from before the bot, added from the Excel tab
         "ORDER BY d.delivered_at DESC "
         "LIMIT 100"
     ).fetchall()

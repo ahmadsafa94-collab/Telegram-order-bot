@@ -3235,10 +3235,10 @@ async function openOrderDetail(fulfilmentId, deliveryId){
     }
     const statusLabel = data.status==='delivered' ? '🟢 Delivered' : '🟡 Pending';
     content.innerHTML=
-      '<div class="sumrow"><div>Order</div><div class="r">#'+data.order_id+'</div></div>'+
+      (data.imported?'':'<div class="sumrow"><div>Order</div><div class="r">#'+data.order_id+'</div></div>')+
       '<div class="sumrow"><div>Subscription</div><div class="r">'+escHtml(data.name)+'</div></div>'+
-      '<div class="sumrow"><div>Date Requested</div><div class="r">'+(data.date||'').slice(0,10)+'</div></div>'+
-      '<div class="sumrow"><div>Price Paid</div><div class="r">$'+data.price+'</div></div>'+
+      '<div class="sumrow"><div>'+(data.imported?'Started':'Date Requested')+'</div><div class="r">'+(data.date||'').slice(0,10)+'</div></div>'+
+      (data.imported?'':'<div class="sumrow"><div>Price Paid</div><div class="r">$'+data.price+'</div></div>')+
       '<div class="sumrow"><div>Status</div><div class="r">'+statusLabel+'</div></div>'+
       '<div class="sl" style="margin-top:14px;display:flex;align-items:center;justify-content:space-between">'+
         '<span>Credentials</span>'+
@@ -4648,8 +4648,92 @@ async function loadSheetRows(){
       +'<div class="fld-list"><div class="fld"><span class="fld-l">'+escHtml(H[5]||'Username')+'</span><span class="fld-v">'+cell(r,5)+'</span></div>'
       +'<div class="fld"><span class="fld-l">'+escHtml(H[6]||'Pass')+'</span><span class="fld-v">'+cell(r,6)+'</span></div></div>'
       +'<div class="t-meta" style="margin-top:6px;line-height:1.6">'+extra+'</div>'
-      +'<button class="tk-btn" style="margin-top:8px" onclick="openSheetForm('+r.n+')">✏️ Edit</button></div>';
+      +'<button class="tk-btn" style="margin-top:8px" onclick="openSheetForm('+r.n+')">✏️ Edit</button>'
+      +(r.imported||[]).map(x=>'<div class="t-meta" style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:8px"><span>✅ In '+escHtml(x.customer)+'\'s subscriptions</span>'
+        +'<button class="tk-btn" style="width:auto;padding:6px 10px" onclick="undoSheetImport('+(+x.delivery_id)+')">↩️ Undo</button></div>').join('')
+      +'<button class="tk-btn" style="margin-top:8px" onclick="openSheetImport('+r.n+')">➕ Add to delivered subscriptions</button></div>';
   }).join('');
+}
+// ➕ Add to delivered subscriptions (owner, 21 Nov 2026): a subscription from before the bot, in that customer's
+// 📋 My Subscriptions with the sheet's start date (column D). Nothing is sent to the customer unless ticked.
+let sheetImp=null;
+async function openSheetImport(n){
+  const old=sheetShown[n]; if(!old) return;
+  const tabName=sheetTab==='imd'?'iMD':'Delivered';
+  document.getElementById('sheetFormTitle').textContent='➕ Add to delivered subscriptions · row '+n+' · '+tabName;
+  const box=document.getElementById('sheetFormContent');
+  box.innerHTML='<div class="search-empty">Loading…</div>';
+  document.getElementById('sheetFormOverlay').classList.add('on');
+  let d;
+  try{ d=await adminPost('/api/admin_sheet',Object.assign({action:'import_preview',tab:sheetTab,n:n,expect:old},sheetCred)); }
+  catch(e){ box.innerHTML='<div class="search-empty"></div><button class="btn sec" onclick="closeSheetForm()">Close</button>'; box.firstChild.textContent=e.message; return; }
+  sheetImp={n:n,old:old,d:d};
+  const lbl=t=>'<div style="font-size:12px;color:var(--hint);margin:2px 0 3px">'+t+'</div>';
+  box.innerHTML='<div id="siInfo" class="t-meta" style="margin-bottom:8px;overflow-wrap:anywhere;line-height:1.6"></div>'
+    +lbl('Customer: Telegram ID or @username')
+    +'<input id="siWho" class="cw-input" type="text" autocomplete="off" placeholder="123456789 or @username" aria-label="Customer" style="margin-bottom:4px">'
+    +'<div id="siWhoMsg" class="t-meta" style="min-height:16px;margin-bottom:6px"></div>'
+    +lbl('Subscription')
+    +'<select id="siItem" class="cw-input" aria-label="Subscription" style="margin-bottom:8px"></select>'
+    +lbl('What the customer sees (you can change it)')
+    +'<textarea id="siText" class="cw-input" rows="12" maxlength="3500" aria-label="Message" style="font-size:13.5px;line-height:1.45"></textarea>'
+    +'<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin:8px 0 0"><input type="checkbox" id="siNotify"> Tell the customer</label>'
+    +'<div id="siMsg" class="t-meta" style="min-height:16px;margin:8px 0 6px"></div>'
+    +'<button class="btn" id="siAdd">➕ Add to their subscriptions</button>'
+    +'<button class="btn sec" style="margin-top:8px" onclick="closeSheetForm()">Cancel</button>';
+  // values through the DOM, never into the HTML: a cell can hold quotes, < > and line breaks
+  const c=i=>(old[i]||'').trim();
+  document.getElementById('siInfo').textContent=c(0)+(c(1)?' · '+c(1):'')+' · starts '+d.start+(c(5)?' · '+c(5):'')
+    +(d.imported&&d.imported.length?' · already in: '+d.imported.map(x=>x.customer).join(', '):'')+(d.note?'\n⚠️ '+d.note:'');
+  document.getElementById('siInfo').style.whiteSpace='pre-line';
+  const sel=document.getElementById('siItem');
+  const opt=(v,t)=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; sel.appendChild(o); };
+  opt(d.keep_id,'Keep the sheet\'s name: '+d.keep_id);
+  if(d.suggested){ const p=d.products.find(x=>x.id===d.suggested); if(p) opt(p.id,'✨ '+p.name+' (matches the sheet)'); }
+  d.products.forEach(p=>{ if(p.id!==d.suggested) opt(p.id,p.name); });
+  sel.value=d.item_id;
+  document.getElementById('siWho').value=d.customer.text||'';
+  document.getElementById('siText').value=d.text;
+  sheetImpWho(d.customer);
+  sel.onchange=()=>sheetImpRefresh(true);
+  document.getElementById('siWho').onchange=()=>sheetImpRefresh(false);
+  document.getElementById('siAdd').onclick=saveSheetImport;
+}
+function sheetImpWho(c){
+  const m=document.getElementById('siWhoMsg'); if(!m) return;
+  if(!c||!c.text){ m.style.color='var(--hint)'; m.textContent=''; return; }
+  if(c.error){ m.style.color='#dc2626'; m.textContent=c.error; return; }
+  m.style.color=c.warning?'#d97706':'var(--teal2)'; m.textContent='👤 '+c.label+(c.label!==String(c.user_id)?' · ID '+c.user_id:'')+(c.warning?' · '+c.warning:'');
+}
+async function sheetImpRefresh(newText){
+  if(!sheetImp) return;
+  const who=document.getElementById('siWho').value.trim(), item=document.getElementById('siItem').value;
+  let d;
+  try{ d=await adminPost('/api/admin_sheet',Object.assign({action:'import_preview',tab:sheetTab,n:sheetImp.n,expect:sheetImp.old,customer:who,item_id:item},sheetCred)); }
+  catch(e){ const m=document.getElementById('siMsg'); m.style.color='#dc2626'; m.textContent=e.message; return; }
+  sheetImpWho(d.customer);
+  if(newText) document.getElementById('siText').value=d.text;
+}
+async function saveSheetImport(){
+  const m=document.getElementById('siMsg'), btn=document.getElementById('siAdd');
+  const who=document.getElementById('siWho').value.trim(), text=document.getElementById('siText').value.trim();
+  if(!who){ m.style.color='#dc2626'; m.textContent="Type the customer's Telegram ID or @username."; return; }
+  if(!text){ m.style.color='#dc2626'; m.textContent='Type the message the customer sees.'; return; }
+  btn.disabled=true; m.style.color='var(--hint)'; m.textContent='Adding…';
+  let d;
+  try{ d=await adminPost('/api/admin_sheet',Object.assign({action:'import',tab:sheetTab,n:sheetImp.n,expect:sheetImp.old,customer:who,
+        item_id:document.getElementById('siItem').value,text:text,notify:document.getElementById('siNotify').checked},sheetCred)); }
+  catch(e){ m.style.color='#dc2626'; m.textContent=e.message; btn.disabled=false; return; }
+  closeSheetForm(); sheetImp=null;
+  showToast('✅ '+d.note);
+  loadSheetRows();
+}
+function undoSheetImport(id){
+  askConfirm('Remove it from the customer\'s subscriptions? The sheet row stays as it is.',async()=>{
+    try{ await adminPost('/api/admin_sheet',Object.assign({action:'unimport',delivery_id:id},sheetCred)); }
+    catch(e){ showToast(e.message); return; }
+    showToast('↩️ Removed from their subscriptions.'); loadSheetRows();
+  });
 }
 // ➕ / ✏️ the owner's own rows (18 Nov 2026): written to the Google Sheet right away. An edit only changes the cells
 // that were changed, and is refused if the row changed in the sheet since it was shown here.
