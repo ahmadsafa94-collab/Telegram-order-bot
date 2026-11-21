@@ -12791,6 +12791,26 @@ async def http_delivered_sheet_lookup(request):
     return web.json_response({"ok": True, "found": bool(rows), "rows": rows[:10]})
 
 
+# Renewals approved before the new year got its own row (owner, 20 Nov 2026): (order, username, R number), queued once.
+ONEOFF_RENEWAL_ROWS = [(650, "alshehry1399", "R96")]
+
+
+def _queue_oneoff_renewal_row(order_id: int, username: str, number: str) -> bool:
+    """The delivered row of that order goes right under the old subscription's row, as a paid renewal does now."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT user_id, item_id, message, access, delivered_at FROM deliveries WHERE order_id = ? "
+                       "ORDER BY id DESC LIMIT 1",
+                       (order_id,)).fetchone()
+    conn.close()
+    if not row:
+        logger.warning("Delivered sheet: no delivery of order #%s for its renewal row", order_id)
+        return False
+    tab, cells = _sheet_row_for(order_id, row[0], row[1], row[2] or "", row[3], datetime.fromisoformat(row[4]))
+    dsheet.enqueue_row_below(DB_PATH, tab, cells, username, number)
+    logger.info("Delivered sheet: order #%s (%s %s) queued under its old row", order_id, username, number)
+    return True
+
+
 async def sheet_outbox_job(context: ContextTypes.DEFAULT_TYPE):
     """Every 30 s: what waits for the delivered sheet goes to Google."""
     async def notify(text):
@@ -12798,6 +12818,15 @@ async def sheet_outbox_job(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text)
         except Exception:
             logger.exception("Delivered sheet: couldn't tell the admin")
+    if dsheet.configured():
+        for order_id, username, number in ONEOFF_RENEWAL_ROWS:
+            key = f"oneoff_row_below:{order_id}"
+            if db_get_meta(key):
+                continue
+            db_set_meta(key, datetime.utcnow().isoformat(timespec="seconds"))
+            if _queue_oneoff_renewal_row(order_id, username, number):
+                await notify(f"📑 Delivered sheet: order #{order_id} ({username}, {number}): its new year goes in a new row "
+                             "right under the old one (it was approved before that was done by itself).")
     if dsheet.configured() and not db_get_meta("delivered_sheet_imd_backfill"):
         db_set_meta("delivered_sheet_imd_backfill", datetime.utcnow().isoformat(timespec="seconds"))
         n = backfill_imd_sheet_rows()
