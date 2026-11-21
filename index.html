@@ -4637,11 +4637,16 @@ async function loadSheetRows(){
   }
   drawSheetBio();
   info.textContent=(sheetQ?d.matches+' of '+d.total+' rows match':d.total+' rows')+(d.rows.length<d.matches?' · showing the newest '+d.rows.length:'')+' · newest first';
-  if(!d.rows.length){ rowsEl.innerHTML='<div class="search-empty">Nothing found.</div>'; return; }
+  // added to a customer's subscriptions from a row that has since changed or gone in Google: still undoable here
+  const orph=(d.orphans||[]).length?'<div class="t-card"><div class="t-title">⚠️ Added from rows no longer in the sheet as they were</div>'
+    +d.orphans.map(x=>'<div class="t-meta" style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:8px"><span>'
+      +escHtml(x.name)+' · from '+escHtml(x.date)+' · in '+escHtml(x.customer)+'\'s subscriptions</span>'
+      +'<button class="tk-btn" style="width:auto;padding:6px 10px" onclick="undoSheetImport('+(+x.delivery_id)+')">↩️ Undo</button></div>').join('')+'</div>':'';
+  if(!d.rows.length){ rowsEl.innerHTML=orph+'<div class="search-empty">Nothing found.</div>'; return; }
   const H=d.header||[];
   sheetHeader=H; sheetShown={}; d.rows.forEach(r=>{ sheetShown[r.n]=r.cells; });
   const cell=(r,i)=>escHtml((r.cells[i]||'').trim());
-  rowsEl.innerHTML=d.rows.map(r=>{
+  rowsEl.innerHTML=orph+d.rows.map(r=>{
     const extra=[[2,'Renewal'],[3,'Created'],[4,'Ends'],[7,'Access'],[8,'Coworker'],[9,'Order'],[10,'Telegram'],[11,'@'],[12,'Renewals']]
       .filter(([i])=>(r.cells[i]||'').trim()).map(([i,l])=>'<span><b>'+escHtml(H[i]||l)+':</b> '+cell(r,i)+'</span>').join(' · ');
     return '<div class="t-card"><div class="t-top"><div class="t-title">'+cell(r,0)+(cell(r,1)?' · '+cell(r,1):'')+'</div><span class="t-meta">row '+r.n+'</span></div>'

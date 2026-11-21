@@ -1590,7 +1590,7 @@ def db_user_deliveries(user_id: int):
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
         "SELECT id, order_id, item_id, message, delivered_at FROM deliveries "
-        "WHERE user_id = ? ORDER BY id DESC",
+        "WHERE user_id = ? ORDER BY delivered_at DESC, id DESC",   # by date: one added from the sheet goes by its start
         (user_id,),
     ).fetchall()
     conn.close()
@@ -1667,15 +1667,17 @@ def db_import_sheet_delivery(user_id: int, item_id: str, message: str, start_dat
 
 
 def db_sheet_imports() -> dict:
-    """{sheet_ref: [{delivery_id, user_id, customer}]} of everything added from the Excel tab."""
+    """{sheet_ref: [{delivery_id, user_id, customer, name, date}]} of everything added from the Excel tab."""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute("SELECT d.id, d.sheet_ref, d.user_id, COALESCE(u.username, (SELECT o.username FROM orders o "
-                        "WHERE o.user_id = d.user_id AND o.username IS NOT NULL ORDER BY o.id DESC LIMIT 1)) FROM deliveries d "
+                        "WHERE o.user_id = d.user_id AND o.username IS NOT NULL ORDER BY o.id DESC LIMIT 1)), "
+                        "d.item_id, d.delivered_at FROM deliveries d "
                         "LEFT JOIN users u ON u.user_id = d.user_id WHERE d.sheet_ref IS NOT NULL ORDER BY d.id").fetchall()
     conn.close()
     out = {}
-    for did, ref, uid, uname in rows:
-        out.setdefault(ref, []).append({"delivery_id": did, "user_id": uid, "customer": f"@{uname}" if uname else str(uid)})
+    for did, ref, uid, uname, item_id, when in rows:
+        out.setdefault(ref, []).append({"delivery_id": did, "user_id": uid, "customer": f"@{uname}" if uname else str(uid),
+                                        "name": MENU.get(item_id, (item_id,))[0], "date": (when or "")[:10]})
     return out
 
 
@@ -1702,15 +1704,23 @@ def resolve_customer_ref(text) -> tuple:
     if not re.fullmatch(r"[A-Za-z0-9_]{3,32}", name):
         raise ValueError("That isn't a Telegram ID or username. Type the numeric ID or @username.")
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("SELECT user_id, username FROM users WHERE LOWER(username) = LOWER(?) "
-                       "ORDER BY last_seen DESC LIMIT 1", (name,)).fetchone() or \
-        conn.execute("SELECT user_id, username FROM orders WHERE LOWER(username) = LOWER(?) "
-                     "ORDER BY id DESC LIMIT 1", (name,)).fetchone()
+    users = conn.execute("SELECT user_id, username FROM users WHERE LOWER(username) = LOWER(?) "
+                         "ORDER BY last_seen DESC", (name,)).fetchall()
+    orders = conn.execute("SELECT user_id, username FROM orders WHERE LOWER(username) = LOWER(?) "
+                          "ORDER BY id DESC", (name,)).fetchall()
     conn.close()
+    row = (users or orders or [None])[0]
     if not row:
         raise ValueError(f"@{name} isn't known to the bot (no messages or orders under that username). "
                          "Type their numeric Telegram ID instead.")
-    return row[0], f"@{row[1] or name}", ""
+    ids = {r[0] for r in users + orders}
+    warning = ""
+    if len(ids) > 1:
+        warning = (f"Several accounts had this username ({', '.join(str(i) for i in sorted(ids))}); this is the one "
+                   "that used the bot last. Check the Telegram ID.")
+    elif not users:
+        warning = "Matched by an old order only (they haven't used the bot under this username). Check the Telegram ID."
+    return row[0], f"@{row[1] or name}", warning
 
 
 def _sheet_duration_words(duration: str) -> str:
@@ -4547,7 +4557,7 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
             # Deliveries with credentials message for the "tap to see details" feature
             del_rows = conn.execute(
                 "SELECT d.id, d.item_id, d.delivered_at, d.message, d.order_id FROM deliveries d "
-                "JOIN orders o ON o.id = d.order_id WHERE o.coworker_id = ? ORDER BY d.id DESC",
+                "JOIN orders o ON o.id = d.order_id WHERE o.coworker_id = ? ORDER BY d.delivered_at DESC, d.id DESC",
                 (cw_scope,),
             ).fetchall()
             ful_rows = conn.execute(
@@ -4566,7 +4576,7 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
             # Deliveries with credentials message for the "tap to see details" feature
             del_rows = conn.execute(
                 "SELECT id, item_id, delivered_at, message, order_id FROM deliveries "
-                "WHERE user_id = ? ORDER BY id DESC",
+                "WHERE user_id = ? ORDER BY delivered_at DESC, id DESC",
                 (user_id,),
             ).fetchall()
             ful_rows = conn.execute(
@@ -5567,7 +5577,7 @@ async def show_ticket_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     routes to a tailored set of choices) plus three generic options."""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT id, item_id, delivered_at FROM deliveries WHERE user_id = ? ORDER BY id DESC",
+        "SELECT id, item_id, delivered_at FROM deliveries WHERE user_id = ? ORDER BY delivered_at DESC, id DESC",
         (update.effective_user.id,),
     ).fetchall()
     conn.close()
@@ -5601,7 +5611,7 @@ async def uptodate_renewal_menu(update: Update, context: ContextTypes.DEFAULT_TY
     placeholders = ",".join("?" for _ in UPTODATE_TICKET_ITEMS)
     rows = conn.execute(
         f"SELECT id, item_id, delivered_at FROM deliveries "
-        f"WHERE user_id = ? AND item_id IN ({placeholders}) ORDER BY id DESC",
+        f"WHERE user_id = ? AND item_id IN ({placeholders}) ORDER BY delivered_at DESC, id DESC",
         (query.from_user.id, *UPTODATE_TICKET_ITEMS),
     ).fetchall()
     conn.close()
@@ -12834,7 +12844,13 @@ async def http_admin_sheet(request):
             shown = hits[-300:][::-1]   # newest first
             key = "imd" if tab == dsheet.IMD_TAB else "main"
             imports = db_sheet_imports()
+            # added from a row that isn't in the sheet any more as it was (changed or deleted in Google): listed on
+            # top so the admin can still undo them
+            current = {sheet_row_ref(key, r) for r in body}
+            orphans = [{k: x[k] for k in ("delivery_id", "customer", "name", "date")}
+                       for ref, lst in imports.items() if ref.startswith(key + ":") and ref not in current for x in lst]
             return web.json_response({"ok": True, "tab": tab, "header": header, "total": len(body), "matches": len(hits),
+                                      "orphans": orphans,
                                       "rows": [{"n": n, "cells": r, "imported": [
                                           {"delivery_id": x["delivery_id"], "customer": x["customer"]}
                                           for x in imports.get(sheet_row_ref(key, r), [])]} for n, r in shown]},
@@ -12880,6 +12896,17 @@ async def http_admin_sheet(request):
             except LookupError as exc:
                 return web.json_response({"ok": False, "error": f"Not saved: {exc}."}, status=404, headers=headers)
             logger.info("Delivered sheet: the admin edited row %s on %s (columns %s)", n, tab, ",".join(changed) or "none")
+            # a subscription added from this row to a customer's subscriptions stays linked to it
+            key = "imd" if tab == dsheet.IMD_TAB else "main"
+            old_ref, new_ref = sheet_row_ref(key, expect), sheet_row_ref(key, cells)
+            if changed and old_ref != new_ref:
+                conn = sqlite3.connect(DB_PATH)
+                moved = conn.execute("UPDATE OR IGNORE deliveries SET sheet_ref = ? WHERE sheet_ref = ?",
+                                     (new_ref, old_ref)).rowcount
+                conn.commit()
+                conn.close()
+                if moved:
+                    logger.info("Delivered sheet: %s import(s) of row %s follow the edit", moved, n)
             return web.json_response({"ok": True, "n": n, "changed": changed}, headers=headers)
         if action == "file":
             data_x = await dsheet.export_xlsx()
@@ -12917,6 +12944,9 @@ async def _sheet_import(request, data: dict, action: str, headers):
     start = dsheet.parse_sheet_date(cells[3])
     if not start:
         return fail(f"Column D (Date created) of row {n} isn't a date like 14/03/25, so the start date is unknown. "
+                    "Fix it with ✏️ Edit first.")
+    if start > (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date():
+        return fail(f"Column D (Date created) of row {n} is {start.strftime('%d/%m/%Y')}, after today. "
                     "Fix it with ✏️ Edit first.")
     ref = sheet_row_ref(key, cells)
     keep_id = sheet_import_keep_id(cells)
