@@ -2054,7 +2054,9 @@ function drawAdminPending(){
           (i.imd?'':'<button class="btn" style="margin:0;padding:10px;width:auto;flex:1.4" onclick="openDeliver('+i.fid+')">📤 Deliver</button>')+
           '<button class="tk-btn" style="flex:1;width:auto;white-space:nowrap" onclick="adminChat(\'deliver\','+i.fid+')">'+(i.imd?'🤖 Renew / deliver in chat':'💬 Open in chat')+'</button>'+
         '</div>'+
+        prevHtml(i)+
         (i.can_reask?'<button class="tk-btn" style="margin-top:8px" onclick="openReask('+i.fid+')">🔁 Ask again'+(i.can_switch?' · new / renewal':'')+'</button>':'')+
+        (i.asked_again?'<button class="tk-btn" style="margin-top:8px" onclick="cancelReask('+i.fid+')">↩️ Cancel re-ask</button>':'')+
         '</div>').join('')).join('');
 }
 function deleteAdminOrder(orderId){
@@ -2075,7 +2077,7 @@ function openDeliver(fid){
   const i=adminPending.find(x=>x.fid===fid); if(!i) return;
   deliverFid=fid; editDelivery=null;
   document.getElementById('delTitle').textContent=i.name+' · Order #'+i.order_id;
-  document.getElementById('delInfo').innerHTML=escHtml(i.customer)+'<div style="margin:5px 0">'+viaTag(i.via)+'</div>'+(i.state==='needs_info'?'<br>The customer has not sent their details yet.':'')+((i.fields&&i.fields.length)||i.info?fieldsHtml(i):'');
+  document.getElementById('delInfo').innerHTML=escHtml(i.customer)+'<div style="margin:5px 0">'+viaTag(i.via)+'</div>'+(i.state==='needs_info'?'<br>The customer has not sent their details yet.':'')+((i.fields&&i.fields.length)||i.info?fieldsHtml(i):'')+prevHtml(i);
   document.getElementById('delLabel').textContent='Account details to send to the customer — fill in what is missing';
   document.getElementById('delNotifyRow').style.display='none';
   document.getElementById('delAccessBox').style.display=''; document.getElementById('delAccess').value='';
@@ -2100,6 +2102,19 @@ function drawReaskTypes(){
   const opt=(t,l)=>'<button class="tk-btn" style="margin-top:6px;'+(reaskType===t?'outline:2px solid var(--accent,#3b82f6)':'')+'" onclick="reaskType=\''+t+'\';drawReaskTypes()">'+(reaskType===t?'● ':'○ ')+l+'</button>';
   box.innerHTML='<div style="font-size:12px;color:var(--hint);margin:4px 0">Set it up as</div>'+
     opt('new','🆕 New account'+now('new'))+opt('renew','🔄 Renewal'+now('renew'))+opt('any','↩️ Let the customer choose');
+}
+function prevHtml(i){
+  if(!i.asked_again||!i.prev_fields||!i.prev_fields.length) return '';
+  return '<div class="t-meta" style="margin-top:8px">🔁 Asked again · previous details:</div><div class="fld-list">'+i.prev_fields.map(f=>
+    '<div class="fld"><span class="fld-l">'+escHtml(f.label)+'</span><span class="fld-v">'+escHtml(f.value)+'</span></div>').join('')+'</div>';
+}
+function cancelReask(fid){
+  askConfirm('Cancel asking again? The previous details come back and the item is ready to deliver with them.',async()=>{
+    try{
+      const d=await adminPost('/api/admin_reask',{fulfilment_id:fid,action:'cancel'});
+      showToast(d.note||'Re-ask cancelled'); renderAdminPending();
+    }catch(e){ showToast(e.message); }
+  });
 }
 function closeReask(){ document.getElementById('reaskOverlay').classList.remove('on'); reaskFid=null; }
 async function sendReask(force){

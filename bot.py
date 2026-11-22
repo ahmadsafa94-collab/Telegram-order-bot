@@ -4340,6 +4340,8 @@ def step_is_stale(started_at) -> bool:
 def clear_admin_flow_state(user_data: dict):
     for key in ADMIN_FLOW_KEYS:
         user_data.pop(key, None)
+    for key in [k for k in user_data if isinstance(k, str) and k.startswith("resend_note:")]:
+        user_data.pop(key, None)   # a note kept for 🔁 Ask anyway
 
 
 # What each admin step is waiting for, in words, for /cancel's answer.
@@ -12680,6 +12682,7 @@ def db_admin_pending() -> list:
             # 🔁 Ask again (22 Nov 2026)
             "can_reask": _reask_offered(iid), "can_switch": _reask_can_switch(iid),
             "account_type": _unit_account_type(info.get(fid)), "asked_again": _reask_waiting(fid, state),
+            "prev_fields": [{"label": l, "value": v} for l, v in _reask_prev_fields(fid)] if _reask_waiting(fid, state) else [],
         })
     return out
 
@@ -12764,9 +12767,15 @@ async def http_admin_reask(request):
         note = data.get("note") or ""
     except Exception:
         return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if data.get("action") == "cancel" and isinstance(fid, int) and not isinstance(fid, bool):
+        result = await cancel_reask(request.app["application"], fid)
+        return web.json_response(result, status=200 if result.get("ok") else 409, headers=headers)
     if isinstance(fid, bool) or not isinstance(fid, int) or ask_type not in ("new", "renew", "any") \
-            or not isinstance(note, str) or len(note) > 1000:
+            or not isinstance(note, str):
         return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if len(note.strip()) > REASK_NOTE_MAX:
+        return web.json_response({"ok": False, "error": f"The note is {len(note.strip())} characters; it can be at most "
+                                                        f"{REASK_NOTE_MAX}."}, status=400, headers=headers)
     result = await reask_unit(request.app["application"], fid, ask_type, note, force=bool(data.get("force")))
     if not result.get("ok"):
         return web.json_response({"ok": False, "error": result.get("error"), "needs_force": bool(result.get("needs_force"))},
@@ -16412,6 +16421,10 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         + (f"Credentials sent: {delivered_at[:19]}\n" if delivered_at else "")
         + f"\n{format_fulfilment_info(item_id, info_json)}"
     )
+    asked_again = _reask_waiting(fulfilment_id, state)
+    if asked_again:
+        prev_lines = "\n".join(f"{l}: {v}" for l, v in _reask_prev_fields(fulfilment_id)) or "(none)"
+        text += f"\n\n🔁 Asked for the details again. Previous details:\n{prev_lines}"
 
     buttons = []
     if item_id in IMD_TRIGGER_ITEMS:
@@ -16429,8 +16442,10 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         buttons.append(
             [InlineKeyboardButton("✍️ Type Details Instead", callback_data=f"deliver:{fulfilment_id}")]
         )
-    elif state == "awaiting_delivery":
+    elif state in ("awaiting_delivery", "needs_info"):
         buttons.append([InlineKeyboardButton("📤 Deliver Manually", callback_data=f"deliver:{fulfilment_id}")])
+    if asked_again:
+        buttons.append([InlineKeyboardButton("↩️ Cancel re-ask", callback_data=f"askresend_c:{fulfilment_id}")])
     if item_id not in IMD_TRIGGER_ITEMS and AUTOMATION_API_URL:
         buttons.append([InlineKeyboardButton("🤖 Run automation", callback_data=f"asite:runorder:{fulfilment_id}")])
     # Anything that isn't a no-details item (code delivery, manual-access
@@ -16541,11 +16556,18 @@ async def ask_resend_force(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ask_resend_message_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Catches the admin's typed custom message after '🔁 Ask for details again' and sends the request with it."""
-    fulfilment_id = context.user_data.pop("awaiting_resend_message_for_fulfilment", None)
-    ask_type = context.user_data.pop("resend_ask_type", None) or "any"
+    fulfilment_id = context.user_data.get("awaiting_resend_message_for_fulfilment")
     if not fulfilment_id:
         return
-    await _send_resend_request(context, fulfilment_id, update.message.text.strip(), ask_type)
+    note = update.message.text.strip()
+    if len(note) > REASK_NOTE_MAX:
+        await update.message.reply_text(
+            f"That message is {len(note)} characters; it can be at most {REASK_NOTE_MAX}. Type a shorter one, or "
+            "tap Cancel to send the request without one.")
+        return
+    context.user_data.pop("awaiting_resend_message_for_fulfilment", None)
+    ask_type = context.user_data.pop("resend_ask_type", None) or "any"
+    await _send_resend_request(context, fulfilment_id, note, ask_type)
 
 
 async def _send_resend_request(context: ContextTypes.DEFAULT_TYPE, fulfilment_id: int, custom_message: str | None,
@@ -16573,6 +16595,7 @@ async def _send_resend_request(context: ContextTypes.DEFAULT_TYPE, fulfilment_id
 # N/R started from the old details is superseded (it refuses while one is running, and asks before dropping a result
 # waiting for approval).
 REASK_TYPE_WORDS = {"new": "🆕 new account", "renew": "🔄 renewal"}
+REASK_NOTE_MAX = 1000
 
 
 def db_get_reask(fulfilment_id) -> dict:
@@ -16628,8 +16651,9 @@ def _reask_problem(row):
     return None
 
 
-def db_reask_unit(fulfilment_id: int, ask_type, note=None) -> dict:
-    """Back to waiting for the customer: the details move to reask_json["prev"] and the unit is needs_info again."""
+def db_reask_unit(fulfilment_id: int, ask_type, note=None):
+    """Back to waiting for the customer: the details move to reask_json["prev"] and the unit is needs_info again.
+    None when the unit was delivered (or deleted) in the meantime."""
     row = db_get_fulfilment(fulfilment_id)
     old = db_get_reask(fulfilment_id)
     try:
@@ -16641,8 +16665,11 @@ def db_reask_unit(fulfilment_id: int, ask_type, note=None) -> dict:
              # asked again before the customer answered: the details asked about are still the first ones
              "prev": prev if prev else old.get("prev")}
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE fulfilment SET reask_json = ?, info_json = NULL, state = 'needs_info' WHERE id = ?",
-                 (json.dumps(reask), fulfilment_id))
+    cur = conn.execute("UPDATE fulfilment SET reask_json = ?, info_json = NULL, state = 'needs_info' "
+                       "WHERE id = ? AND state != 'delivered'", (json.dumps(reask), fulfilment_id))
+    if cur.rowcount == 0:
+        conn.close()
+        return None   # delivered (or deleted) meanwhile
     # the details sent next go to @Utdreg_bot again even when they're the same as before
     try:
         conn.execute("UPDATE automation_outbox SET info_hash = 'reask' WHERE fulfilment_id = ? AND info_hash IS NOT NULL",
@@ -16675,6 +16702,79 @@ def _reask_prev_value(fulfilment_id, field: str) -> str:
     return str(prev.get(field) or "").strip().lower() if isinstance(prev, dict) else ""
 
 
+def _set_reask_pending(fulfilment_id, pending):
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("UPDATE automation_outbox SET reask_pending = ?, reask_tries = 0 WHERE fulfilment_id = ?",
+                     (json.dumps(pending) if pending else None, fulfilment_id))
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    conn.close()
+
+
+def _reask_prev_fields(fulfilment_id) -> list:
+    """[(label, value)] of the details asked again (shown while waiting for the new ones)."""
+    prev = db_get_reask(fulfilment_id).get("prev")
+    return fulfilment_info_fields(json.dumps(prev)) if isinstance(prev, dict) and prev else []
+
+
+async def cancel_reask(application, fulfilment_id: int) -> dict:
+    """↩️ Cancel re-ask: the details from before come back (state awaiting_delivery), and @Utdreg_bot gets them again
+    as an update, so its ⌛ order goes back to ▶️ Start. {ok, note} or {ok: False, error}."""
+    row = db_get_fulfilment(fulfilment_id)
+    if not row:
+        return {"ok": False, "error": "That item no longer exists."}
+    if not _reask_waiting(fulfilment_id, row[5]):
+        return {"ok": False, "error": "This item isn't waiting for its details again."}
+    prev = db_get_reask(fulfilment_id).get("prev")
+    prev = prev if isinstance(prev, dict) and prev else None
+    conn = sqlite3.connect(DB_PATH)
+    # cancelled_at: the customer's 🔄 Resend Credentials button from that request no longer starts a form
+    cur = conn.execute("UPDATE fulfilment SET info_json = ?, state = ?, reask_json = ? WHERE id = ? AND state = 'needs_info'",
+                       (json.dumps(prev) if prev else None, "awaiting_delivery" if prev else "needs_info",
+                        json.dumps({"cancelled_at": datetime.utcnow().isoformat(timespec="seconds")}), fulfilment_id))
+    if cur.rowcount:
+        try:
+            # a re-ask @Utdreg_bot never heard of is dropped; the details go to it again either way
+            conn.execute("UPDATE automation_outbox SET reask_pending = NULL, reask_tries = 0, "
+                         "info_hash = CASE WHEN info_hash IS NULL THEN NULL ELSE 'reask' END WHERE fulfilment_id = ?",
+                         (fulfilment_id,))
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
+    conn.close()
+    if not cur.rowcount:
+        return {"ok": False, "error": "This item isn't waiting for its details again."}
+    _, order_id, user_id, item_id = row[:4]
+    name = MENU.get(item_id, (item_id,))[0]
+    customer_data = application.user_data[user_id]
+    if customer_data.get("generic_fulfilment_id") == fulfilment_id:
+        for key in ("awaiting_generic_field", "generic_data", "generic_account_type", "generic_fulfilment_id",
+                    "generic_item_id", "generic_order_id"):
+            customer_data.pop(key, None)
+    try:
+        await application.bot.send_message(chat_id=user_id, text=(
+            f"✅ No need to send the details for {name} (Order #{order_id}) again: we'll use the ones you sent before."))
+    except Exception:
+        logger.exception("cancel_reask: couldn't tell user %s", user_id)
+    logger.info("Order #%s unit %s: ask-again cancelled, previous details back", order_id, fulfilment_id)
+    return {"ok": True, "note": (f"↩️ Re-ask cancelled for {name} (Order #{order_id}): " +
+                                 ("the previous details are back, ready to deliver." if prev else
+                                  "it waits for the customer's details as before."))}
+
+
+async def ask_resend_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """↩️ Cancel re-ask in Pending Orders (askresend_c:<fid>)."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    result = await cancel_reask(context.application, int(query.data.split(":", 1)[1]))
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=result.get("note") or f"⚠️ {result['error']}")
+
+
 def _utd_unit_sent(fulfilment_id) -> bool:
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -16698,25 +16798,37 @@ async def reask_unit(application, fulfilment_id: int, ask_type: str = "any", not
     if ask_type and not _reask_can_switch(item_id):
         return {"ok": False, "error": "This item can't be switched between a new account and a renewal."}
     name = MENU.get(item_id, (item_id,))[0]
-    note = (note or "").strip()[:1000] or None
+    note = (note or "").strip() or None
+    if note and len(note) > REASK_NOTE_MAX:
+        return {"ok": False, "error": f"The note is {len(note)} characters; it can be at most {REASK_NOTE_MAX}."}
     superseded = ""
+    told = None   # @Utdreg_bot: True heard it, False to be told by automation_push_job, None not involved
     if item_id in UPTODATE_PLAN_ITEMS and _utd_unit_sent(fulfilment_id) and AUTOMATION_API_URL and CATALOG_API_KEY:
+        # noted before asking, so a restart in between is sorted out by automation_push_job (applied: false)
+        _set_reask_pending(fulfilment_id, {"kind": ask_type, "applied": False,
+                                           "at": datetime.utcnow().isoformat(timespec="seconds")})
         status, body = await _automation_post("/api/order_pending", {
             "fulfilment_id": fulfilment_id, "order_id": order_id, "reask": True, "kind": ask_type, "force": bool(force)})
         if status == 200 and body.get("ok"):
-            superseded = body.get("superseded") or ""
+            superseded, told = body.get("superseded") or "", True
         elif status == 409:
+            _set_reask_pending(fulfilment_id, None)
             return {"ok": False, "error": body.get("error") or "@Utdreg_bot can't take it now.",
                     "needs_force": bool(body.get("needs_force")) and not force}
         else:
             # @Utdreg_bot is down: asked anyway, and the job tells it as soon as it answers
-            conn = sqlite3.connect(DB_PATH)
-            conn.execute("UPDATE automation_outbox SET reask_pending = ? WHERE fulfilment_id = ?",
-                         (json.dumps({"kind": ask_type}), fulfilment_id))
-            conn.commit()
-            conn.close()
+            told = False
             superseded = "@Utdreg_bot didn't answer; it's told as soon as it does"
     reask = db_reask_unit(fulfilment_id, ask_type, note)
+    if reask is None:
+        # delivered while @Utdreg_bot was being asked: nothing asked; the job tells @Utdreg_bot it's delivered
+        if told is not None:
+            _set_reask_pending(fulfilment_id, None)
+        return {"ok": False, "error": "This item was already delivered."}
+    if told is True:
+        _set_reask_pending(fulfilment_id, None)            # a pending one from before is answered by this one
+    elif told is False:
+        _set_reask_pending(fulfilment_id, {"kind": ask_type, "applied": True})
     was = _unit_account_type(json.dumps(reask.get("prev") or {}))
     # a half-finished form of the old details mustn't carry on
     customer_data = application.user_data[user_id]
@@ -16775,6 +16887,10 @@ async def resend_cred_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if state == "delivered":
         await query.answer("This has already been delivered.", show_alert=True)
+        return
+    if state != "needs_info" and db_get_reask(fulfilment_id).get("cancelled_at"):
+        # the admin cancelled that request (↩️ Cancel re-ask): the details on file are used
+        await query.answer("No need to resend: we're using the details you sent before.", show_alert=True)
         return
     await query.answer()
 
@@ -18528,6 +18644,7 @@ async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TY
     if fulfilment_id:
         db_set_fulfilment_info(fulfilment_id, data)
         db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
+        db_reask_answered(fulfilment_id)   # sent again after 🔁 Ask for details again
 
     if ADMIN_CHAT_ID:
         duration_label = {"6m": "6 Months", "1y": "1 Year", "2y": "2 Years"}.get(duration, "6 Months")
@@ -20878,6 +20995,8 @@ def utd_automation_init():
     if "reask_pending" not in [r[1] for r in conn.execute("PRAGMA table_info(automation_outbox)")]:
         # 🔁 Ask for details again that @Utdreg_bot didn't hear yet (22 Nov 2026): {kind}
         conn.execute("ALTER TABLE automation_outbox ADD COLUMN reask_pending TEXT")
+    if "reask_tries" not in [r[1] for r in conn.execute("PRAGMA table_info(automation_outbox)")]:
+        conn.execute("ALTER TABLE automation_outbox ADD COLUMN reask_tries INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     conn.close()
     if db_get_meta("automation_push_from") is None:
@@ -20942,19 +21061,19 @@ def _utd_units_to_push() -> list:
 
 
 def _utd_units_reasked() -> list:
-    """(fulfilment id, order id, {kind}) of units asked again while @Utdreg_bot couldn't be told."""
+    """(fulfilment id, order id, {kind, applied, at}, tries) of units asked again that @Utdreg_bot didn't hear yet."""
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("SELECT a.fulfilment_id, f.order_id, a.reask_pending FROM automation_outbox a "
+    rows = conn.execute("SELECT a.fulfilment_id, f.order_id, a.reask_pending, a.reask_tries FROM automation_outbox a "
                         "JOIN fulfilment f ON f.id = a.fulfilment_id WHERE a.reask_pending IS NOT NULL "
                         "AND f.state != 'delivered'").fetchall()
     conn.close()
     out = []
-    for fid, order_id, raw in rows:
+    for fid, order_id, raw, tries in rows:
         try:
             pending = json.loads(raw) or {}
         except ValueError:
             pending = {}
-        out.append((fid, order_id, pending if isinstance(pending, dict) else {}))
+        out.append((fid, order_id, pending if isinstance(pending, dict) else {}, tries or 0))
     return out
 
 
@@ -20976,16 +21095,50 @@ async def automation_push_job(context: ContextTypes.DEFAULT_TYPE):
     can't take yet is tried again; the admin hears once if it keeps failing."""
     if not AUTOMATION_API_URL or not CATALOG_API_KEY:
         return
-    for fid, order_id, pending in _utd_units_reasked():
+    for fid, order_id, pending, tries in _utd_units_reasked():
         # 🔁 Ask for details again that @Utdreg_bot didn't hear when it was asked (22 Nov 2026)
+        if not pending.get("applied"):
+            # the bot stopped between noting it and asking again here: whatever @Utdreg_bot heard, it gets the
+            # unit's details again (an update), which puts a waiting order back to ▶️ Start. Not while a fresh
+            # ask is still on its way.
+            try:
+                fresh = datetime.utcnow() - datetime.fromisoformat(pending.get("at") or "2000-01-01") < timedelta(minutes=3)
+            except ValueError:
+                fresh = False
+            if fresh:
+                continue
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE automation_outbox SET reask_pending = NULL, reask_tries = 0, info_hash = "
+                         "CASE WHEN info_hash IS NULL THEN NULL ELSE 'reask' END WHERE fulfilment_id = ?", (fid,))
+            conn.commit(); conn.close()
+            continue
         status, body = await _automation_post("/api/order_pending", {
             "fulfilment_id": fid, "order_id": order_id, "reask": True, "kind": pending.get("kind"), "force": True})
         if status == 200 and body.get("ok"):
-            conn = sqlite3.connect(DB_PATH)
-            conn.execute("UPDATE automation_outbox SET reask_pending = NULL WHERE fulfilment_id = ?", (fid,))
-            conn.commit(); conn.close()
-        elif status in (502, 503):
+            _set_reask_pending(fid, None)
+            continue
+        if status in (502, 503):
             return
+        if status == 409:
+            continue   # its N/R is running there right now: again next minute
+        tries += 1
+        conn = sqlite3.connect(DB_PATH)
+        if tries >= AUTOMATION_PUSH_TRIES_ALERT:
+            # it keeps refusing: stop holding the unit back (its new details go as a plain update) and say so
+            conn.execute("UPDATE automation_outbox SET reask_pending = NULL, reask_tries = 0 WHERE fulfilment_id = ?", (fid,))
+        else:
+            conn.execute("UPDATE automation_outbox SET reask_tries = ? WHERE fulfilment_id = ?", (tries, fid))
+        conn.commit(); conn.close()
+        logger.warning("Order #%s unit %s: @Utdreg_bot didn't take the ask-again (try %s): %s", order_id, fid, tries,
+                       str(body.get("error") or status)[:200])
+        if tries >= AUTOMATION_PUSH_TRIES_ALERT:
+            try:
+                await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=(
+                    f"⚠️ Order #{order_id}: @Utdreg_bot didn't take the 🔁 ask-again ({tries} tries): "
+                    f"{str(body.get('error') or status)[:200]}. Check its 📥 Pending orders: what was started from the "
+                    "old details there may still be linked. The new details go to it as usual."))
+            except Exception:
+                pass
     for r, digest in _utd_units_to_push():
         try:
             info = json.loads(r[6]) if r[6] else {}
@@ -21843,6 +21996,7 @@ def main():
     app.add_handler(CallbackQueryHandler(ask_resend_skip, pattern=r"^askresend_skip:"))
     app.add_handler(CallbackQueryHandler(ask_resend_type, pattern=r"^askresend_t:"))
     app.add_handler(CallbackQueryHandler(ask_resend_force, pattern=r"^askresend_f:"))
+    app.add_handler(CallbackQueryHandler(ask_resend_cancel, pattern=r"^askresend_c:"))
     app.add_handler(CallbackQueryHandler(resend_cred_tap, pattern=r"^resendcred:"))
     app.add_handler(CallbackQueryHandler(coworker_add_start, pattern=r"^coworker_add$"))
     app.add_handler(CallbackQueryHandler(coworker_back, pattern=r"^coworker_back$"))
