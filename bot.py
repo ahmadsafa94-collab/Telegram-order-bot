@@ -1347,6 +1347,9 @@ def db_init():
         )
         conn.execute("DROP TABLE fulfilment_old")
         logger.info("Migrated fulfilment table to per-unit schema")
+    # 🔁 Ask for details again (22 Nov 2026): {type: new|renew|null, note, at, prev: the details asked again}.
+    if "reask_json" not in [r[1] for r in conn.execute("PRAGMA table_info(fulfilment)").fetchall()]:
+        conn.execute("ALTER TABLE fulfilment ADD COLUMN reask_json TEXT")
 
     conn.execute(
         """
@@ -4312,7 +4315,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_sync_serials_username", "awaiting_sync_serials_password", "sync_serials_username",
     "awaiting_restore_file", "restore_staged_path", "awaiting_restoreorder_file",
     "awaiting_discount_field", "discount_data",
-    "awaiting_resend_message_for_fulfilment",
+    "awaiting_resend_message_for_fulfilment", "resend_ask_type",
     "awaiting_coworker_add_field", "coworker_add_data",
     "awaiting_coworker_item_price",
     "awaiting_coworker_editprice_pct",
@@ -12006,6 +12009,9 @@ async def http_register_account(request):
         )
     fulfilment_id, item_id = rows[0]
     kind = _register_kind(item_id)
+    forced = db_get_reask(fulfilment_id).get("type")
+    if forced in ("new", "renew") and kind == "generic":
+        info["account_type"] = forced      # asked again as a new account / a renewal (22 Nov 2026)
 
     clean, problem = _clean_register_info(kind, info)
     if problem:
@@ -12025,6 +12031,7 @@ async def http_register_account(request):
             customer_data.pop(key, None)
 
     db_set_fulfilment_info(fulfilment_id, clean)
+    db_reask_answered(fulfilment_id)
     item_name = MENU.get(item_id, (item_id, 0))[0]
     try:
         await application.bot.send_message(
@@ -12670,6 +12677,9 @@ def db_admin_pending() -> list:
             "imd": iid in IMD_TRIGGER_ITEMS, "template": delivery_template_kind(iid), "via": via.get(oid), "order_done": done.get(oid, 0),
             "title": delivery_title_duration(MENU.get(iid, (iid,))[0])[0],
             "duration": delivery_title_duration(MENU.get(iid, (iid,))[0])[1],
+            # 🔁 Ask again (22 Nov 2026)
+            "can_reask": _reask_offered(iid), "can_switch": _reask_can_switch(iid),
+            "account_type": _unit_account_type(info.get(fid)), "asked_again": _reask_waiting(fid, state),
         })
     return out
 
@@ -12737,6 +12747,31 @@ async def http_admin_deliver(request):
                                  status=502, headers=headers)
     name, order_id, delivery_id = result
     return web.json_response({"ok": True, "name": name, "order_id": order_id, "delivery_id": delivery_id}, headers=headers)
+
+
+async def http_admin_reask(request):
+    """🔁 Ask again on a pending unit in the admin Mini App: {fulfilment_id, type: new|renew|any, note, force}.
+    Same as the chat's 🔁 Ask for details again (reask_unit)."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        data = await request.json()
+        fid = data["fulfilment_id"]
+        ask_type = data.get("type") or "any"
+        note = data.get("note") or ""
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if isinstance(fid, bool) or not isinstance(fid, int) or ask_type not in ("new", "renew", "any") \
+            or not isinstance(note, str) or len(note) > 1000:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    result = await reask_unit(request.app["application"], fid, ask_type, note, force=bool(data.get("force")))
+    if not result.get("ok"):
+        return web.json_response({"ok": False, "error": result.get("error"), "needs_force": bool(result.get("needs_force"))},
+                                 status=409, headers=headers)
+    return web.json_response({"ok": True, "note": result["note"], "reached": result["reached"]}, headers=headers)
 
 
 # ── 📑 Delivered sheet (admin Mini App) and @Utdreg_bot's renewals (15 Nov 2026) ──
@@ -14492,6 +14527,8 @@ async def start_api_server(application):
     api_app.router.add_get("/api/admin_delivered", http_admin_delivered)
     api_app.router.add_get("/api/admin_pending", http_admin_pending)
     api_app.router.add_post("/api/admin_deliver", http_admin_deliver)
+    api_app.router.add_post("/api/admin_reask", http_admin_reask)
+    api_app.router.add_options("/api/admin_reask", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_sheet", http_admin_sheet)
     api_app.router.add_options("/api/admin_sheet", http_set_coworker_price_options)
     api_app.router.add_post("/api/delivered_sheet_renewal", http_delivered_sheet_renewal)
@@ -16401,7 +16438,7 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     # asked to resend.
     if item_id not in UPTODATE_AI_TRIGGER_ITEMS and item_id not in MANUAL_ACCESS_ITEMS and not item_id.startswith("book_"):
         buttons.append(
-            [InlineKeyboardButton("📨 Ask to Resend Credentials", callback_data=f"askresend:{fulfilment_id}")]
+            [InlineKeyboardButton("🔁 Ask for details again", callback_data=f"askresend:{fulfilment_id}")]
         )
     buttons.append([InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{order_id}")])
     dm_btn = _dm_button(username)
@@ -16414,10 +16451,9 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def ask_resend_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin tapped '📨 Ask to Resend Credentials' — offers an optional
-    custom note before the request goes out, since sometimes the admin
-    wants to explain why (wrong info on file, lost in a restart, etc.)
-    and sometimes a plain nudge is enough."""
+    """Admin tapped '🔁 Ask for details again'. For an item asked as a new account or a renewal (UpToDate, Amboss …)
+    he first picks what it becomes: 🆕 a new account, 🔄 a renewal, or the customer chooses again (22 Nov 2026); then
+    an optional note, as before."""
     query = update.callback_query
     if query.from_user.id != ADMIN_CHAT_ID:
         await query.answer("Not authorized.", show_alert=True)
@@ -16425,84 +16461,298 @@ async def ask_resend_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     fulfilment_id = int(query.data.split(":", 1)[1])
-    if not db_get_fulfilment(fulfilment_id):
-        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That item no longer exists.")
+    row = db_get_fulfilment(fulfilment_id)
+    problem = _reask_problem(row)
+    if problem:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"⚠️ {problem}")
         return
+    clear_admin_flow_state(context.user_data)
+    if _reask_can_switch(row[3]):
+        now = _unit_account_type(row[6])
+        mark = lambda t: " (as now)" if now == t else (" (switch to this)" if now else "")
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=(f"🔁 Ask for the details of {MENU.get(row[3], (row[3],))[0]} (Order #{row[1]}) again.\n\n"
+                  "What should it be set up as? The new details replace the old ones."),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🆕 New account" + mark("new"), callback_data=f"askresend_t:{fulfilment_id}:new")],
+                [InlineKeyboardButton("🔄 Renewal" + mark("renew"), callback_data=f"askresend_t:{fulfilment_id}:renew")],
+                [InlineKeyboardButton("↩️ Let the customer choose", callback_data=f"askresend_t:{fulfilment_id}:any")],
+            ]),
+        )
+        return
+    await _ask_resend_note(context, fulfilment_id, "any")
 
+
+async def ask_resend_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin picked the type for '🔁 Ask for details again' (askresend_t:<fid>:new|renew|any)."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    _, fid, ask_type = query.data.split(":", 2)
+    await _ask_resend_note(context, int(fid), ask_type if ask_type in ("new", "renew") else "any")
+
+
+async def _ask_resend_note(context: ContextTypes.DEFAULT_TYPE, fulfilment_id: int, ask_type: str):
     clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_resend_message_for_fulfilment"] = fulfilment_id
+    context.user_data["resend_ask_type"] = ask_type
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
         text=(
-            "Type a custom message to include when asking the customer to resend their "
-            "credentials, or tap Cancel to send the request without one:"
+            "Type a custom message to include when asking for the details again, "
+            "or tap Cancel to send the request without one:"
         ),
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("❌ Cancel (no message)", callback_data=f"askresend_skip:{fulfilment_id}")]]
+            [[InlineKeyboardButton("❌ Cancel (no message)", callback_data=f"askresend_skip:{fulfilment_id}:{ask_type}")]]
         ),
     )
 
 
 async def ask_resend_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin tapped 'Cancel (no message)' — sends the resend request with
-    no custom note attached."""
+    """Admin tapped 'Cancel (no message)' — sends the request with no custom note attached."""
     query = update.callback_query
     if query.from_user.id != ADMIN_CHAT_ID:
         await query.answer("Not authorized.", show_alert=True)
         return
     await query.answer()
 
-    fulfilment_id = int(query.data.split(":", 1)[1])
+    parts = query.data.split(":")
+    fulfilment_id = int(parts[1])
+    ask_type = parts[2] if len(parts) > 2 else "any"
     context.user_data.pop("awaiting_resend_message_for_fulfilment", None)
-    await _send_resend_request(context, fulfilment_id, None)
+    context.user_data.pop("resend_ask_type", None)
+    await _send_resend_request(context, fulfilment_id, None, ask_type)
+
+
+async def ask_resend_force(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'Ask anyway': @Utdreg_bot had a result of the old details waiting for approval (askresend_f:<fid>:<type>)."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    _, fid, ask_type = query.data.split(":", 2)
+    note = context.user_data.pop(f"resend_note:{fid}", None)
+    await _send_resend_request(context, int(fid), note, ask_type, force=True)
 
 
 async def ask_resend_message_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catches the admin's typed custom message after tapping '📨 Ask to
-    Resend Credentials' and sends the request with it attached."""
+    """Catches the admin's typed custom message after '🔁 Ask for details again' and sends the request with it."""
     fulfilment_id = context.user_data.pop("awaiting_resend_message_for_fulfilment", None)
+    ask_type = context.user_data.pop("resend_ask_type", None) or "any"
     if not fulfilment_id:
         return
-    await _send_resend_request(context, fulfilment_id, update.message.text.strip())
+    await _send_resend_request(context, fulfilment_id, update.message.text.strip(), ask_type)
 
 
-async def _send_resend_request(context: ContextTypes.DEFAULT_TYPE, fulfilment_id: int, custom_message: str | None):
-    """Shared tail for both the Cancel and custom-message paths above —
-    sends the customer a message with a button that kicks off a fresh
-    New Account / Renewal credential collection for this exact item."""
-    row = db_get_fulfilment(fulfilment_id)
-    if not row:
-        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="That item no longer exists.")
-        return
-    _, order_id, user_id, item_id, unit_no, state, info_json = row
-    name = MENU.get(item_id, (item_id,))[0]
-
-    text = f"🔐 We need you to resend your account details for {name} (Order #{order_id})."
-    if custom_message:
-        text += f"\n\n{custom_message}"
-    text += "\n\nTap below to get started:"
-
-    try:
+async def _send_resend_request(context: ContextTypes.DEFAULT_TYPE, fulfilment_id: int, custom_message: str | None,
+                               ask_type: str = "any", force: bool = False):
+    """Shared tail of the chat's '🔁 Ask for details again': reask_unit does the work, the admin hears how it went."""
+    result = await reask_unit(context.application, fulfilment_id, ask_type, custom_message, force=force)
+    if result.get("needs_force"):
+        context.user_data[f"resend_note:{fulfilment_id}"] = custom_message
         await context.bot.send_message(
-            chat_id=user_id,
-            text=text,
+            chat_id=ADMIN_CHAT_ID, text=f"⚠️ {result['error']}",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔄 Resend Credentials", callback_data=f"resendcred:{fulfilment_id}")]]
-            ),
-        )
-        await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=f"✅ Asked the customer to resend credentials for {name} (Order #{order_id}).",
+                [[InlineKeyboardButton("🔁 Ask anyway", callback_data=f"askresend_f:{fulfilment_id}:{ask_type}")]]))
+        return
+    if not result.get("ok"):
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"⚠️ {result['error']}")
+        return
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=result["note"])
+
+
+# ── 🔁 Ask for details again (owner, 22 Nov 2026) ─────────────────────
+# From Pending Orders (chat or Mini App) the admin asks the customer (or the coworker who placed the order) for an
+# item's account details again, the same way as the first time, and can switch it between a new account and a
+# renewal. The old details are kept in fulfilment.reask_json["prev"], the unit goes back to needs_info, and the
+# details sent next replace them. An UpToDate plan already in @Utdreg_bot's 📥 Pending orders is told first, so the
+# N/R started from the old details is superseded (it refuses while one is running, and asks before dropping a result
+# waiting for approval).
+REASK_TYPE_WORDS = {"new": "🆕 new account", "renew": "🔄 renewal"}
+
+
+def db_get_reask(fulfilment_id) -> dict:
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT reask_json FROM fulfilment WHERE id = ?", (fulfilment_id,)).fetchone()
+    conn.close()
+    try:
+        out = json.loads(row[0]) if row and row[0] else {}
+    except ValueError:
+        out = {}
+    return out if isinstance(out, dict) else {}
+
+
+def db_set_reask(fulfilment_id, reask):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE fulfilment SET reask_json = ? WHERE id = ?",
+                 (json.dumps(reask) if reask else None, fulfilment_id))
+    conn.commit()
+    conn.close()
+
+
+def _unit_account_type(info_json):
+    """'new' / 'renew' as the unit's details say, else None."""
+    try:
+        info = json.loads(info_json) if info_json else {}
+    except ValueError:
+        return None
+    t = info.get("account_type") if isinstance(info, dict) else None
+    return t if t in ("new", "renew") else None
+
+
+def _reask_can_switch(item_id: str) -> bool:
+    """Items asked as 🆕 New Account / 🔄 Renewal in the chat (UpToDate, Amboss …); iMD keeps its own question."""
+    return _register_kind(item_id) == "generic"
+
+
+def _reask_offered(item_id: str) -> bool:
+    """Items with account details to ask for at all (not codes, manual access or books)."""
+    return item_id not in UPTODATE_AI_TRIGGER_ITEMS and item_id not in MANUAL_ACCESS_ITEMS and not item_id.startswith("book_")
+
+
+def _reask_problem(row):
+    """Why this unit's details can't be asked again (None when they can)."""
+    if not row:
+        return "That item no longer exists."
+    if not _reask_offered(row[3]):
+        return "This item has no account details to ask for."
+    if row[5] == "delivered":
+        return "This item was already delivered."
+    order = db_get_order(row[1])
+    if not order or order[5] not in ("paid", "delivered"):
+        return f"Order #{row[1]} isn't paid."
+    return None
+
+
+def db_reask_unit(fulfilment_id: int, ask_type, note=None) -> dict:
+    """Back to waiting for the customer: the details move to reask_json["prev"] and the unit is needs_info again."""
+    row = db_get_fulfilment(fulfilment_id)
+    old = db_get_reask(fulfilment_id)
+    try:
+        prev = json.loads(row[6]) if row and row[6] else None
+    except ValueError:
+        prev = None
+    reask = {"type": ask_type if ask_type in ("new", "renew") else None, "note": note or "",
+             "at": datetime.utcnow().isoformat(timespec="seconds"),
+             # asked again before the customer answered: the details asked about are still the first ones
+             "prev": prev if prev else old.get("prev")}
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE fulfilment SET reask_json = ?, info_json = NULL, state = 'needs_info' WHERE id = ?",
+                 (json.dumps(reask), fulfilment_id))
+    # the details sent next go to @Utdreg_bot again even when they're the same as before
+    try:
+        conn.execute("UPDATE automation_outbox SET info_hash = 'reask' WHERE fulfilment_id = ? AND info_hash IS NOT NULL",
+                     (fulfilment_id,))
+    except sqlite3.OperationalError:
+        pass   # no outbox yet (utd_automation_init not run)
+    conn.commit()
+    conn.close()
+    return reask
+
+
+def _reask_waiting(fulfilment_id, state) -> bool:
+    """Asked again and the customer hasn't answered yet (the Mini App's ⌛ Asked again)."""
+    reask = db_get_reask(fulfilment_id) if state == "needs_info" else {}
+    return bool(reask.get("at")) and not reask.get("done_at")
+
+
+def db_reask_answered(fulfilment_id):
+    """The customer sent the details asked again: the reask is done (prev stays for the record)."""
+    reask = db_get_reask(fulfilment_id)
+    if reask.get("at") and not reask.get("done_at"):
+        reask.pop("type", None)
+        reask["done_at"] = datetime.utcnow().isoformat(timespec="seconds")
+        db_set_reask(fulfilment_id, reask)
+
+
+def _reask_prev_value(fulfilment_id, field: str) -> str:
+    """The email/username in the details asked again (sending them again isn't 'already used')."""
+    prev = db_get_reask(fulfilment_id).get("prev") or {}
+    return str(prev.get(field) or "").strip().lower() if isinstance(prev, dict) else ""
+
+
+def _utd_unit_sent(fulfilment_id) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute("SELECT 1 FROM automation_outbox WHERE fulfilment_id = ? AND sent_at IS NOT NULL "
+                           "AND closed_sent IS NULL", (fulfilment_id,)).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    conn.close()
+    return row is not None
+
+
+async def reask_unit(application, fulfilment_id: int, ask_type: str = "any", note=None, force: bool = False) -> dict:
+    """Asks for a unit's details again (the chat's 🔁 Ask for details again and the Mini App's 🔁 Ask again).
+    ask_type: new | renew | any (the customer chooses). Answers {ok, note} or {ok: False, error, needs_force?}."""
+    row = db_get_fulfilment(fulfilment_id)
+    problem = _reask_problem(row)
+    if problem:
+        return {"ok": False, "error": problem}
+    _, order_id, user_id, item_id, unit_no, state, info_json = row
+    ask_type = ask_type if ask_type in ("new", "renew") else None
+    if ask_type and not _reask_can_switch(item_id):
+        return {"ok": False, "error": "This item can't be switched between a new account and a renewal."}
+    name = MENU.get(item_id, (item_id,))[0]
+    note = (note or "").strip()[:1000] or None
+    superseded = ""
+    if item_id in UPTODATE_PLAN_ITEMS and _utd_unit_sent(fulfilment_id) and AUTOMATION_API_URL and CATALOG_API_KEY:
+        status, body = await _automation_post("/api/order_pending", {
+            "fulfilment_id": fulfilment_id, "order_id": order_id, "reask": True, "kind": ask_type, "force": bool(force)})
+        if status == 200 and body.get("ok"):
+            superseded = body.get("superseded") or ""
+        elif status == 409:
+            return {"ok": False, "error": body.get("error") or "@Utdreg_bot can't take it now.",
+                    "needs_force": bool(body.get("needs_force")) and not force}
+        else:
+            # @Utdreg_bot is down: asked anyway, and the job tells it as soon as it answers
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE automation_outbox SET reask_pending = ? WHERE fulfilment_id = ?",
+                         (json.dumps({"kind": ask_type}), fulfilment_id))
+            conn.commit()
+            conn.close()
+            superseded = "@Utdreg_bot didn't answer; it's told as soon as it does"
+    reask = db_reask_unit(fulfilment_id, ask_type, note)
+    was = _unit_account_type(json.dumps(reask.get("prev") or {}))
+    # a half-finished form of the old details mustn't carry on
+    customer_data = application.user_data[user_id]
+    if customer_data.get("generic_fulfilment_id") == fulfilment_id:
+        for key in ("awaiting_generic_field", "generic_data", "generic_account_type"):
+            customer_data.pop(key, None)
+
+    text = f"🔐 Please send the account details again for {name} (Order #{order_id})."
+    if ask_type == "new":
+        text += " It will be set up as a 🆕 new account."
+    elif ask_type == "renew":
+        text += " It will be set up as a 🔄 renewal of your existing account."
+    if note:
+        text += f"\n\n{note}"
+    text += "\n\nTap below to get started:"
+    reached = True
+    try:
+        await application.bot.send_message(
+            chat_id=user_id, text=text,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔄 Resend Credentials", callback_data=f"resendcred:{fulfilment_id}")]]),
         )
     except Exception:
-        logger.exception("Failed to send resend-credentials request for fulfilment #%s", fulfilment_id)
-        await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=(
-                f"⚠️ Could not reach the customer for order #{order_id} — they may have "
-                "blocked the bot."
-            ),
-        )
+        reached = False
+        logger.exception("Failed to send the ask-again request for fulfilment #%s", fulfilment_id)
+    logger.info("Order #%s unit %s: details asked again (%s)", order_id, fulfilment_id, ask_type or "customer chooses")
+    who = "the coworker" if _order_coworker_id(order_id) else "the customer"
+    as_what = (f" as a {REASK_TYPE_WORDS[ask_type]}" + (f" (was {REASK_TYPE_WORDS[was]})" if was and was != ask_type else "")
+               if ask_type else "")
+    out = (f"✅ Asked {who} for the details of {name} (Order #{order_id}) again{as_what}. "
+           "The new ones replace the old ones.") if reached else (
+           f"⚠️ Couldn't reach {who} for order #{order_id} (they may have blocked the bot). The item waits for "
+           "their details again (Mini App: Complete Registration).")
+    if superseded:
+        out += f"\n🤖 @Utdreg_bot: {superseded}"
+    return {"ok": True, "note": out, "reached": reached, "order_id": order_id, "name": name}
 
 
 async def resend_cred_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -17780,18 +18030,24 @@ async def generic_type_selected(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("This step has expired — please check 📋 My Subscriptions to continue.")
         return
 
-    item_name = MENU.get(item_id, (item_id, 0))[0]
-    context.user_data["generic_account_type"] = account_type
-    context.user_data["generic_data"] = {}
-
-    fields = GENERIC_FIELDS if account_type == "new" else RENEWAL_FIELDS
-    _drop_browse_steps(context.user_data)
-    context.user_data["awaiting_generic_field"] = fields[0][0]
-
-    label = "New Account" if account_type == "new" else "Renewal"
+    # asked again as a new account / a renewal (🔁 Ask for details again): an old button can't change that
+    account_type = db_get_reask(fulfilment_id).get("type") or account_type
     # Plain text on purpose: the password rules mention symbols like _ and
     # #, and Telegram's Markdown parser breaks on unescaped underscores.
-    await query.edit_message_text(f"📝 {item_name} — {label}\n\n{fields[0][1]}", reply_markup=_cancel_button())
+    await query.edit_message_text(_begin_generic_fields(context.user_data, item_id, account_type),
+                                  reply_markup=_cancel_button())
+
+
+def _begin_generic_fields(user_data: dict, item_id: str, account_type: str) -> str:
+    """Starts the New Account / Renewal field list in this customer's session; returns the first prompt."""
+    item_name = MENU.get(item_id, (item_id, 0))[0]
+    user_data["generic_account_type"] = account_type
+    user_data["generic_data"] = {}
+    fields = GENERIC_FIELDS if account_type == "new" else RENEWAL_FIELDS
+    _drop_browse_steps(user_data)
+    user_data["awaiting_generic_field"] = fields[0][0]
+    label = "New Account" if account_type == "new" else "Renewal"
+    return f"📝 {item_name} — {label}\n\n{fields[0][1]}"
 
 
 async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -17830,7 +18086,9 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         # only checkable against what this customer has submitted to us
         # before for this exact subscription.
         if field in ("email", "username") and item_id:
-            if db_credential_already_used(update.effective_user.id, item_id, field, value):
+            # the same details sent again when asked again (🔁 Ask for details again) aren't "already used"
+            asked_again = _reask_prev_value(context.user_data.get("generic_fulfilment_id"), field) == value.lower()
+            if not asked_again and db_credential_already_used(update.effective_user.id, item_id, field, value):
                 await update.message.reply_text(
                     f"You've already used this {field} to register for this subscription before. "
                     "Please provide a different one:",
@@ -17868,9 +18126,15 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         "✅ Details received — we'll get your subscription set up and notify you here.",
     )
 
+    # what was chosen goes with the details (@Utdreg_bot reads new/renewal from it)
+    data["account_type"] = account_type
+    reask = db_get_reask(fulfilment_id) if fulfilment_id else {}
+    asked_again = bool(reask.get("at")) and not reask.get("done_at")
     if fulfilment_id:
         db_set_fulfilment_info(fulfilment_id, data)
         db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
+        if asked_again:
+            db_reask_answered(fulfilment_id)
 
     # Record the credentials so future New Account attempts for this same
     # subscription can be checked against them — only applies to genuinely
@@ -17898,10 +18162,16 @@ async def generic_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             tag = "🔄 RENEWAL"
 
+        if asked_again:
+            was = _unit_account_type(json.dumps(reask.get("prev") or {}))
+            head = (f"🔁 New details replace the old ones — Order #{order_id} ({REASK_TYPE_WORDS[account_type]}"
+                    + (f", was {REASK_TYPE_WORDS[was]}" if was and was != account_type else "") + ")\n")
+        else:
+            head = f"📝 Manual fulfilment needed — Order #{order_id} ({tag})\n"
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
             text=(
-                f"📝 Manual fulfilment needed — Order #{order_id} ({tag})\n"
+                head +
                 f"Product: {item_name}\n\n"
                 f"{detail}"
                 "Deliver within 48 hours using the 📤 Send Credentials button on this order."
@@ -18045,6 +18315,12 @@ async def start_generic_collection(context: ContextTypes.DEFAULT_TYPE, order_id:
     customer_data["generic_fulfilment_id"] = fulfilment_id
     customer_data["generic_item_id"] = item_id
     customer_data["generic_order_id"] = order_id
+    forced = db_get_reask(fulfilment_id).get("type")
+    if forced in ("new", "renew"):
+        # asked again as a new account / a renewal: no New/Renewal question (22 Nov 2026)
+        await context.bot.send_message(chat_id=user_id, text=_begin_generic_fields(customer_data, item_id, forced),
+                                       reply_markup=_cancel_button())
+        return
     await context.bot.send_message(
         chat_id=user_id,
         text=f"📝 Let's set up your {item_name}. Is this a:",
@@ -20599,6 +20875,9 @@ def utd_automation_init():
                  "sent_at TEXT, tries INTEGER NOT NULL DEFAULT 0, error TEXT, alerted INTEGER NOT NULL DEFAULT 0, closed_sent TEXT)")
     if "closed_sent" not in [r[1] for r in conn.execute("PRAGMA table_info(automation_outbox)")]:
         conn.execute("ALTER TABLE automation_outbox ADD COLUMN closed_sent TEXT")
+    if "reask_pending" not in [r[1] for r in conn.execute("PRAGMA table_info(automation_outbox)")]:
+        # 🔁 Ask for details again that @Utdreg_bot didn't hear yet (22 Nov 2026): {kind}
+        conn.execute("ALTER TABLE automation_outbox ADD COLUMN reask_pending TEXT")
     conn.commit()
     conn.close()
     if db_get_meta("automation_push_from") is None:
@@ -20651,7 +20930,7 @@ def _utd_units_to_push() -> list:
         f"SELECT f.id, f.order_id, f.user_id, f.item_id, f.unit_no, f.state, f.info_json, a.info_hash, a.tries, a.alerted "
         f"FROM fulfilment f JOIN orders o ON o.id = f.order_id LEFT JOIN automation_outbox a ON a.fulfilment_id = f.id "
         f"WHERE f.id > ? AND f.item_id IN ({marks}) AND f.state = 'awaiting_delivery' AND o.status IN ('paid', 'delivered') "
-        f"AND COALESCE(f.info_json, '') NOT IN ('', '{{}}') ORDER BY f.id",
+        f"AND COALESCE(f.info_json, '') NOT IN ('', '{{}}') AND a.reask_pending IS NULL ORDER BY f.id",
         (start, *sorted(UPTODATE_PLAN_ITEMS))).fetchall()
     conn.close()
     out = []
@@ -20659,6 +20938,23 @@ def _utd_units_to_push() -> list:
         digest = hashlib.sha256((r[6] or "").encode()).hexdigest()
         if digest != r[7]:
             out.append((r, digest))
+    return out
+
+
+def _utd_units_reasked() -> list:
+    """(fulfilment id, order id, {kind}) of units asked again while @Utdreg_bot couldn't be told."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT a.fulfilment_id, f.order_id, a.reask_pending FROM automation_outbox a "
+                        "JOIN fulfilment f ON f.id = a.fulfilment_id WHERE a.reask_pending IS NOT NULL "
+                        "AND f.state != 'delivered'").fetchall()
+    conn.close()
+    out = []
+    for fid, order_id, raw in rows:
+        try:
+            pending = json.loads(raw) or {}
+        except ValueError:
+            pending = {}
+        out.append((fid, order_id, pending if isinstance(pending, dict) else {}))
     return out
 
 
@@ -20680,6 +20976,16 @@ async def automation_push_job(context: ContextTypes.DEFAULT_TYPE):
     can't take yet is tried again; the admin hears once if it keeps failing."""
     if not AUTOMATION_API_URL or not CATALOG_API_KEY:
         return
+    for fid, order_id, pending in _utd_units_reasked():
+        # 🔁 Ask for details again that @Utdreg_bot didn't hear when it was asked (22 Nov 2026)
+        status, body = await _automation_post("/api/order_pending", {
+            "fulfilment_id": fid, "order_id": order_id, "reask": True, "kind": pending.get("kind"), "force": True})
+        if status == 200 and body.get("ok"):
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE automation_outbox SET reask_pending = NULL WHERE fulfilment_id = ?", (fid,))
+            conn.commit(); conn.close()
+        elif status in (502, 503):
+            return
     for r, digest in _utd_units_to_push():
         try:
             info = json.loads(r[6]) if r[6] else {}
@@ -20754,6 +21060,15 @@ async def http_deliver_unit(request):
         return web.json_response({"error": "the order isn't paid"}, status=409)
     if row[5] == "delivered":
         return web.json_response({"ok": True, "status": "already_delivered"})
+    # 🔁 Ask for details again (22 Nov 2026): what was started from the old details isn't delivered
+    if row[5] == "needs_info":
+        return web.json_response({"error": "the customer is being asked for this order's details again; "
+                                           "nothing was delivered"}, status=409)
+    now_kind = _unit_account_type(row[6])
+    if now_kind and now_kind != kind:
+        return web.json_response({"error": f"this order is now a {'renewal' if now_kind == 'renew' else 'new account'}, "
+                                           f"not a {'renewal' if kind == 'renew' else 'new account'}; nothing was delivered"},
+                                 status=409)
     # a new account and a renewal both go out as the ready-made form, filled in; a coworker's order just the login
     # and the app-only remark (owner, 20 Nov 2026)
     text = (coworker_credentials_text(row[3], username, password) if _order_coworker_id(order_id)
@@ -21526,6 +21841,8 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_pending_back, pattern=r"^apend_back$"))
     app.add_handler(CallbackQueryHandler(ask_resend_start, pattern=r"^askresend:"))
     app.add_handler(CallbackQueryHandler(ask_resend_skip, pattern=r"^askresend_skip:"))
+    app.add_handler(CallbackQueryHandler(ask_resend_type, pattern=r"^askresend_t:"))
+    app.add_handler(CallbackQueryHandler(ask_resend_force, pattern=r"^askresend_f:"))
     app.add_handler(CallbackQueryHandler(resend_cred_tap, pattern=r"^resendcred:"))
     app.add_handler(CallbackQueryHandler(coworker_add_start, pattern=r"^coworker_add$"))
     app.add_handler(CallbackQueryHandler(coworker_back, pattern=r"^coworker_back$"))

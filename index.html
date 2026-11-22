@@ -854,6 +854,23 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
   </div>
 </div>
 
+<!-- 🔁 Ask again: the customer (or coworker) sends an item's details again (22 Nov 2026) -->
+<div class="overlay" id="reaskOverlay" onclick="if(event.target===this)closeReask()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="reaskTitle">🔁 Ask again</div>
+    <div style="padding:0 15px 15px">
+      <div class="t-meta" style="margin:6px 0 10px">They get a message with a button to send the details again, like the first time. The new details replace the old ones.</div>
+      <div id="reaskTypes"></div>
+      <div style="font-size:12px;color:var(--hint);margin:8px 0 4px">Note to include (optional)</div>
+      <textarea id="reaskNote" class="cw-input" rows="3" maxlength="1000" placeholder="e.g. The password didn't work" aria-label="Note"></textarea>
+      <div id="reaskMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>
+      <button class="btn" id="reaskSend" onclick="sendReask()">🔁 Ask again</button>
+      <button class="btn sec" style="margin-top:8px" onclick="closeReask()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- Request a book -->
 <div class="overlay" id="bookOverlay" onclick="if(event.target===this)closeBookRequest()">
   <div class="sheet">
@@ -2030,13 +2047,15 @@ function drawAdminPending(){
       '<button class="via" style="border:0;cursor:pointer;background:rgba(239,68,68,.15);color:#f87171;margin:0;text-transform:none;letter-spacing:0" onclick="deleteAdminOrder('+o.order_id+')">🗑 Delete order</button></div>'+
       o.units.map(i=>
         '<div class="t-card" id="ap-'+i.fid+'"><div class="t-top"><div class="t-title">'+escHtml(i.name)+(i.unit>1?' #'+i.unit:'')+'</div>'+
-        '<span class="t-pill '+(i.state==='needs_info'?'open':'ok')+'">'+(i.state==='needs_info'?'⌛ Waiting for customer':'📤 Ready')+'</span></div>'+
+        '<span class="t-pill '+(i.state==='needs_info'?'open':'ok')+'">'+(i.asked_again?'⌛ Asked again':i.state==='needs_info'?'⌛ Waiting for customer':'📤 Ready')+'</span></div>'+
         '<div style="margin-top:6px">'+viaTag(i.via)+'</div>'+
         fieldsHtml(i)+
         '<div style="display:flex;gap:8px;margin-top:10px">'+
           (i.imd?'':'<button class="btn" style="margin:0;padding:10px;width:auto;flex:1.4" onclick="openDeliver('+i.fid+')">📤 Deliver</button>')+
           '<button class="tk-btn" style="flex:1;width:auto;white-space:nowrap" onclick="adminChat(\'deliver\','+i.fid+')">'+(i.imd?'🤖 Renew / deliver in chat':'💬 Open in chat')+'</button>'+
-        '</div></div>').join('')).join('');
+        '</div>'+
+        (i.can_reask?'<button class="tk-btn" style="margin-top:8px" onclick="openReask('+i.fid+')">🔁 Ask again'+(i.can_switch?' · new / renewal':'')+'</button>':'')+
+        '</div>').join('')).join('');
 }
 function deleteAdminOrder(orderId){
   const units=adminPending.filter(x=>x.order_id===orderId); if(!units.length) return;
@@ -2064,6 +2083,43 @@ function openDeliver(fid){
   const box=document.getElementById('delText'); box.value=deliveryTemplate(i); document.getElementById('delMsg').textContent='';
   document.getElementById('delOverlay').classList.add('on');
   setTimeout(()=>{ box.focus(); const k=box.value.indexOf('Username:'); const p=k>=0?k+'Username:'.length:box.value.length; try{ box.setSelectionRange(p,p); }catch(e){} box.scrollTop=0; },150);
+}
+// 🔁 Ask again: the details of a pending item, again, as a new account / a renewal / the customer's choice
+let reaskFid=null, reaskType='any';
+function openReask(fid){
+  const i=adminPending.find(x=>x.fid===fid); if(!i) return;
+  reaskFid=fid; reaskType=i.can_switch&&i.account_type?i.account_type:'any';
+  document.getElementById('reaskTitle').textContent='🔁 Ask again · '+i.name+' · Order #'+i.order_id;
+  document.getElementById('reaskNote').value=''; document.getElementById('reaskMsg').textContent='';
+  drawReaskTypes(); document.getElementById('reaskOverlay').classList.add('on');
+}
+function drawReaskTypes(){
+  const i=adminPending.find(x=>x.fid===reaskFid), box=document.getElementById('reaskTypes');
+  if(!i||!i.can_switch){ box.innerHTML=''; return; }
+  const now=t=>i.account_type===t?' (as now)':'';
+  const opt=(t,l)=>'<button class="tk-btn" style="margin-top:6px;'+(reaskType===t?'outline:2px solid var(--accent,#3b82f6)':'')+'" onclick="reaskType=\''+t+'\';drawReaskTypes()">'+(reaskType===t?'● ':'○ ')+l+'</button>';
+  box.innerHTML='<div style="font-size:12px;color:var(--hint);margin:4px 0">Set it up as</div>'+
+    opt('new','🆕 New account'+now('new'))+opt('renew','🔄 Renewal'+now('renew'))+opt('any','↩️ Let the customer choose');
+}
+function closeReask(){ document.getElementById('reaskOverlay').classList.remove('on'); reaskFid=null; }
+async function sendReask(force){
+  const fid=reaskFid; if(!fid) return;
+  const msg=document.getElementById('reaskMsg'), btn=document.getElementById('reaskSend');
+  btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Sending…';
+  try{
+    const resp=await fetch(withAuth('/api/admin_reask'),{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({fulfilment_id:fid,type:reaskType,note:document.getElementById('reaskNote').value.trim(),force:!!force})});
+    const data=await resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
+    if(!data.ok){
+      msg.style.color='#dc2626'; msg.textContent=data.error||'Could not ask again.';
+      if(data.needs_force) askConfirm((data.error||'')+' Ask anyway?',()=>sendReask(true));
+      return;
+    }
+    const i=adminPending.find(x=>x.fid===fid);
+    if(i){ i.state='needs_info'; i.asked_again=true; i.fields=[]; i.info=''; if(reaskType!=='any') i.account_type=reaskType; }
+    closeReask(); drawAdminPending(); showToast(data.reached?'Asked again':'Saved, but they could not be reached');
+  }catch(e){ msg.style.color='#dc2626'; msg.textContent='Network error — please try again.'; }
+  finally{ btn.disabled=false; }
 }
 // Editing something already delivered (Delivered tab)
 let editDelivery=null;
