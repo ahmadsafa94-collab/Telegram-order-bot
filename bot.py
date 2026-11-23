@@ -17254,7 +17254,7 @@ async def _save_unit_edit(application, row, info: dict, by: str, force: bool = F
             f": {body['superseded']}" if isinstance(body, dict) and body.get("superseded") else "")
     if info.get("account_type") == "new" and (info.get("email") or info.get("username")):
         db_record_used_credentials(user_id, item_id, info.get("email"), info.get("username"))
-    customer_data = application.user_data[user_id]
+    customer_data = (getattr(application, "user_data", None) or {}).get(user_id) or {}
     if customer_data.get("generic_fulfilment_id") == fid:
         for key in ("awaiting_generic_field", "generic_data", "generic_account_type", "generic_fulfilment_id",
                     "generic_item_id", "generic_order_id"):
