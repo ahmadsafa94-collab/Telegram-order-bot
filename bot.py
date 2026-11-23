@@ -14747,6 +14747,10 @@ async def start_api_server(application):
     api_app.router.add_post("/api/admin_create_order", http_admin_create_order)
     api_app.router.add_options("/api/admin_create_order", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_reask", http_admin_reask)
+    api_app.router.add_get("/api/unit_details", http_unit_details)
+    api_app.router.add_options("/api/unit_details", http_imd_search_options)
+    api_app.router.add_post("/api/edit_unit_details", http_edit_unit_details)
+    api_app.router.add_options("/api/edit_unit_details", http_set_coworker_price_options)
     api_app.router.add_options("/api/admin_reask", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_sheet", http_admin_sheet)
     api_app.router.add_options("/api/admin_sheet", http_set_coworker_price_options)
@@ -16852,8 +16856,9 @@ def _reask_offered(item_id: str) -> bool:
     return item_id not in UPTODATE_AI_TRIGGER_ITEMS and item_id not in MANUAL_ACCESS_ITEMS and not item_id.startswith("book_")
 
 
-def _reask_problem(row):
-    """Why this unit's details can't be asked again (None when they can)."""
+def _reask_problem(row, paid: bool = True):
+    """Why this unit's details can't be asked again (None when they can). paid=False (✏️ Edit details): an unpaid
+    order is fine too, but not a cancelled or rejected one."""
     if not row:
         return "That item no longer exists."
     if not _reask_offered(row[3]):
@@ -16861,8 +16866,12 @@ def _reask_problem(row):
     if row[5] == "delivered":
         return "This item was already delivered."
     order = db_get_order(row[1])
-    if not order or order[5] not in ("paid", "delivered"):
+    if not order:
+        return f"Order #{row[1]} no longer exists."
+    if paid and order[5] not in ("paid", "delivered"):
         return f"Order #{row[1]} isn't paid."
+    if order[5] in ("cancelled", "rejected"):
+        return f"Order #{row[1]} was {order[5]}."
     return None
 
 
@@ -16879,6 +16888,8 @@ def db_reask_unit(fulfilment_id: int, ask_type, note=None):
              "at": datetime.utcnow().isoformat(timespec="seconds"),
              # asked again before the customer answered: the details asked about are still the first ones
              "prev": prev if prev else old.get("prev")}
+    if old.get("edits"):
+        reask["edits"] = old["edits"]   # ✏️ Edit details history stays
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute("UPDATE fulfilment SET reask_json = ?, info_json = NULL, state = 'needs_info' "
                        "WHERE id = ? AND state != 'delivered'", (json.dumps(reask), fulfilment_id))
@@ -16942,13 +16953,17 @@ async def cancel_reask(application, fulfilment_id: int) -> dict:
         return {"ok": False, "error": "That item no longer exists."}
     if not _reask_waiting(fulfilment_id, row[5]):
         return {"ok": False, "error": "This item isn't waiting for its details again."}
-    prev = db_get_reask(fulfilment_id).get("prev")
+    old_reask = db_get_reask(fulfilment_id)
+    prev = old_reask.get("prev")
     prev = prev if isinstance(prev, dict) and prev else None
+    kept = {"cancelled_at": datetime.utcnow().isoformat(timespec="seconds")}
+    if old_reask.get("edits"):
+        kept["edits"] = old_reask["edits"]   # ✏️ Edit details history stays (23 Nov 2026)
     conn = sqlite3.connect(DB_PATH)
     # cancelled_at: the customer's 🔄 Resend Credentials button from that request no longer starts a form
     cur = conn.execute("UPDATE fulfilment SET info_json = ?, state = ?, reask_json = ? WHERE id = ? AND state = 'needs_info'",
                        (json.dumps(prev) if prev else None, "awaiting_delivery" if prev else "needs_info",
-                        json.dumps({"cancelled_at": datetime.utcnow().isoformat(timespec="seconds")}), fulfilment_id))
+                        json.dumps(kept), fulfilment_id))
     if cur.rowcount:
         try:
             # a re-ask @Utdreg_bot never heard of is dropped; the details go to it again either way
@@ -17080,6 +17095,272 @@ async def reask_unit(application, fulfilment_id: int, ask_type: str = "any", not
     if superseded:
         out += f"\n🤖 @Utdreg_bot: {superseded}"
     return {"ok": True, "note": out, "reached": reached, "order_id": order_id, "name": name}
+
+
+# ── ✏️ Edit details (owner, 23 Nov 2026) ─────────────────────────────
+# While a unit is still pending, the customer, the coworker whose order it is, or the admin can change its account
+# details and switch it between a 🆕 new account and a 🔄 renewal; the subscription itself never changes. Only items
+# asked as new/renewal (UpToDate, Amboss …), only with details already sent, never while asked again. Each edit is
+# kept in fulfilment.reask_json["edits"] ({at, by, prev}, the last EDIT_HISTORY_MAX). An UpToDate plan already in
+# @Utdreg_bot's 📥 Pending orders is told first (edit: true), so the N/R started from the old details is let go.
+EDIT_HISTORY_MAX = 5
+EDIT_BY_WORDS = {"admin": "the admin", "customer": "the customer", "coworker": "the coworker", "chatbot": "the support chat"}
+
+
+def _edit_actor(user_id: int, row):
+    """Who `user_id` is to this unit: 'admin', 'customer' (it's theirs), 'coworker' (logged in as the coworker whose
+    order it is), else None. ?previewcw never counts: only the verified id."""
+    if not row or not user_id:
+        return None
+    if user_id == ADMIN_CHAT_ID:
+        return "admin"
+    if row[2] == user_id:
+        return "customer"
+    login = db_get_user_coworker(user_id)
+    cw = _order_coworker_id(row[1])
+    if login and cw and login[0] == cw:
+        return "coworker"
+    return None
+
+
+def _unit_info(info_json) -> dict:
+    try:
+        info = json.loads(info_json) if info_json else {}
+    except ValueError:
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
+def _edit_unit_problem(row):
+    """Why this unit's details can't be edited (None when they can). Paid or not, but not delivered, cancelled,
+    asked again, or without details yet."""
+    problem = _reask_problem(row, paid=False)
+    if problem:
+        return problem
+    if not _reask_can_switch(row[3]):
+        return "This item's details can't be edited here."
+    if _reask_waiting(row[0], row[5]):
+        return "This item is waiting for its details again: send them with 🔄 Resend Credentials."
+    if not _unit_info(row[6]):
+        return "No details were sent for this item yet."
+    return None
+
+
+def _edit_diff(old: dict, new: dict, hide_passwords: bool = False) -> list:
+    """['Email: a@x.com → b@x.com', …] between two sets of details (the /api/edit_order_details format)."""
+    lines = []
+    was, now = old.get("account_type"), new.get("account_type")
+    if was != now and now in REASK_TYPE_WORDS:
+        lines.append(f"Account type: {REASK_TYPE_WORDS.get(was, was or '(none)')} → {REASK_TYPE_WORDS[now]}")
+    for key in [k for k in new if k != "account_type"] + [k for k in old if k not in new and k != "account_type"]:
+        a, b = str(old.get(key) or ""), str(new.get(key) or "")
+        if a == b:
+            continue
+        label = (fulfilment_info_fields(json.dumps({key: "x"})) or [(key, "")])[0][0]
+        if hide_passwords and "password" in key:
+            lines.append(f"{label}: changed" if b else f"{label}: removed")
+        elif not b:
+            lines.append(f"{label}: {a} → (removed)")
+        else:
+            lines.append(f"{label}: {a or '(empty)'} → {b}")
+    return lines
+
+
+def db_edit_unit_info(fulfilment_id: int, info: dict, by: str):
+    """Replaces a pending unit's details in one step (never once it's delivered) and adds {at, by, prev} to its edit
+    history. The info_json stored, or None when it was delivered (or deleted) meanwhile."""
+    row = db_get_fulfilment(fulfilment_id)
+    if not row:
+        return None
+    reask = db_get_reask(fulfilment_id)
+    edits = [e for e in (reask.get("edits") or []) if isinstance(e, dict)]
+    edits.append({"at": datetime.utcnow().isoformat(timespec="seconds"), "by": by, "prev": _unit_info(row[6])})
+    reask["edits"] = edits[-EDIT_HISTORY_MAX:]
+    stored = json.dumps(info)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("UPDATE fulfilment SET info_json = ?, reask_json = ? WHERE id = ? AND state != 'delivered'",
+                       (stored, json.dumps(reask), fulfilment_id))
+    conn.commit()
+    conn.close()
+    return stored if cur.rowcount else None
+
+
+def _edit_seen_value(fulfilment_id, row, field: str, value: str) -> bool:
+    """This unit's own email/username (now, asked about again, or before an edit): giving it again isn't 'used'."""
+    value = value.strip().lower()
+    if str(_unit_info(row[6]).get(field) or "").strip().lower() == value:
+        return True
+    if _reask_prev_value(fulfilment_id, field) == value:
+        return True
+    return any(str((e.get("prev") or {}).get(field) or "").strip().lower() == value
+               for e in db_get_reask(fulfilment_id).get("edits") or [] if isinstance(e, dict))
+
+
+async def _save_unit_edit(application, row, info: dict, by: str, force: bool = False) -> dict:
+    """Saves new details on a pending unit: tells @Utdreg_bot first when it has the unit, then stores them (with the
+    history), records a new account's email/username and drops a half-finished chat form of the old ones.
+    {ok, stored, utd} or {ok: False, error, status, busy?, needs_force?}. by: admin | customer | coworker | chatbot."""
+    fid, order_id, user_id, item_id = row[0], row[1], row[2], row[3]
+    order = db_get_order(order_id)
+    told, utd_note = None, ""   # @Utdreg_bot: True heard it, False to be told by automation_push_job, None not involved
+    if item_id in UPTODATE_PLAN_ITEMS and order and order[5] in ("paid", "delivered") and _utd_unit_sent(fid) \
+            and AUTOMATION_API_URL and CATALOG_API_KEY:
+        payload = _utd_order_payload(row[:7], info)
+        payload.update(update=True, edit=True, force=bool(force and by == "admin"))
+        status, body = await _automation_post("/api/order_pending", payload)
+        if status == 200 and body.get("ok"):
+            told = True
+        elif status == 409:
+            if body.get("needs_force") and by != "admin":
+                return {"ok": False, "status": 409, "error": (
+                    "This order is being finalised right now, so its details can't be changed here. Please contact "
+                    "support.")}
+            return {"ok": False, "status": 409, "busy": bool(body.get("busy")),
+                    "needs_force": bool(body.get("needs_force")) and not force,
+                    "error": body.get("error") or "@Utdreg_bot can't take the change now."}
+        else:
+            told, utd_note = False, "@Utdreg_bot didn't answer; it gets the new details as soon as it does"
+    stored = db_edit_unit_info(fid, info, by)
+    if stored is None:
+        return {"ok": False, "status": 409, "error": "This item was already delivered."}
+    if told is not None:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            # heard: the job mustn't send them again; not heard: the job sends them as an edit (edit: true, force)
+            conn.execute("UPDATE automation_outbox SET info_hash = ? WHERE fulfilment_id = ?",
+                         (hashlib.sha256(stored.encode()).hexdigest() if told else "edit", fid))
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        conn.close()
+    if told:
+        utd_note = "@Utdreg_bot has the new details" + (
+            f": {body['superseded']}" if isinstance(body, dict) and body.get("superseded") else "")
+    if info.get("account_type") == "new" and (info.get("email") or info.get("username")):
+        db_record_used_credentials(user_id, item_id, info.get("email"), info.get("username"))
+    customer_data = application.user_data[user_id]
+    if customer_data.get("generic_fulfilment_id") == fid:
+        for key in ("awaiting_generic_field", "generic_data", "generic_account_type", "generic_fulfilment_id",
+                    "generic_item_id", "generic_order_id"):
+            customer_data.pop(key, None)
+    logger.info("Order #%s unit %s: details edited by %s", order_id, fid, by)
+    return {"ok": True, "stored": stored, "utd": utd_note}
+
+
+async def edit_unit_details(application, fulfilment_id: int, actor: str, account_type, fields: dict,
+                            force: bool = False) -> dict:
+    """✏️ Edit details on a pending unit (Mini App, any of admin / customer / coworker). The item never changes.
+    {ok, note, changed} or {ok: False, error, field?, status, busy?, needs_force?}."""
+    row = db_get_fulfilment(fulfilment_id)
+    problem = _edit_unit_problem(row)
+    if problem:
+        return {"ok": False, "status": 409, "error": problem}
+    _, order_id, user_id, item_id = row[:4]
+    account_type = str(account_type or "").lower()
+    if account_type not in ("new", "renew"):
+        return {"ok": False, "status": 400, "error": "Choose 🆕 New account or 🔄 Renewal.", "field": "account_type"}
+    if not isinstance(fields, dict):
+        return {"ok": False, "status": 400, "error": "Invalid details."}
+    wanted = REGISTER_FIELDS[("generic", account_type)]
+    info = {"account_type": account_type}
+    for key in wanted:
+        value = fields.get(key)
+        value = str(value).strip() if value is not None and not isinstance(value, (dict, list)) else ""
+        if not value:
+            label = (fulfilment_info_fields(json.dumps({key: "x"})) or [(key, "")])[0][0]
+            return {"ok": False, "status": 400, "error": f"{label} is missing.", "field": key}
+        if len(value) > 200:
+            return {"ok": False, "status": 400, "error": "That's too long.", "field": key}
+        problem = _edit_problem("generic", info, key, value)
+        if problem:
+            return {"ok": False, "status": 400, "error": problem[0].upper() + problem[1:] + ".", "field": key}
+        if account_type == "new" and key in ("email", "username") and not _edit_seen_value(fulfilment_id, row, key, value) \
+                and db_credential_already_used(user_id, item_id, key, value):
+            return {"ok": False, "status": 400, "field": key,
+                    "error": f"This {key} was already used to register for this subscription. Choose a different one."}
+        info[key] = value
+    old = _unit_info(row[6])
+    changed = _edit_diff(old, info)
+    if not changed:
+        return {"ok": True, "changed": [], "note": "Nothing changed: the details are already like that."}
+    saved = await _save_unit_edit(application, row, info, actor, force)
+    if not saved.get("ok"):
+        return saved
+    name = MENU.get(item_id, (item_id,))[0]
+    lines = "\n".join(changed)
+    who = EDIT_BY_WORDS.get(actor, actor)
+    if actor != "admin" and ADMIN_CHAT_ID:
+        try:
+            await application.bot.send_message(chat_id=ADMIN_CHAT_ID, text=(
+                f"✏️ Order #{order_id} · {name}: {who} edited the details.\n{lines}"
+                + (f"\n🤖 {saved['utd']}" if saved.get("utd") else "")
+                + ("\n\n(This item is waiting for delivery: use the new details.)" if row[5] == "awaiting_delivery" else "")))
+        except Exception:
+            logger.exception("edit_unit_details: couldn't tell the admin about order #%s", order_id)
+    if actor != "customer" and user_id:
+        try:
+            await application.bot.send_message(chat_id=user_id, text=(
+                f"✏️ The account details for {name} (Order #{order_id}) were updated:\n"
+                + "\n".join(_edit_diff(old, info, hide_passwords=True))))
+        except Exception:
+            logger.exception("edit_unit_details: couldn't tell user %s", user_id)
+    note = f"✅ Details of {name} (Order #{order_id}) updated.\n{lines}"
+    if saved.get("utd"):
+        note += f"\n🤖 {saved['utd']}"
+    return {"ok": True, "changed": changed, "note": note}
+
+
+async def http_unit_details(request):
+    """GET ?uid&tok&fid: a pending unit's details for the Mini App's ✏️ Edit details sheet (its customer, the coworker
+    whose order it is, or the admin)."""
+    from aiohttp import web
+    headers = _imd_search_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    try:
+        fid = int(request.query.get("fid", ""))
+    except ValueError:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    row = db_get_fulfilment(fid)
+    if not _edit_actor(user_id, row):
+        return web.json_response({"ok": False, "error": "Not found"}, status=404, headers=headers)
+    info = _unit_info(row[6])
+    problem = _edit_unit_problem(row)
+    return web.json_response({
+        "ok": True, "fulfilment_id": fid, "order_id": row[1], "name": MENU.get(row[3], (row[3],))[0],
+        "editable": problem is None, "problem": problem or "", "account_type": _unit_account_type(row[6]),
+        "fields": {k: str(v) for k, v in info.items() if k in REGISTER_FIELDS[("generic", "new")] + REGISTER_FIELDS[("generic", "renew")]},
+    }, headers=headers)
+
+
+async def http_edit_unit_details(request):
+    """POST ?uid&tok {fulfilment_id, account_type: new|renew, fields: {…}, force?}: ✏️ Edit details from the Mini App.
+    400 {error, field} for a value to fix; 409 {error, busy?, needs_force?} when it can't be changed now."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    user_id = _verify_mini_app_token(request.query.get("uid", ""), request.query.get("tok", ""))
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401, headers=headers)
+    try:
+        data = await request.json()
+        fid = data["fulfilment_id"]
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if isinstance(fid, bool) or not isinstance(fid, int):
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    actor = _edit_actor(user_id, db_get_fulfilment(fid))
+    if not actor:
+        return web.json_response({"ok": False, "error": "Not found"}, status=404, headers=headers)
+    result = await edit_unit_details(request.app["application"], fid, actor, data.get("account_type"),
+                                     data.get("fields"), force=bool(data.get("force")))
+    if not result.get("ok"):
+        out = {"ok": False, "error": result.get("error")}
+        for k in ("field", "busy", "needs_force"):
+            if result.get(k):
+                out[k] = result[k]
+        return web.json_response(out, status=result.get("status") or 409, headers=headers)
+    return web.json_response({"ok": True, "note": result["note"], "changed": result["changed"]}, headers=headers)
 
 
 async def resend_cred_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -21371,6 +21652,9 @@ async def automation_push_job(context: ContextTypes.DEFAULT_TYPE):
             info = {}
         payload = _utd_order_payload(r[:7], info)
         payload["update"] = r[7] is not None
+        if r[7] == "edit":
+            # ✏️ Edit details saved while @Utdreg_bot didn't answer (23 Nov 2026): what it started from the old ones goes
+            payload.update(edit=True, force=True)
         status, body = await _automation_post("/api/order_pending", payload)
         conn = sqlite3.connect(DB_PATH)
         if status == 200 and body.get("ok"):
