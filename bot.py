@@ -421,6 +421,9 @@ UPTODATE_AI_CODE_POOL = {"uptodate_ai_2m": UPTODATE_AI_CODES_DURATION, "uptodate
 # Uptodate plans and the AI add-ons that can only be bought with one (16 Nov 2026).
 UPTODATE_PLAN_ITEMS = {"up_online_app", "up_online_web", "up_offline_app", "up_offline_web",
                        "up_pathways_app", "up_pathways_web", "up_vip_app", "up_vip_web"}
+# Every UpToDate account product @Utdreg_bot registers or renews: today's plans, plus the old "Uptodate Online" /
+# "Uptodate Online + Offline" (item1, item3), still sold through 🧾 New order (by admin) (owner, 23 Nov 2026).
+UTD_AUTOMATION_ITEMS = UPTODATE_PLAN_ITEMS | {"item1", "item3"}
 UPTODATE_AI_ADDONS = {"uptodate_ai_expert_1y", "uptodate_ai_tg_1y", "uptodate_ai_both_1y"}
 
 
@@ -3260,7 +3263,7 @@ def reset_uptodate_edits_once():
     AI add-ons the first time the new Uptodate list runs, so the owner's new prices show (16 Nov 2026)."""
     if db_get_meta("uptodate_list_2026_11_16"):
         return
-    ids = sorted(UPTODATE_PLAN_ITEMS | UPTODATE_AI_ADDONS)
+    ids = sorted(UTD_AUTOMATION_ITEMS | UPTODATE_AI_ADDONS)
     marks = ",".join("?" * len(ids))
     conn = sqlite3.connect(DB_PATH)
     conn.execute(f"DELETE FROM item_overrides WHERE item_id IN ({marks})", ids)
@@ -17165,7 +17168,7 @@ async def reask_unit(application, fulfilment_id: int, ask_type: str = "any", not
         return {"ok": False, "error": f"The note is {len(note)} characters; it can be at most {REASK_NOTE_MAX}."}
     superseded = ""
     told = None   # @Utdreg_bot: True heard it, False to be told by automation_push_job, None not involved
-    if item_id in UPTODATE_PLAN_ITEMS and _utd_unit_sent(fulfilment_id) and AUTOMATION_API_URL and CATALOG_API_KEY:
+    if item_id in UTD_AUTOMATION_ITEMS and _utd_unit_sent(fulfilment_id) and AUTOMATION_API_URL and CATALOG_API_KEY:
         # noted before asking, so a restart in between is sorted out by automation_push_job (applied: false)
         _set_reask_pending(fulfilment_id, {"kind": ask_type, "applied": False,
                                            "at": datetime.utcnow().isoformat(timespec="seconds")})
@@ -17337,7 +17340,7 @@ async def _save_unit_edit(application, row, info: dict, by: str, force: bool = F
     fid, order_id, user_id, item_id = row[0], row[1], row[2], row[3]
     order = db_get_order(order_id)
     told, utd_note = None, ""   # @Utdreg_bot: True heard it, False to be told by automation_push_job, None not involved
-    if item_id in UPTODATE_PLAN_ITEMS and order and order[5] in ("paid", "delivered") and _utd_unit_sent(fid) \
+    if item_id in UTD_AUTOMATION_ITEMS and order and order[5] in ("paid", "delivered") and _utd_unit_sent(fid) \
             and AUTOMATION_API_URL and CATALOG_API_KEY:
         payload = _utd_order_payload(row[:7], info)
         payload.update(update=True, edit=True, force=bool(force and by == "admin"))
@@ -21734,14 +21737,14 @@ def _utd_order_payload(row, info: dict) -> dict:
 def _utd_units_to_push() -> list:
     """Paid UpToDate plan units with their details given, not yet sent to @Utdreg_bot (or changed since)."""
     start = int(db_get_meta("automation_push_from") or 0)
-    marks = ",".join("?" * len(UPTODATE_PLAN_ITEMS))
+    marks = ",".join("?" * len(UTD_AUTOMATION_ITEMS))
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
         f"SELECT f.id, f.order_id, f.user_id, f.item_id, f.unit_no, f.state, f.info_json, a.info_hash, a.tries, a.alerted "
         f"FROM fulfilment f JOIN orders o ON o.id = f.order_id LEFT JOIN automation_outbox a ON a.fulfilment_id = f.id "
         f"WHERE f.id > ? AND f.item_id IN ({marks}) AND f.state = 'awaiting_delivery' AND o.status IN ('paid', 'delivered') "
         f"AND COALESCE(f.info_json, '') NOT IN ('', '{{}}') AND a.reask_pending IS NULL ORDER BY f.id",
-        (start, *sorted(UPTODATE_PLAN_ITEMS))).fetchall()
+        (start, *sorted(UTD_AUTOMATION_ITEMS))).fetchall()
     conn.close()
     out = []
     for r in rows:
@@ -21947,7 +21950,7 @@ async def http_deliver_unit(request):
     row = db_get_fulfilment(fid)
     if not row or row[1] != order_id:
         return web.json_response({"error": "no such order unit"}, status=404)
-    if row[3] not in UPTODATE_PLAN_ITEMS:
+    if row[3] not in UTD_AUTOMATION_ITEMS:
         return web.json_response({"error": "not an UpToDate plan"}, status=409)
     order = db_get_order(order_id)
     if not order or order[5] not in ("paid", "delivered"):
@@ -22079,7 +22082,7 @@ async def automation_run_callback(update: Update, context: ContextTypes.DEFAULT_
         info = json.loads(row[6]) if row[6] else {}
     except ValueError:
         info = {}
-    payload = _utd_order_payload(row, info) if row[3] in UPTODATE_PLAN_ITEMS else {
+    payload = _utd_order_payload(row, info) if row[3] in UTD_AUTOMATION_ITEMS else {
         "fulfilment_id": fid, "order_id": row[1], "user_id": row[2], "item_id": row[3],
         "item_name": MENU.get(row[3], (row[3],))[0], "info": info,
         **({"customer_label": _admin_order_customer_label(row[1])} if row[2] == ADMIN_ORDER_USER_ID else {})}
