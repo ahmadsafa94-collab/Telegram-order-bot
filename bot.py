@@ -2044,6 +2044,27 @@ def db_reconcile_restored_order(order_id: int) -> str:
     return "Rebuilt the delivery from the message the customer received, so it shows as delivered again."
 
 
+def _release_admin_credentials(conn, order_id: int, fulfilment_id: int = None):
+    """🧾 An order by the admin being deleted: the email/username it took (used_credentials of user 0) are freed, so the
+    admin can enter the sale again with the same details (23 Nov 2026). A customer's stay, as before."""
+    src = conn.execute("SELECT source FROM orders WHERE id = ?", (order_id,)).fetchone()
+    if not src or src[0] != "admin":
+        return
+    q, args = "SELECT item_id, info_json FROM fulfilment WHERE order_id = ?", [order_id]
+    if fulfilment_id is not None:
+        q, args = q + " AND id = ?", args + [fulfilment_id]
+    for item_id, info_json in conn.execute(q, args).fetchall():
+        try:
+            info = json.loads(info_json) if info_json else {}
+        except ValueError:
+            info = {}
+        if not isinstance(info, dict) or info.get("account_type") != "new":
+            continue
+        conn.execute("DELETE FROM used_credentials WHERE user_id = 0 AND item_id = ? AND "
+                     "LOWER(COALESCE(email, '')) = LOWER(?) AND LOWER(COALESCE(username, '')) = LOWER(?)",
+                     (item_id, info.get("email") or "", info.get("username") or ""))
+
+
 def db_delete_order(order_id: int, snapshot: bool = True):
     """Deletes an order entirely — the order row itself, any fulfilment
     rows (the Mini App pre-stores registration details before payment, so
@@ -2056,6 +2077,7 @@ def db_delete_order(order_id: int, snapshot: bool = True):
     if snapshot:
         db_snapshot_order(order_id)
     conn = sqlite3.connect(DB_PATH)
+    _release_admin_credentials(conn, order_id)
     conn.execute("DELETE FROM fulfilment WHERE order_id = ?", (order_id,))
     conn.execute("DELETE FROM deliveries WHERE order_id = ?", (order_id,))
     cur = conn.execute("DELETE FROM orders WHERE id = ?", (order_id,))
@@ -2076,6 +2098,7 @@ def db_remove_pending_unit(fulfilment_id: int):
     _, order_id, user_id, item_id, unit_no, state, info_json = row
     db_snapshot_order(order_id)
     conn = sqlite3.connect(DB_PATH)
+    _release_admin_credentials(conn, order_id, fulfilment_id)
     conn.execute("DELETE FROM fulfilment WHERE id = ?", (fulfilment_id,))
     remaining = conn.execute("SELECT COUNT(*) FROM fulfilment WHERE order_id = ?", (order_id,)).fetchone()[0]
     order = conn.execute("SELECT items_json, total, coworker_id FROM orders WHERE id = ?", (order_id,)).fetchone()

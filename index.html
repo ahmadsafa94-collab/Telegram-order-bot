@@ -2346,7 +2346,8 @@ async function sendDeliverNow(fid,text,msg,btn,access){
 // follows the normal path (UpToDate → @Utdreg_bot, iMD → its automation, others → Pending → 📤). What the customer
 // would get comes to the admin's chat to forward. The coworker goes in column I of the delivered sheet.
 let aoForm=null;
-function closeAdminOrder(){ document.getElementById('aoOverlay').classList.remove('on'); }
+// the 🧾 form's detail block is emptied on close, so nothing of it is left in the page (23 Nov 2026)
+function closeAdminOrder(){ document.getElementById('aoOverlay').classList.remove('on'); const b=document.getElementById('aoDetails'); if(b) b.innerHTML=''; }
 async function openAdminOrder(){
   const box=document.getElementById('aoContent');
   document.getElementById('aoOverlay').classList.add('on');
@@ -3089,7 +3090,7 @@ function goDetails(){
   closeBasket();buildDetailForms();
   showPage('p2');document.getElementById('hdrTitle').textContent='Account Details';tg.MainButton.hide();window.scrollTo(0,0);
 }
-function goPayment(){if(!validateDetails())return;buildPaymentPage();showPage('p3');document.getElementById('hdrTitle').textContent='Payment';window.scrollTo(0,0)}
+function goPayment(){if(!validateDetails(document.getElementById('detForms')))return;buildPaymentPage();showPage('p3');document.getElementById('hdrTitle').textContent='Payment';window.scrollTo(0,0)}
 
 // ── Catalog build ─────────────────────────────────────────────────────
 function buildCatalog(){
@@ -4312,7 +4313,7 @@ function submitOrder(){
   if(selPay.startsWith('country:')) pay=selPay.slice(8);
   else if(selPay.startsWith('app:')) pay=selPay.slice(4);
   const payload={
-    action:'full_order',items:collectDetails(),payment_method:pay,
+    action:'full_order',items:collectDetails(document.getElementById('detForms')),payment_method:pay,
     total:effectiveTotal(),use_credits:appliedCreditsFlag,discount_code:appliedDiscountCode,
   };
   const sub=document.getElementById('submitBtn');
