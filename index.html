@@ -1027,6 +1027,24 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
     <div style="padding:0 15px"><button class="btn sec" onclick="closeReferral()">Close</button></div>
   </div>
 </div>
+<!-- Admin: 🔁 Transfer a delivered subscription to another customer (owner, 23 Nov 2026) -->
+<div class="overlay" id="trOverlay" onclick="if(event.target===this)closeTransfer()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="trTitle">🔁 Transfer</div>
+    <div style="padding:0 15px 15px">
+      <div class="t-meta" id="trFrom" style="margin:6px 0 10px;overflow-wrap:anywhere"></div>
+      <div style="font-size:12px;color:var(--hint);margin:4px 0">New customer: Telegram ID, @username or t.me link</div>
+      <input id="trWho" class="cw-input" type="text" maxlength="100" placeholder="e.g. 123456789 or @username" aria-label="New customer" autocomplete="off" oninput="transferWhoChanged()">
+      <div id="trResolved" style="font-size:13px;margin:8px 0 0;overflow-wrap:anywhere;white-space:pre-line"></div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin:10px 0 0"><input type="checkbox" id="trNotifyNew" checked> 📩 Send the account details to the new customer</label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin:8px 0 0"><input type="checkbox" id="trNotifyOld"> Tell the previous customer</label>
+      <div id="trMsg" style="font-size:12px;margin-top:8px;min-height:16px;white-space:pre-line"></div>
+      <button class="btn" id="trSend" onclick="sendTransfer()" disabled>🔁 Transfer</button>
+      <button class="btn sec" style="margin-top:8px" onclick="closeTransfer()">Cancel</button>
+    </div>
+  </div>
+</div>
 
 <nav class="tabbar" id="tabbar" aria-label="Main">
   <button class="tb on" data-tab="catalog" onclick="switchTab('catalog')"><span class="tb-i">🛍</span><span>Catalogue</span></button>
@@ -2010,7 +2028,8 @@ function setAdminBadges(){
 async function refreshAdminCounts(){
   try{ const d=await apiGet('/api/admin_counts'); adminCounts={tickets:d.tickets||0,books:d.books||0,books_open:d.books_open||0}; setAdminBadges(); drawAdminPendTabs(); }catch(e){}
 }
-const cardMeta=i=>escHtml(i.customer)+(i.user_id?' · ID '+i.user_id:'')+' · '+escHtml(i.date||'');
+const cardMeta=i=>escHtml(i.customer)+(i.user_id?' · ID '+i.user_id:'')+' · '+escHtml(i.date||'')+
+  (i.transfer?'<br>🔁 from '+escHtml(String(i.transfer.from||''))+' ('+escHtml(String(i.transfer.date||''))+')':'');
 async function loadAdminDelivered(reset){
   const el=document.getElementById('ordersContent');
   const q=document.getElementById('subsSearchInput').value.trim();
@@ -2032,9 +2051,63 @@ async function loadAdminDelivered(reset){
           (i.text?'<button class="tk-btn" onclick="copyAdminText('+n+')">📋 Copy</button>':'')+
           (i.delivery_id?'<button class="tk-btn" onclick="openEditDelivery('+n+')">✏️ Edit</button>':'')+
           (i.delivery_id?'<button class="tk-btn" onclick="adminChat(\'editdeliv\','+i.delivery_id+')">💬 In chat</button>':'')+
+          (i.can_transfer?'<button class="tk-btn" onclick="openTransferDelivered('+n+')">🔁 Transfer</button>':'')+
         '</div></div></div>').join('')+
       (adminDel.items.length<adminDel.total?'<button class="btn sec" style="margin:4px 0 8px" onclick="loadAdminDelivered(false)">Show more</button>':'');
   }catch(e){ if(seq===adminDelSeq) el.innerHTML=failHtml(e); }
+}
+// 🔁 Transfer (owner, 23 Nov 2026): a delivered subscription moves to another customer. The customer typed is
+// resolved by the bot and shown before anything moves; every value goes in through textContent / .value.
+let tr=null, trSeq=0, trTimer=null, trImports={};
+function openTransferDelivered(n){
+  const i=adminDel.items[n]; if(!i||!i.delivery_id) return;
+  openTransfer({id:i.delivery_id,title:i.name+' · #'+i.order_id,from:i.customer,done:()=>loadAdminDelivered(true)});
+}
+function openTransferImport(id){
+  const x=trImports[id]; if(!x) return;
+  openTransfer({id:+id,title:'Added from the sheet',from:x.customer,done:()=>loadSheetRows()});
+}
+function openTransfer(t){
+  tr=Object.assign({ok:false},t);
+  document.getElementById('trTitle').textContent='🔁 Transfer · '+t.title;
+  document.getElementById('trFrom').textContent='Now with '+t.from+'. It moves out of their subscriptions into the new customer\'s.';
+  document.getElementById('trWho').value=''; document.getElementById('trResolved').textContent='';
+  document.getElementById('trMsg').textContent='';
+  document.getElementById('trNotifyNew').checked=true; document.getElementById('trNotifyOld').checked=false;
+  document.getElementById('trSend').disabled=true;
+  document.getElementById('trOverlay').classList.add('on');
+}
+function closeTransfer(){ document.getElementById('trOverlay').classList.remove('on'); tr=null; clearTimeout(trTimer); }
+function transferWhoChanged(){
+  if(!tr) return; tr.ok=false; document.getElementById('trSend').disabled=true;
+  clearTimeout(trTimer); trTimer=setTimeout(previewTransfer,450);
+}
+async function previewTransfer(){
+  if(!tr) return;
+  const who=document.getElementById('trWho').value.trim(), out=document.getElementById('trResolved'), seq=++trSeq;
+  if(!who){ out.textContent=''; return; }
+  out.style.color='var(--hint)'; out.textContent='Looking them up…';
+  try{
+    const d=await adminPost('/api/admin_transfer_delivery',{delivery_id:tr.id,customer:who,preview:true});
+    if(!tr||seq!==trSeq) return;
+    out.style.color='';
+    out.textContent='→ '+d.to.label+' · ID '+d.to.user_id+(d.to.warning?'\n⚠️ '+d.to.warning:'')+
+      (d.kind==='import'?'':d.moves_order?'\nThe whole order #'+d.order_id+' moves with it.':'\nOnly this item moves; order #'+d.order_id+' stays with the buyer.');
+    tr.ok=true; tr.label=d.to.label; document.getElementById('trSend').disabled=false;
+  }catch(e){ if(tr&&seq===trSeq){ out.style.color='#ef4444'; out.textContent=e.message; } }
+}
+function sendTransfer(){
+  if(!tr||!tr.ok) return;
+  const t=tr;
+  askConfirm('Transfer it to '+t.label+'?',async()=>{
+    const msg=document.getElementById('trMsg'), btn=document.getElementById('trSend');
+    btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Transferring…';
+    try{
+      const d=await adminPost('/api/admin_transfer_delivery',{delivery_id:t.id,customer:document.getElementById('trWho').value.trim(),
+        notify_new:document.getElementById('trNotifyNew').checked,notify_old:document.getElementById('trNotifyOld').checked});
+      closeTransfer(); showToast(d.note||'Transferred'); if(t.done) t.done();
+    }catch(e){ msg.style.color='#ef4444'; msg.textContent=e.message; btn.disabled=false; }
+  });
 }
 function toggleAdminCard(n){
   const b=document.querySelector('#ad-'+n+' .ad-body'); b.style.display=b.style.display==='none'?'block':'none';
@@ -4914,6 +4987,7 @@ async function loadSheetRows(){
   const H=d.header||[];
   sheetHeader=H; sheetShown={}; d.rows.forEach(r=>{ sheetShown[r.n]=r.cells; });
   const cell=(r,i)=>escHtml((r.cells[i]||'').trim());
+  d.rows.forEach(r=>(r.imported||[]).forEach(x=>{ trImports[x.delivery_id]=x; }));
   rowsEl.innerHTML=orph+d.rows.map(r=>{
     const extra=[[2,'Renewal'],[3,'Created'],[4,'Ends'],[7,'Access'],[8,'Coworker'],[9,'Order'],[10,'Telegram'],[11,'@'],[12,'Renewals']]
       .filter(([i])=>(r.cells[i]||'').trim()).map(([i,l])=>'<span><b>'+escHtml(H[i]||l)+':</b> '+cell(r,i)+'</span>').join(' · ');
@@ -4923,7 +4997,8 @@ async function loadSheetRows(){
       +'<div class="t-meta" style="margin-top:6px;line-height:1.6">'+extra+'</div>'
       +'<button class="tk-btn" style="margin-top:8px" onclick="openSheetForm('+r.n+')">✏️ Edit</button>'
       +(r.imported||[]).map(x=>'<div class="t-meta" style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:8px"><span>✅ In '+escHtml(x.customer)+'\'s subscriptions</span>'
-        +'<button class="tk-btn" style="width:auto;padding:6px 10px" onclick="undoSheetImport('+(+x.delivery_id)+')">↩️ Undo</button></div>').join('')
+        +'<span style="display:flex;gap:6px"><button class="tk-btn" style="width:auto;padding:6px 10px" onclick="openTransferImport('+(+x.delivery_id)+')">🔁 Transfer</button>'
+        +'<button class="tk-btn" style="width:auto;padding:6px 10px" onclick="undoSheetImport('+(+x.delivery_id)+')">↩️ Undo</button></span></div>').join('')
       +'<button class="tk-btn" style="margin-top:8px" onclick="openSheetImport('+r.n+')">➕ Add to delivered subscriptions</button></div>';
   }).join('');
 }

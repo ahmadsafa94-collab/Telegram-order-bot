@@ -1305,6 +1305,18 @@ def db_init():
     except sqlite3.OperationalError:
         pass
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS deliveries_sheet_ref ON deliveries (sheet_ref, user_id)")
+    # 🔁 Transfer (owner, 23 Nov 2026): a delivered subscription moved from one customer to another, by the admin.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS delivery_transfers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            delivery_id INTEGER NOT NULL,
+            from_user INTEGER NOT NULL,
+            to_user INTEGER NOT NULL,
+            at TEXT NOT NULL
+        )
+        """
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS fulfilment (
@@ -12628,8 +12640,10 @@ def db_admin_delivered(query: str = "", offset: int = 0, limit: int = ADMIN_PAGE
     `query` matches the order number, subscription, customer (name or id) or the delivered text."""
     conn = sqlite3.connect(DB_PATH)
     ful = conn.execute(
-        "SELECT f.id, f.order_id, f.item_id, f.user_id, o.username, o.created_at, o.source, o.admin_label, o.admin_coworker "
-        "FROM fulfilment f JOIN orders o ON o.id = f.order_id WHERE f.state = 'delivered' ORDER BY f.id").fetchall()
+        "SELECT f.id, f.order_id, f.item_id, f.user_id, CASE WHEN f.user_id = o.user_id THEN o.username ELSE "
+        "(SELECT u.username FROM users u WHERE u.user_id = f.user_id) END, o.created_at, o.source, o.admin_label, "
+        "o.admin_coworker FROM fulfilment f JOIN orders o ON o.id = f.order_id WHERE f.state = 'delivered' "
+        "ORDER BY f.id").fetchall()   # a unit transferred without its order (🔁, 23 Nov 2026) shows its own customer
     dels = conn.execute("SELECT id, order_id, item_id, message, delivered_at FROM deliveries ORDER BY id").fetchall()
     conn.close()
     by_key = {}
@@ -12644,7 +12658,8 @@ def db_admin_delivered(query: str = "", offset: int = 0, limit: int = ADMIN_PAGE
         by_admin = source == ADMIN_ORDER_SOURCE
         items.append({
             "fid": fid, "order_id": oid, "item_id": iid, "name": MENU.get(iid, (iid,))[0],
-            "user_id": uid, "customer": (alabel or "🧾 by admin") if by_admin else (f"@{uname}" if uname else str(uid)),
+            "user_id": uid, "customer": (alabel or "🧾 by admin") if by_admin and uid == ADMIN_ORDER_USER_ID
+            else (f"@{uname}" if uname else str(uid)),
             "date": (dat or created or "")[:10], "text": (msg or "")[:2000], "delivery_id": did,
             # 🧾 an order the admin entered for a sale made outside the bot (23 Nov 2026)
             "admin": {"label": alabel or "", "coworker": acw or "Me"} if by_admin else None,
@@ -12653,8 +12668,11 @@ def db_admin_delivered(query: str = "", offset: int = 0, limit: int = ADMIN_PAGE
     q = (query or "").strip().lower()
     # who each order came through (shown as a tag, and searchable by coworker name)
     via = _order_via(i["order_id"] for i in items)
+    transfers = db_delivery_transfers(i["delivery_id"] for i in items)
     for i in items:
         i["via"] = via.get(i["order_id"])
+        i["transfer"] = transfers.get(i["delivery_id"])   # 🔁 from @old (date)
+        i["can_transfer"] = bool(i["delivery_id"]) and not i["via"]   # not a coworker's order
     if q.startswith("#") and q[1:].isdigit():          # "#12" is order 12, nothing else
         items = [i for i in items if i["order_id"] == int(q[1:])]
     elif q:
@@ -13504,6 +13522,203 @@ async def http_admin_edit_delivery(request):
     context = _HttpContext(request.app["application"], ADMIN_CHAT_ID)
     name, order_id, note = await _apply_delivery_edit(context, row, text.strip(), notify)
     return web.json_response({"ok": True, "note": f"Updated {name} (Order #{order_id}) {note}.", "text": text.strip()}, headers=headers)
+
+
+# ── 🔁 Transfer a delivered subscription to another customer (owner, 23 Nov 2026) ─────────────────────────────────
+# Moves the delivery (deliveries.user_id), its delivered unit (fulfilment.user_id, matched like _fulfilment_for_delivery)
+# and the email/username it took (used_credentials), and the order itself (orders.user_id/username) only once every unit
+# and delivery of that order belongs to the new customer; otherwise the order stays with the buyer. Sales, statistics,
+# coworker figures, @Utdreg_bot and channel posts are not touched. A subscription added from the Excel tab (sheet_ref)
+# only moves its deliveries row. A coworker's order is refused: its statement and owed amounts follow orders.coworker_id.
+
+class TransferRefused(Exception):
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+def _customer_label(user_id: int) -> str:
+    """'@name' (bot users, then orders), the bare ID, or '🧾 by admin' for user 0."""
+    if user_id == ADMIN_ORDER_USER_ID:
+        return "🧾 by admin"
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT username FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    if not (row and row[0]):
+        row = conn.execute("SELECT username FROM orders WHERE user_id = ? AND username IS NOT NULL ORDER BY id DESC "
+                           "LIMIT 1", (user_id,)).fetchone()
+    conn.close()
+    return f"@{row[0]}" if row and row[0] else str(user_id)
+
+
+def transfer_plan(delivery_id: int, customer) -> dict:
+    """What a transfer of this delivery to `customer` (ID, @username, t.me link) would do. TransferRefused with what
+    to tell the admin when it can't be done."""
+    conn = sqlite3.connect(DB_PATH)
+    d = conn.execute("SELECT id, order_id, user_id, item_id, message, sheet_ref FROM deliveries WHERE id = ?",
+                     (delivery_id,)).fetchone()
+    conn.close()
+    if not d:
+        raise TransferRefused("That delivery no longer exists.", 404)
+    _, order_id, from_user, item_id, message, sheet_ref = d
+    try:
+        to_user, label, warning = resolve_customer_ref(customer)
+    except ValueError as exc:
+        raise TransferRefused(str(exc))
+    if to_user == ADMIN_ORDER_USER_ID:
+        raise TransferRefused("0 isn't a Telegram account. Type the customer's Telegram ID or @username.")
+    if to_user == ADMIN_CHAT_ID:
+        # the admin's own Mini App shows every customer's deliveries, not their own: it would be hidden there
+        raise TransferRefused("That's your own account. Type the customer's Telegram ID or @username.")
+    if to_user == from_user:
+        raise TransferRefused(f"It's already {label}'s.")
+    cw = db_get_user_coworker(to_user)
+    if cw:
+        raise TransferRefused(f"{label} is logged in as the coworker account “{cw[1]}”. Its subscriptions are its "
+                              "orders, so it wouldn't show there. Transfer it to the customer's own Telegram account.")
+    plan = {"delivery_id": delivery_id, "order_id": order_id, "item_id": item_id, "message": message or "",
+            "name": MENU.get(item_id, (item_id,))[0], "from_user": from_user, "from_label": _customer_label(from_user),
+            "to_user": to_user, "to_label": label, "warning": warning, "fid": None, "moves_order": False,
+            "kind": "import" if sheet_ref else "order", "sheet_ref": sheet_ref}
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        if sheet_ref:
+            if conn.execute("SELECT 1 FROM deliveries WHERE sheet_ref = ? AND user_id = ?", (sheet_ref, to_user)).fetchone():
+                raise TransferRefused(f"This sheet row is already in {label}'s subscriptions.", 409)
+            return plan
+        order = conn.execute("SELECT coworker_id, source FROM orders WHERE id = ?", (order_id,)).fetchone()
+        if not order:
+            raise TransferRefused(f"Order #{order_id} no longer exists.", 404)
+        if order[0]:
+            raise TransferRefused("This subscription is from a coworker's order; transfers would change their "
+                                  "statement, so it can't be transferred.")
+        if order[1] == ADMIN_ORDER_SOURCE:
+            plan["kind"] = "admin"
+    finally:
+        conn.close()
+    plan["fid"] = _fulfilment_for_delivery(delivery_id)
+    if not plan["fid"]:
+        raise TransferRefused("This delivery has no delivered item in its order any more, so it can't be moved.", 409)
+    conn = sqlite3.connect(DB_PATH)
+    others = conn.execute("SELECT (SELECT COUNT(*) FROM fulfilment WHERE order_id = ? AND id != ? AND user_id != ?) + "
+                          "(SELECT COUNT(*) FROM deliveries WHERE order_id = ? AND id != ? AND user_id != ?)",
+                          (order_id, plan["fid"], to_user, order_id, delivery_id, to_user)).fetchone()[0]
+    conn.close()
+    plan["moves_order"] = others == 0
+    return plan
+
+
+def db_transfer_delivery(plan: dict) -> bool:
+    """Moves it all in one transaction. False when the delivery changed hands meanwhile (nothing done)."""
+    did, fid, old, new = plan["delivery_id"], plan["fid"], plan["from_user"], plan["to_user"]
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("UPDATE deliveries SET user_id = ?, message_id = NULL WHERE id = ? AND user_id = ?",
+                        (new, did, old)).rowcount != 1:
+            conn.rollback()
+            return False
+        if fid:
+            conn.execute("UPDATE fulfilment SET user_id = ? WHERE id = ?", (new, fid))
+            info_row = conn.execute("SELECT item_id, info_json FROM fulfilment WHERE id = ?", (fid,)).fetchone()
+            try:
+                info = json.loads(info_row[1]) if info_row and info_row[1] else {}
+            except ValueError:
+                info = {}
+            if isinstance(info, dict) and info.get("account_type") == "new" and (info.get("email") or info.get("username")):
+                conn.execute(
+                    "UPDATE used_credentials SET user_id = ? WHERE id = (SELECT id FROM used_credentials WHERE user_id = ? "
+                    "AND item_id = ? AND LOWER(COALESCE(email, '')) = LOWER(?) AND LOWER(COALESCE(username, '')) = LOWER(?) "
+                    "ORDER BY id DESC LIMIT 1)",
+                    (new, old, info_row[0], info.get("email") or "", info.get("username") or ""))
+        if plan["moves_order"]:
+            conn.execute("UPDATE orders SET user_id = ?, username = ? WHERE id = ?",
+                         (new, db_get_username(new), plan["order_id"]))
+        conn.execute("INSERT INTO delivery_transfers (delivery_id, from_user, to_user, at) VALUES (?, ?, ?, ?)",
+                     (did, old, new, datetime.utcnow().isoformat(timespec="seconds")))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def db_delivery_transfers(delivery_ids) -> dict:
+    """{delivery_id: {from, date}} of the latest transfer of each."""
+    ids = sorted({i for i in delivery_ids if i})
+    if not ids:
+        return {}
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT delivery_id, from_user, at FROM delivery_transfers WHERE delivery_id IN (%s) ORDER BY id"
+                        % ",".join("?" * len(ids)), ids).fetchall()
+    conn.close()
+    return {did: {"from": _customer_label(uid), "date": (at or "")[:10]} for did, uid, at in rows}
+
+
+async def http_admin_transfer_delivery(request):
+    """POST {delivery_id, customer, notify_new, notify_old, preview?}: 🔁 Transfer in the admin Delivered tab (and for
+    a subscription added from the Excel tab). preview only resolves the customer and says what would move."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    data = await _admin_json(request)
+    did = data.get("delivery_id") if data else None
+    if isinstance(did, bool) or not isinstance(did, int) or not isinstance(data.get("customer"), str):
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    fid_lock = _fulfilment_for_delivery(did)
+    async with unit_lock(fid_lock or -did):
+        try:
+            plan = transfer_plan(did, data["customer"])
+        except TransferRefused as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=exc.status, headers=headers)
+        public = {"to": {"user_id": plan["to_user"], "label": plan["to_label"], "warning": plan["warning"]},
+                  "from": plan["from_label"], "kind": plan["kind"], "moves_order": plan["moves_order"],
+                  "order_id": plan["order_id"], "name": plan["name"]}
+        if data.get("preview") is True:
+            return web.json_response({"ok": True, **public}, headers=headers)
+        if not db_transfer_delivery(plan):
+            return web.json_response({"ok": False, "error": "It changed meanwhile. Reload and try again."},
+                                     status=409, headers=headers)
+    name, order_id, new, old = plan["name"], plan["order_id"], plan["to_user"], plan["from_user"]
+    logger.info("🔁 Delivery %s (%s, order #%s) transferred from %s to %s (order moved: %s)",
+                did, plan["item_id"], order_id, old, new, plan["moves_order"])
+    bot = request.app["application"].bot
+    order_part = f" (Order #{order_id})" if order_id else ""
+    notes = [f"🔁 {name}{order_part} moved from {plan['from_label']} to {plan['to_label']}"
+             + ("" if plan["kind"] == "import" else
+                " with its order" if plan["moves_order"] else "; the order stays with the buyer") + "."]
+    if data.get("notify_new") is True:
+        try:
+            sent = await bot.send_message(chat_id=new, text=f"🔑 Here are your account details for {name}{order_part}:"
+                                                            f"\n\n{plan['message']}")
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE deliveries SET message_id = ? WHERE id = ? AND user_id = ?", (sent.message_id, did, new))
+            conn.commit()
+            conn.close()
+            notes.append(f"{plan['to_label']} got the account details.")
+        except Exception as exc:
+            logger.warning("🔁 Couldn't send transferred delivery %s to %s: %s", did, new, exc)
+            notes.append(f"The details couldn't be sent to {plan['to_label']} (they may not have started the bot).")
+    if data.get("notify_old") is True and old != ADMIN_ORDER_USER_ID:
+        try:
+            await bot.send_message(chat_id=old, text=f"ℹ️ Your {name}{order_part} was transferred to another Telegram "
+                                                     "account, so it no longer shows in your subscriptions here.")
+            notes.append(f"{plan['from_label']} was told.")
+        except Exception as exc:
+            logger.warning("🔁 Couldn't tell %s about transferred delivery %s: %s", old, did, exc)
+            notes.append(f"{plan['from_label']} couldn't be told (they may have blocked the bot).")
+    # the delivered sheet's row follows (K, L); one added from the Excel tab is the owner's own row, left as it is
+    if plan["kind"] != "import":
+        try:
+            dsheet.enqueue_transfer(DB_PATH, dsheet.IMD_TAB if plan["item_id"] in IMD_TRIGGER_ITEMS else dsheet.MAIN_TAB,
+                                    order_id, dsheet.credentials(plan["message"])[0] or "",
+                                    "" if old == ADMIN_ORDER_USER_ID else str(old), str(new), db_get_username(new) or "")
+        except Exception:
+            logger.exception("Couldn't queue the delivered-sheet transfer for delivery %s", did)
+    return web.json_response({"ok": True, **public, "note": " ".join(notes)}, headers=headers)
 
 
 class _HttpCbUpdate:
@@ -14884,6 +15099,8 @@ async def start_api_server(application):
     api_app.router.add_post("/api/admin_delete_order", http_admin_delete_order)
     api_app.router.add_options("/api/admin_delete_order", http_set_coworker_price_options)
     api_app.router.add_options("/api/admin_edit_delivery", http_set_coworker_price_options)
+    api_app.router.add_post("/api/admin_transfer_delivery", http_admin_transfer_delivery)
+    api_app.router.add_options("/api/admin_transfer_delivery", http_set_coworker_price_options)
     api_app.router.add_get("/api/admin_counts", http_admin_counts)
     api_app.router.add_get("/api/admin_tickets", http_admin_tickets)
     api_app.router.add_get("/api/admin_ticket_photo", http_admin_ticket_photo)
@@ -22128,11 +22345,17 @@ async def http_order_logins(request):
     except (KeyError, ValueError):
         return web.json_response({"error": "user_id and order_id are needed"}, status=400)
     order = db_get_order(order_id)
-    if not order or order[1] != user_id:
-        return web.json_response({"error": f"order #{order_id} isn't this customer's"}, status=404)
     conn = sqlite3.connect(DB_PATH)
-    units = conn.execute("SELECT item_id, info_json FROM fulfilment WHERE order_id = ? ORDER BY id", (order_id,)).fetchall()
-    deliveries = conn.execute("SELECT item_id, message FROM deliveries WHERE order_id = ? ORDER BY id", (order_id,)).fetchall()
+    # 🔁 a subscription transferred without its order (23 Nov 2026): only its own unit and delivery, for whoever has it
+    mine = bool(order) and conn.execute("SELECT 1 FROM fulfilment WHERE order_id = ? AND user_id = ? LIMIT 1",
+                                        (order_id, user_id)).fetchone() is not None
+    if not order or (order[1] != user_id and not mine):
+        conn.close()
+        return web.json_response({"error": f"order #{order_id} isn't this customer's"}, status=404)
+    units = conn.execute("SELECT item_id, info_json FROM fulfilment WHERE order_id = ? AND user_id = ? ORDER BY id",
+                         (order_id, user_id)).fetchall()
+    deliveries = conn.execute("SELECT item_id, message FROM deliveries WHERE order_id = ? AND user_id = ? ORDER BY id",
+                              (order_id, user_id)).fetchall()
     conn.close()
     items = []
     for item_id, info_json in units:

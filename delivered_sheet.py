@@ -356,6 +356,37 @@ def enqueue_edit(db_path: str, tab: str, order_id: int, old_user: str, user: str
     conn.close()
 
 
+def enqueue_transfer(db_path: str, tab: str, order_id: int, user: str, old_id: str, new_id: str, new_username: str):
+    """🔁 A delivered subscription moved to another customer in the bot (23 Nov 2026): K and L of its row follow."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("INSERT INTO sheet_outbox (kind, tab, payload, created_at) VALUES ('transfer', ?, ?, ?)",
+                 (tab, json.dumps({"order_id": order_id, "user": user, "old_id": old_id, "new_id": new_id,
+                                   "new_username": new_username}), datetime.utcnow().isoformat(timespec="seconds")))
+    conn.commit()
+    conn.close()
+
+
+async def _apply_transfer(tab: str, payload: dict) -> str:
+    """The delivery's row: order number in J and its username in F (several such rows: the one with the old Telegram
+    ID in K); the order's only row when no row has that username. K and L get the new customer."""
+    rows = await read_tab(tab)
+    order, user = str(payload.get("order_id") or ""), (payload.get("user") or "").strip().lower()
+    old_id = str(payload.get("old_id") or "")
+    cell = lambda r, i: (r[i] if len(r) > i else "").strip()
+    same_order = [i for i, r in enumerate(rows) if i > 0 and order and cell(r, 9) == order]
+    hits = [i for i in same_order if user and cell(rows[i], 5).lower() == user]
+    if len(hits) > 1:
+        hits = [i for i in hits if cell(rows[i], 10) == old_id] or hits
+    hit = hits[-1] if hits else (same_order[0] if len(same_order) == 1 else None)
+    if hit is None:
+        return f"order #{order} isn't in the sheet"
+    n = hit + 1
+    await _call("POST", f"{SHEETS_API}/{sheet_id()}/values:batchUpdate", json={"valueInputOption": "RAW", "data": [
+        {"range": f"'{tab}'!K{n}", "values": [[str(payload.get("new_id") or "")]]},
+        {"range": f"'{tab}'!L{n}", "values": [[(payload.get("new_username") or "").lstrip("@")]]}]})
+    return f"row {n}: moved to {payload.get('new_id')}"
+
+
 async def _apply_edit(tab: str, payload: dict) -> str:
     """The row of that order (column J), the one with the old username if the order has several; else the newest
     row with the old username, only if just one row has it (18 Nov 2026: with the owner's own rows a username can be on
@@ -694,7 +725,7 @@ async def flush(db_path: str, notify=None, quiet: set = ()) -> int:
         header_ok = False
         held_back = False
         for oid, kind, tab, payload, tries in pending:
-            if held_back and kind in ("edit", "renewal", "row_below"):
+            if held_back and kind in ("edit", "renewal", "row_below", "transfer"):
                 break   # it may change a row that is still waiting: keep the order, try again later
             try:
                 if not header_ok:
@@ -702,6 +733,7 @@ async def flush(db_path: str, notify=None, quiet: set = ()) -> int:
                     header_ok = True
                 data = json.loads(payload)
                 note = (await _apply_renewal(tab, data) if kind == "renewal" else await _apply_edit(tab, data) if kind == "edit"
+                        else await _apply_transfer(tab, data) if kind == "transfer"
                         else await _insert_below(db_path, oid, tab, data, retry=tries > 0) if kind == "row_below"
                         else await _send_rows(db_path, oid, tab, data, retry=tries > 0) if kind == "rows"
                         else await _send_rows(db_path, oid, tab, [data], retry=tries > 0))
@@ -716,6 +748,9 @@ async def flush(db_path: str, notify=None, quiet: set = ()) -> int:
                                  "there. Enter its renewal date in the sheet yourself.")
                 if kind == "edit" and notify and "isn't in the sheet" in note:
                     await notify(f"📑 Delivered sheet: the edited details of {note}, so they weren't changed there.")
+                if kind == "transfer" and notify and "isn't in the sheet" in note:
+                    await notify(f"📑 Delivered sheet: the transfer of {note}, so its Telegram ID and username (K, L) "
+                                 "weren't changed there.")
                 sent += 1
                 failed_in_a_row = 0
             except Exception as exc:
