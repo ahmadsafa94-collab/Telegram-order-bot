@@ -16912,7 +16912,8 @@ def db_reask_unit(fulfilment_id: int, ask_type, note=None):
         return None   # delivered (or deleted) meanwhile
     # the details sent next go to @Utdreg_bot again even when they're the same as before
     try:
-        conn.execute("UPDATE automation_outbox SET info_hash = 'reask' WHERE fulfilment_id = ? AND info_hash IS NOT NULL",
+        conn.execute("UPDATE automation_outbox SET info_hash = 'reask' WHERE fulfilment_id = ? AND info_hash IS NOT NULL "
+                     "AND info_hash NOT LIKE 'edit%'",
                      (fulfilment_id,))
     except sqlite3.OperationalError:
         pass   # no outbox yet (utd_automation_init not run)
@@ -16982,7 +16983,7 @@ async def cancel_reask(application, fulfilment_id: int) -> dict:
         try:
             # a re-ask @Utdreg_bot never heard of is dropped; the details go to it again either way
             conn.execute("UPDATE automation_outbox SET reask_pending = NULL, reask_tries = 0, "
-                         "info_hash = CASE WHEN info_hash IS NULL THEN NULL ELSE 'reask' END WHERE fulfilment_id = ?",
+                         "info_hash = CASE WHEN info_hash IS NULL OR info_hash LIKE 'edit%' THEN info_hash ELSE 'reask' END WHERE fulfilment_id = ?",
                          (fulfilment_id,))
         except sqlite3.OperationalError:
             pass
@@ -17244,7 +17245,8 @@ async def _save_unit_edit(application, row, info: dict, by: str, force: bool = F
         try:
             # heard: the job mustn't send them again; not heard: the job sends them as an edit (edit: true, force)
             conn.execute("UPDATE automation_outbox SET info_hash = ? WHERE fulfilment_id = ?",
-                         (hashlib.sha256(stored.encode()).hexdigest() if told else "edit", fid))
+                         (hashlib.sha256(stored.encode()).hexdigest() if told else
+                          ("edit-admin" if by == "admin" else "edit"), fid))
             conn.commit()
         except sqlite3.OperationalError:
             pass
@@ -21631,7 +21633,7 @@ async def automation_push_job(context: ContextTypes.DEFAULT_TYPE):
                 continue
             conn = sqlite3.connect(DB_PATH)
             conn.execute("UPDATE automation_outbox SET reask_pending = NULL, reask_tries = 0, info_hash = "
-                         "CASE WHEN info_hash IS NULL THEN NULL ELSE 'reask' END WHERE fulfilment_id = ?", (fid,))
+                         "CASE WHEN info_hash IS NULL OR info_hash LIKE 'edit%' THEN info_hash ELSE 'reask' END WHERE fulfilment_id = ?", (fid,))
             conn.commit(); conn.close()
             continue
         status, body = await _automation_post("/api/order_pending", {
@@ -21668,9 +21670,10 @@ async def automation_push_job(context: ContextTypes.DEFAULT_TYPE):
             info = {}
         payload = _utd_order_payload(r[:7], info)
         payload["update"] = r[7] is not None
-        if r[7] == "edit":
-            # ✏️ Edit details saved while @Utdreg_bot didn't answer (23 Nov 2026): what it started from the old ones goes
-            payload.update(edit=True, force=True)
+        if r[7] in ("edit", "edit-admin"):
+            # ✏️ Edit details saved while @Utdreg_bot didn't answer (23 Nov 2026): what it started from the old ones goes;
+            # a result waiting for approval is dropped only when the admin made the edit (or chose 💾 Save anyway)
+            payload.update(edit=True, force=r[7] == "edit-admin")
         status, body = await _automation_post("/api/order_pending", payload)
         conn = sqlite3.connect(DB_PATH)
         if status == 200 and body.get("ok"):
@@ -21681,6 +21684,23 @@ async def automation_push_job(context: ContextTypes.DEFAULT_TYPE):
             logger.info("Order #%s unit %s (%s) sent to @Utdreg_bot as a pending %s", r[1], r[0], r[3], payload["kind"])
             continue
         error = str(body.get("error") or status)[:200]
+        if status == 409 and r[7] == "edit" and body.get("needs_force"):
+            # someone else's edit would drop a result waiting for the admin's approval: he decides, told once
+            conn.execute("UPDATE automation_outbox SET error = ? WHERE fulfilment_id = ?", (error, r[0]))
+            first = not r[9]
+            if first:
+                conn.execute("UPDATE automation_outbox SET alerted = 1 WHERE fulfilment_id = ?", (r[0],))
+            conn.commit(); conn.close()
+            if first:
+                try:
+                    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=(
+                        f"⚠️ Order #{r[1]}: its details were edited, but @Utdreg_bot has a result from the old ones: "
+                        f"{error} Send the new details anyway (that result is dropped), or approve the old one there "
+                        "first."), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                            "💾 Send the new details anyway", callback_data=f"editforce:{r[0]}")]]))
+                except Exception:
+                    pass
+            continue
         tries = (r[8] or 0) + 1
         conn.execute("INSERT INTO automation_outbox (fulfilment_id, info_hash, tries, error) VALUES (?, NULL, ?, ?) "
                      "ON CONFLICT(fulfilment_id) DO UPDATE SET tries = excluded.tries, error = excluded.error",
@@ -21708,6 +21728,35 @@ async def automation_push_job(context: ContextTypes.DEFAULT_TYPE):
             conn.commit(); conn.close()
         elif status in (502, 503):
             return
+
+
+def _utd_edit_unsent(fulfilment_id) -> bool:
+    """An ✏️ Edit details saved while @Utdreg_bot didn't answer, not taken by it yet (outbox info_hash 'edit…')."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute("SELECT info_hash FROM automation_outbox WHERE fulfilment_id = ?", (fulfilment_id,)).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    conn.close()
+    return bool(row and row[0] and row[0].startswith("edit"))
+
+
+async def edit_force_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """💾 Send the new details anyway (editforce:<fid>): the edited details go to @Utdreg_bot with force next minute."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    fid = int(query.data.split(":", 1)[1])
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("UPDATE automation_outbox SET info_hash = 'edit-admin', alerted = 0 WHERE fulfilment_id = ? "
+                       "AND info_hash = 'edit'", (fid,))
+    conn.commit(); conn.close()
+    await query.answer("Sending within a minute." if cur.rowcount else "Already sent.")
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
 
 async def http_deliver_unit(request):
@@ -21741,6 +21790,10 @@ async def http_deliver_unit(request):
     # 🔁 Ask for details again (22 Nov 2026): what was started from the old details isn't delivered
     if row[5] == "needs_info":
         return web.json_response({"error": "the customer is being asked for this order's details again; "
+                                           "nothing was delivered"}, status=409)
+    # ✏️ Edit details (23 Nov 2026) that @Utdreg_bot hasn't taken yet: what it started may be from the old details
+    if _utd_edit_unsent(fid):
+        return web.json_response({"error": "this order's details were edited and @Utdreg_bot hasn't got the new ones yet; "
                                            "nothing was delivered"}, status=409)
     now_kind = _unit_account_type(row[6])
     if now_kind and now_kind != kind:
@@ -22522,6 +22575,7 @@ def main():
     app.add_handler(CallbackQueryHandler(ask_resend_type, pattern=r"^askresend_t:"))
     app.add_handler(CallbackQueryHandler(ask_resend_force, pattern=r"^askresend_f:"))
     app.add_handler(CallbackQueryHandler(ask_resend_cancel, pattern=r"^askresend_c:"))
+    app.add_handler(CallbackQueryHandler(edit_force_tap, pattern=r"^editforce:"))
     app.add_handler(CallbackQueryHandler(resend_cred_tap, pattern=r"^resendcred:"))
     app.add_handler(CallbackQueryHandler(coworker_add_start, pattern=r"^coworker_add$"))
     app.add_handler(CallbackQueryHandler(coworker_back, pattern=r"^coworker_back$"))
