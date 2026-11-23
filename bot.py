@@ -12893,7 +12893,7 @@ def db_create_admin_order(item_id: str, price: float, text: str, access: str, co
 
 
 async def http_admin_create_order(request):
-    """🧾 New order (by admin) in the admin Mini App: {item_id, price, text, access, coworker_id (0 = Me), label, date
+    """🧾 New order (by admin) in the admin Mini App: {item_id, price, text, access, coworker_id (0 = Me, -1 = coworker_name typed by the admin), label, date
     (YYYY-MM-DD, local, ≤ today)}. Saved as a paid, delivered order; nothing is sent to anyone."""
     from aiohttp import web
     headers = _post_cors_headers()
@@ -12947,7 +12947,15 @@ async def http_admin_create_order(request):
     if isinstance(coworker_id, bool) or not isinstance(coworker_id, int):
         return bad("Pick the coworker.")
     coworker_name = "Me"
-    if coworker_id:
+    if coworker_id == -1:   # a name the admin typed (owner, 23 Nov 2026): only for the sheet's column I
+        typed = data.get("coworker_name")
+        typed = re.sub(r"\s+", " ", typed).strip() if isinstance(typed, str) else ""
+        if not typed:
+            return bad("Type the name it was registered for.")
+        if len(typed) > 60:
+            return bad("That name is too long (60 characters at most).")
+        coworker_name = typed
+    elif coworker_id:
         cw = db_get_coworker(coworker_id)
         if not cw:
             return bad("That coworker no longer exists.")

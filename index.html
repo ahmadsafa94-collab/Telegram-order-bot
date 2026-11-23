@@ -2358,6 +2358,7 @@ async function openAdminOrder(){
     +'<input id="aoPrice" class="cw-input" type="number" inputmode="decimal" min="0" step="0.01" aria-label="Price">'
     +lbl('Registered for (column I of your delivered sheet)')
     +'<select id="aoCw" class="cw-input" aria-label="Coworker"></select>'
+    +'<input id="aoCwName" class="cw-input" type="text" maxlength="60" autocomplete="off" placeholder="Type the name" aria-label="Other name" style="display:none;margin-top:6px">'
     +lbl('Date')
     +'<input id="aoDate" class="cw-input" type="date" aria-label="Date">'
     +lbl('Customer name / note (optional, only in your lists)')
@@ -2373,11 +2374,14 @@ async function openAdminOrder(){
   const cw=document.getElementById('aoCw');
   const opt=(sel,v,t)=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; sel.appendChild(o); };
   opt(cw,'0','Me'); (aoForm.coworkers||[]).forEach(c=>opt(cw,String(c.id),c.name));
+  opt(cw,'-1','✏️ Other name…');   // a name typed by the admin, for the sheet only (owner, 23 Nov 2026)
+  const cwName=document.getElementById('aoCwName');
   const d=document.getElementById('aoDate'); d.max=aoForm.today; if(aoForm.earliest) d.min=aoForm.earliest; d.value=aoForm.today;
   aoTpl=''; drawAdminOrderItems('');
   document.getElementById('aoSearch').oninput=e=>drawAdminOrderItems(e.target.value);
   document.getElementById('aoItem').onchange=()=>aoItemChanged(true);
-  cw.onchange=()=>aoItemChanged(false); d.onchange=()=>aoItemChanged(false);
+  cw.onchange=()=>{ cwName.style.display=cw.value==='-1'?'':'none'; if(cw.value==='-1') cwName.focus(); aoItemChanged(false); };
+  cwName.oninput=()=>aoItemChanged(false); d.onchange=()=>aoItemChanged(false);
   aoItemChanged(true);
 }
 function drawAdminOrderItems(q){
@@ -2393,8 +2397,9 @@ function aoItemChanged(newPrice){
   if(!p) return;
   if(newPrice) document.getElementById('aoPrice').value=p.price;
   const cwSel=document.getElementById('aoCw'), cwId=+cwSel.value;
+  const cwName=cwId===-1?(document.getElementById('aoCwName').value.trim()||'other'):cwSel.options[cwSel.selectedIndex].textContent;
   const tpl=deliveryTemplate({name:p.name,title:p.title,duration:p.duration,template:p.template,
-    via:cwId?{name:cwSel.options[cwSel.selectedIndex].textContent}:null,day:document.getElementById('aoDate').value});
+    via:cwId?{name:cwName}:null,day:document.getElementById('aoDate').value});
   const box=document.getElementById('aoText');
   if(!box.value.trim()||box.value===aoTpl) box.value=tpl;   // the admin's own typing is kept
   aoTpl=tpl;
@@ -2413,11 +2418,13 @@ async function saveAdminOrder(){
   if(aoForm.earliest&&day<aoForm.earliest) return bad('The date can be at most 365 days back.');
   if(!access){ document.getElementById('aoAccess').focus(); return bad('Fill in Access first (it goes in column H of your delivered sheet).'); }
   if(!text) return bad('Type the account details (username and password).');
+  const cwId=+document.getElementById('aoCw').value, cwOther=document.getElementById('aoCwName').value.trim();
+  if(cwId===-1&&!cwOther){ document.getElementById('aoCwName').focus(); return bad('Type the name it was registered for.'); }
   const go=async()=>{
     btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Saving…';
     try{
       const d=await adminPost('/api/admin_create_order',{item_id:item,price:price,text:text,access:access,
-        coworker_id:+document.getElementById('aoCw').value,label:document.getElementById('aoLabel').value.trim(),date:day});
+        coworker_id:cwId,coworker_name:cwId===-1?cwOther:'',label:document.getElementById('aoLabel').value.trim(),date:day});
       closeAdminOrder(); showToast('🧾 Saved · '+d.name+' · Order #'+d.order_id);
       if(ADMIN_EDIT&&document.getElementById('pSubs').classList.contains('on')) loadAdminDelivered(true);
     }catch(e){ bad(e.message); }
