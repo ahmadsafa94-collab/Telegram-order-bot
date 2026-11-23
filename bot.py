@@ -11288,6 +11288,8 @@ async def http_all_orders(request):
             "status": ostatus, "status_meaning": ORDER_STATUS_MEANINGS.get(ostatus, ostatus),
             "created_at": created_at, "payment_method": payment_method, "payer_name": payer_name,
             "items": [{"name": MENU.get(i, (i,))[0], "quantity": q} for i, q in items.items()],
+            # 🧾 a sale the admin entered from outside the bot: user_id 0 is no Telegram customer
+            "by_admin": uid == ADMIN_ORDER_USER_ID,
         })
     return web.json_response({"orders": orders})
 
@@ -12576,7 +12578,8 @@ def db_admin_delivered(query: str = "", offset: int = 0, limit: int = ADMIN_PAGE
         items = [i for i in items if q in str(i["order_id"]) or q in i["name"].lower() or q in i["customer"].lower()
                  or q == str(i["user_id"]) or q in i["text"].lower()
                  or (i["via"] and q in i["via"]["name"].lower())
-                 or (i["admin"] and (q in "🧾 by admin" or q in i["admin"]["coworker"].lower()))]
+                 or (i["admin"] and (("by admin".startswith(q) and len(q) >= 3) or q in ("admin", "🧾")
+                                     or q in i["admin"]["coworker"].lower()))]
     return items[offset:offset + limit], len(items)
 
 
@@ -12782,6 +12785,7 @@ async def http_admin_deliver(request):
 ADMIN_ORDER_SOURCE = "admin"
 ADMIN_ORDER_USER_ID = 0
 ADMIN_ORDER_METHOD = "By admin"
+ADMIN_ORDER_MAX_DAYS_BACK = 365
 
 
 def _admin_order_when(day_text) -> datetime:
@@ -12798,8 +12802,8 @@ def _admin_order_when(day_text) -> datetime:
         raise ValueError("Pick a valid date.")
     if day > today:
         raise ValueError("The date can't be after today.")
-    if day < datetime(2020, 1, 1).date():
-        raise ValueError("Pick a date after 2020.")
+    if day < today - timedelta(days=ADMIN_ORDER_MAX_DAYS_BACK):
+        raise ValueError(f"The date can be at most {ADMIN_ORDER_MAX_DAYS_BACK} days back.")
     if day == today:
         return now
     return datetime.combine(day, dt_time(12, 0)) - offset
@@ -12855,8 +12859,10 @@ async def http_admin_create_order(request):
                              "title": title, "duration": duration})
         products.sort(key=lambda x: x["name"].lower())
         coworkers = [{"id": r[0], "name": r[1]} for r in db_list_coworkers()]
-        today = (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date().isoformat()
-        return web.json_response({"ok": True, "products": products, "coworkers": coworkers, "today": today},
+        today_d = (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date()
+        today, earliest = today_d.isoformat(), (today_d - timedelta(days=ADMIN_ORDER_MAX_DAYS_BACK)).isoformat()
+        return web.json_response({"ok": True, "products": products, "coworkers": coworkers, "today": today,
+                                  "earliest": earliest},
                                  headers=headers)
     item_id = data.get("item_id")
     if not isinstance(item_id, str) or item_id not in MENU:
@@ -12893,7 +12899,14 @@ async def http_admin_create_order(request):
         return bad(str(exc))
     order_id, delivery_id = db_create_admin_order(item_id, float(price), text.strip(), access.strip()[:100],
                                                   coworker_name, label.strip()[:100], when)
-    logger.info("Admin order #%s: %s, %s USD, for %s (%s)", order_id, item_id, price, coworker_name, when.date())
+    local_day = (when + timedelta(hours=REPORT_UTC_OFFSET)).date()
+    logger.info("Admin order #%s: %s, %s USD, for %s (%s)", order_id, item_id, price, coworker_name, local_day)
+    if local_day < (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date():
+        # a finished day changed: a fresh DAILY_SALES line, so the nightly sync updates that day in the owner's sheet
+        try:
+            log_daily_sales(local_day)
+        except Exception:
+            logger.exception("DAILY_SALES for %s after admin order #%s failed", local_day, order_id)
     return web.json_response({"ok": True, "order_id": order_id, "delivery_id": delivery_id,
                               "name": MENU[item_id][0], "coworker": coworker_name}, headers=headers)
 
@@ -14683,6 +14696,7 @@ async def start_api_server(application):
     api_app.router.add_get("/api/admin_pending", http_admin_pending)
     api_app.router.add_post("/api/admin_deliver", http_admin_deliver)
     api_app.router.add_post("/api/admin_create_order", http_admin_create_order)
+    api_app.router.add_options("/api/admin_create_order", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_reask", http_admin_reask)
     api_app.router.add_options("/api/admin_reask", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_sheet", http_admin_sheet)
@@ -16422,6 +16436,11 @@ async def admin_msg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     order_id = int(query.data.split(":", 1)[1])
+    order = db_get_order(order_id)
+    if order and order[1] == ADMIN_ORDER_USER_ID:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID,
+                                       text=f"Order #{order_id} is 🧾 by admin (a sale outside the bot): no customer to message.")
+        return
     clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_admin_message_for_order"] = order_id
     await context.bot.send_message(
@@ -20053,12 +20072,12 @@ async def customer_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for order_id, user_id, username, items_json, status, created_at in rows:
         items = json.loads(items_json)
         item_names = ", ".join(MENU[i][0] for i in items if i in MENU)
-        who = f"@{username}" if username else str(user_id)
+        who = "🧾 by admin" if user_id == ADMIN_ORDER_USER_ID else (f"@{username}" if username else str(user_id))
         label = f"#{order_id} {who} — {item_names} — {status} — {_short_submitted(created_at)}"
-        buttons.append([
-            InlineKeyboardButton(label[:60], callback_data=f"ordlkview:{order_id}"),
-            InlineKeyboardButton("💬", callback_data=f"admin_msg:{order_id}"),
-        ])
+        row = [InlineKeyboardButton(label[:60], callback_data=f"ordlkview:{order_id}")]
+        if user_id != ADMIN_ORDER_USER_ID:   # an order by the admin has no customer to message
+            row.append(InlineKeyboardButton("💬", callback_data=f"admin_msg:{order_id}"))
+        buttons.append(row)
 
     await update.message.reply_text("Recent orders:", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -20085,9 +20104,17 @@ def _build_order_lookup_view(order_id: int):
     items = json.loads(items_json)
     item_names = ", ".join(MENU[i][0] for i in items if i in MENU)
 
+    by_admin = user_id == ADMIN_ORDER_USER_ID
+    if by_admin:   # 🧾 a sale made outside the bot: no Telegram customer
+        conn = sqlite3.connect(DB_PATH)
+        extra = conn.execute("SELECT admin_label, admin_coworker FROM orders WHERE id = ?", (oid,)).fetchone() or (None, None)
+        conn.close()
+        customer_line = "🧾 by admin" + (f" — {extra[0]}" if extra[0] else "") + f" (for {extra[1] or 'Me'})"
+    else:
+        customer_line = f"{username or 'unknown'} (ID: {user_id})"
     text = (
         f"Order #{oid}\n"
-        f"Customer: {username or 'unknown'} (ID: {user_id})\n"
+        f"Customer: {customer_line}\n"
         f"Items: {item_names}\n"
         f"Total: {CURRENCY}{total:.2f}\n"
         f"Status: {status}\n"
@@ -20119,7 +20146,7 @@ def _build_order_lookup_view(order_id: int):
     ).fetchall()
     conn.close()
 
-    buttons = [[InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{oid}")]]
+    buttons = [] if by_admin else [[InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{oid}")]]
     dm_btn = _dm_button(username)
     if dm_btn:
         buttons.append([dm_btn])
