@@ -12874,6 +12874,12 @@ def _admin_order_who(order_id: int) -> str:
     return "🧾 by admin" + (f" — {label}" if label else "")
 
 
+def _admin_order_customer_label(order_id: int) -> str:
+    """How @Utdreg_bot names an order by the admin (instead of a @username): '🧾 admin order · <label>'."""
+    label = _admin_order_info(order_id)[0]
+    return "🧾 admin order" + (f" · {label}" if label else "")
+
+
 def _admin_fwd(order_id: int) -> str:
     """The header of what the normal flow would have sent the customer of an order by the admin."""
     label = _admin_order_info(order_id)[0]
@@ -21699,8 +21705,7 @@ def _utd_order_payload(row, info: dict) -> dict:
             "item_name": MENU.get(item_id, (item_id,))[0], "kind": kind, "info": info,
             "username": db_get_username(user_id) or "",
             # 🧾 an order by the admin (user 0): @Utdreg_bot shows this instead of a @username (23 Nov 2026)
-            **({"customer_label": "🧾 admin order" + (f" · {_admin_order_info(order_id)[0]}" if _admin_order_info(order_id)[0] else "")}
-               if user_id == ADMIN_ORDER_USER_ID else {})}
+            **({"customer_label": _admin_order_customer_label(order_id)} if user_id == ADMIN_ORDER_USER_ID else {})}
 
 
 def _utd_units_to_push() -> list:
@@ -22054,7 +22059,7 @@ async def automation_run_callback(update: Update, context: ContextTypes.DEFAULT_
     payload = _utd_order_payload(row, info) if row[3] in UPTODATE_PLAN_ITEMS else {
         "fulfilment_id": fid, "order_id": row[1], "user_id": row[2], "item_id": row[3],
         "item_name": MENU.get(row[3], (row[3],))[0], "info": info,
-        **({"customer_label": _admin_order_who(row[1])} if row[2] == ADMIN_ORDER_USER_ID else {})}
+        **({"customer_label": _admin_order_customer_label(row[1])} if row[2] == ADMIN_ORDER_USER_ID else {})}
     status, body = await _automation_post("/api/run_request", payload)
     if status == 200 and body.get("ok"):
         await query.message.reply_text(f"🤖 Sent order #{row[1]} to @Utdreg_bot: choose the site there.")
