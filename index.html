@@ -884,6 +884,22 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
   </div>
 </div>
 
+<!-- ✏️ Edit details: a pending item's account details, by its customer, the coworker or the admin (23 Nov 2026) -->
+<div class="overlay" id="editOverlay" onclick="if(event.target===this)closeEdit()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="editTitle">✏️ Edit details</div>
+    <div style="padding:0 15px 15px">
+      <div class="t-meta" id="editSub" style="margin:6px 0 10px"></div>
+      <div id="editTypes"></div>
+      <div id="editFields" style="margin-top:10px"></div>
+      <div id="editMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>
+      <button class="btn" id="editSend" onclick="saveEdit()">💾 Save changes</button>
+      <button class="btn sec" style="margin-top:8px" onclick="closeEdit()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- Request a book -->
 <div class="overlay" id="bookOverlay" onclick="if(event.target===this)closeBookRequest()">
   <div class="sheet">
@@ -1739,7 +1755,7 @@ function renderPending(){
     awaiting_delivery:    {icon:'🔄', label:'Approved — being prepared by our team', btn:null},
     awaiting_payment:     {icon:'⏳', label:'Waiting for payment', btn:null},
   };
-  const row=([name,state,fid,oid,,own])=>{
+  const row=([name,state,fid,oid,,own,editable])=>{
     const mine=own!==0&&!PREVIEW_CW;   // an admin previewing a coworker only looks
     const info=stateInfo[state]||{icon:'⏳',label:'In progress',btn:null};
     return `
@@ -1753,7 +1769,8 @@ function renderPending(){
         </div>
         ${info.btn&&mine?`<button class="pend-action ${info.cls||''}" onclick="pendAction('${info.action}',${fid||0},${oid||0})">${info.btn}</button>`:''}
         ${!mine?`<div class="sub-meta" style="padding:0 15px 11px 56px">${PREVIEW_CW?'Preview — view only.':'Placed from another account — view only.'}</div>`:''}
-        ${fid?`<div style="padding:${info.btn&&mine?0:6}px 15px 12px;width:100%"><button class="tk-btn" onclick="ticketFor(${fid})">🎫 Send a ticket</button></div>`:''}
+        ${fid&&editable===1&&!PREVIEW_CW?`<div style="padding:${info.btn&&mine?0:6}px 15px 0;width:100%"><button class="tk-btn" onclick="openEdit(${fid})">✏️ Edit details</button></div>`:''}
+        ${fid?`<div style="padding:${(info.btn&&mine)||(editable===1&&!PREVIEW_CW)?0:6}px 15px 12px;width:100%;${editable===1&&!PREVIEW_CW?'margin-top:8px':''}"><button class="tk-btn" onclick="ticketFor(${fid})">🎫 Send a ticket</button></div>`:''}
       </div>`;
   };
   const groups=[
@@ -2071,6 +2088,7 @@ function drawAdminPending(){
         prevHtml(i)+
         (i.can_reask?'<button class="tk-btn" style="margin-top:8px" onclick="openReask('+i.fid+')">🔁 Ask again'+(i.can_switch?' · new / renewal':'')+'</button>':'')+
         (i.asked_again?'<button class="tk-btn" style="margin-top:8px" onclick="cancelReask('+i.fid+')">↩️ Cancel re-ask</button>':'')+
+        (i.can_edit?'<button class="tk-btn" style="margin-top:8px" onclick="openEdit('+i.fid+')">✏️ Edit details</button>':'')+
         '</div>').join('')).join('');
 }
 function deleteAdminOrder(orderId){
@@ -2147,6 +2165,69 @@ async function sendReask(force){
     const i=adminPending.find(x=>x.fid===fid);
     if(i){ i.state='needs_info'; i.asked_again=true; i.fields=[]; i.info=''; if(reaskType!=='any') i.account_type=reaskType; }
     closeReask(); drawAdminPending(); showToast(data.reached?'Asked again':'Saved, but they could not be reached');
+  }catch(e){ msg.style.color='#dc2626'; msg.textContent='Network error — please try again.'; }
+  finally{ btn.disabled=false; }
+}
+// ✏️ Edit details (23 Nov 2026): a pending item's account details, and new account ↔ renewal; never the subscription
+const EDIT_FIELDS={new:[['first_name','First name'],['last_name','Last name'],['email','Email','email'],['username','Username'],['password','Password']],
+  renew:[['login_username','Username or email used to log in'],['login_password','Password used to log in']]};
+const EDIT_CARRY={username:'login_username',login_username:'username',password:'login_password',login_password:'password'};
+let editFid=null, editType='new', editVals={};
+async function openEdit(fid){
+  editFid=fid; editVals={};
+  const msg=document.getElementById('editMsg');
+  document.getElementById('editTitle').textContent='✏️ Edit details';
+  document.getElementById('editSub').textContent='Loading…';
+  document.getElementById('editTypes').innerHTML=''; document.getElementById('editFields').innerHTML='';
+  document.getElementById('editSend').style.display='none'; msg.textContent='';
+  document.getElementById('editOverlay').classList.add('on');
+  try{
+    const resp=await fetch(withAuth('/api/unit_details')+'&fid='+encodeURIComponent(fid));
+    const d=await resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
+    if(editFid!==fid) return;
+    if(!d.ok) throw new Error(d.error||('HTTP '+resp.status));
+    document.getElementById('editTitle').textContent='✏️ '+d.name+' · Order #'+d.order_id;
+    if(!d.editable){ document.getElementById('editSub').textContent=d.problem||'These details can\'t be edited now.'; return; }
+    document.getElementById('editSub').textContent='Subscription: '+d.name+' (it can\'t be changed). Change the account details, or switch between a new account and a renewal.';
+    editType=d.account_type==='renew'?'renew':'new'; editVals=Object.assign({},d.fields||{});
+    document.getElementById('editSend').style.display='';
+    drawEdit();
+  }catch(e){ if(editFid===fid){ document.getElementById('editSub').textContent=''; msg.style.color='#dc2626'; msg.textContent='Could not load the details: '+(e.message||e); } }
+}
+function editKeep(){
+  (EDIT_FIELDS[editType]||[]).forEach(([k])=>{ const el=document.getElementById('ef-'+k); if(el) editVals[k]=el.value; });
+}
+function setEditType(t){
+  if(t===editType) return;
+  editKeep();
+  (EDIT_FIELDS[t]||[]).forEach(([k])=>{ const o=EDIT_CARRY[k]; if(!editVals[k]&&o&&editVals[o]) editVals[k]=editVals[o]; });
+  editType=t; drawEdit();
+}
+function drawEdit(){
+  const opt=(t,l)=>'<button class="tk-btn" style="margin-top:6px;'+(editType===t?'outline:2px solid var(--accent,#3b82f6)':'')+'" onclick="setEditType(\''+t+'\')">'+(editType===t?'● ':'○ ')+l+'</button>';
+  document.getElementById('editTypes').innerHTML='<div style="font-size:12px;color:var(--hint);margin:4px 0">Set it up as</div>'+opt('new','🆕 New account')+opt('renew','🔄 Renewal');
+  document.getElementById('editFields').innerHTML=(EDIT_FIELDS[editType]||[]).map(([k,l,type])=>
+    '<div style="font-size:12px;color:var(--hint);margin:6px 0 4px">'+escHtml(l)+'</div>'+fieldBox('ef-'+k,l,editVals[k]||'',type)).join('');
+}
+function closeEdit(){ document.getElementById('editOverlay').classList.remove('on'); editFid=null; }
+async function saveEdit(force){
+  const fid=editFid; if(!fid) return;
+  editKeep();
+  const fields={}; (EDIT_FIELDS[editType]||[]).forEach(([k])=>{ fields[k]=(editVals[k]||'').trim(); });
+  const msg=document.getElementById('editMsg'), btn=document.getElementById('editSend');
+  btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Saving…';
+  try{
+    const resp=await fetch(withAuth('/api/edit_unit_details'),{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({fulfilment_id:fid,account_type:editType,fields,force:!!force})});
+    const data=await resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
+    if(!data.ok){
+      msg.style.color='#dc2626'; msg.textContent=data.error||'Could not save the details.';
+      if(data.field){ const el=document.getElementById('ef-'+data.field); if(el) try{ el.focus(); }catch(e){} }
+      if(data.needs_force) askConfirm((data.error||'')+' Save anyway?',()=>saveEdit(true));
+      return;
+    }
+    closeEdit(); showToast(data.changed&&data.changed.length?'Details updated':'Nothing changed');
+    if(typeof adminPending!=='undefined'&&adminPending.some(x=>x.fid===fid)) renderAdminPending();
   }catch(e){ msg.style.color='#dc2626'; msg.textContent='Network error — please try again.'; }
   finally{ btn.disabled=false; }
 }
@@ -4527,6 +4608,10 @@ buildAdBanner();
 // go straight to iMD and its "What does iMD include?" search.
 if (_qs.get('open') === 'imdsearch') {
   try { switchCat('imd'); imdWhatsIncluded(); } catch(e) {}
+}
+// ✏️ Edit details in the admin's Pending Orders (chat) opens the Mini App with &open=edit<fulfilment id>
+if (/^edit\d+$/.test(_qs.get('open') || '')) {
+  try { openEdit(Number(_qs.get('open').slice(4))); } catch(e) {}
 }
 document.getElementById('landingImg').src=LOGOS.landing;
 // The moving picture replaces the still one once it actually plays (a blob: URL, which iOS plays where a data: URL

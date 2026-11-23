@@ -4663,7 +4663,10 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
              ostatus if ostatus in UNPAID_ORDER_STATUSES else fstate,
              fid, oid, ostatus in UNPAID_ORDER_STATUSES,
              # 6th: placed by this very account (so its buttons can work); not when an admin previews
-             1 if (not preview_coworker_id and f_uid == user_id) else 0]
+             1 if (not preview_coworker_id and f_uid == user_id) else 0,
+             # 7th: ✏️ Edit details offered (23 Nov 2026); never in an admin's preview
+             1 if (not preview_coworker_id and _reask_can_switch(iid)
+                   and _edit_unit_problem(db_get_fulfilment(fid)) is None) else 0]
             for fid, oid, iid, fstate, ostatus, f_uid in pend_rows
         ]
         # Custom items — exclude out-of-stock ones so the Mini App catalog
@@ -11967,7 +11970,12 @@ async def _edit_order_details(request):
     if not changed:
         return web.json_response({"ok": True, "order_id": order_id, "item_name": unit["name"], "changed": [],
                                   "note": "already set that way"})
-    db_set_fulfilment_info(unit["id"], info)
+    # the same save as ✏️ Edit details (23 Nov 2026): @Utdreg_bot told first, history kept, never once delivered
+    saved = await _save_unit_edit(request.app["application"], db_get_fulfilment(unit["id"]), info, "chatbot")
+    if not saved.get("ok"):
+        return web.json_response({"error": saved.get("error"), **({"busy": True} if saved.get("busy") else {}),
+                                  **({"delivered": True} if "delivered" in (saved.get("error") or "") else {})},
+                                 status=saved.get("status") or 409)
     logger.info("edit_order_details: order #%s unit %s (%s): %s changed through the support chat", order_id, unit["id"],
                 unit["item_id"], ", ".join(c["key"] for c in changed))
     if ADMIN_CHAT_ID:
@@ -12755,6 +12763,8 @@ def db_admin_pending() -> list:
             "can_reask": _reask_offered(iid), "can_switch": _reask_can_switch(iid),
             "account_type": _unit_account_type(info.get(fid)), "asked_again": _reask_waiting(fid, state),
             "prev_fields": [{"label": l, "value": v} for l, v in _reask_prev_fields(fid)] if _reask_waiting(fid, state) else [],
+            # ✏️ Edit details (23 Nov 2026)
+            "can_edit": _reask_can_switch(iid) and _edit_unit_problem(db_get_fulfilment(fid)) is None,
         })
     return out
 
@@ -16665,6 +16675,10 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         buttons.append([InlineKeyboardButton("📤 Deliver Manually", callback_data=f"deliver:{fulfilment_id}")])
     if asked_again:
         buttons.append([InlineKeyboardButton("↩️ Cancel re-ask", callback_data=f"askresend_c:{fulfilment_id}")])
+    edit_url = _shop_url(ADMIN_CHAT_ID, open_view=f"edit{fulfilment_id}") if _edit_unit_problem(row) is None else ""
+    if edit_url:
+        # ✏️ Edit details (23 Nov 2026): the Mini App's sheet, not a second chat form
+        buttons.append([InlineKeyboardButton("✏️ Edit details", web_app=WebAppInfo(url=edit_url))])
     if item_id not in IMD_TRIGGER_ITEMS and AUTOMATION_API_URL:
         buttons.append([InlineKeyboardButton("🤖 Run automation", callback_data=f"asite:runorder:{fulfilment_id}")])
     # Anything that isn't a no-details item (code delivery, manual-access
@@ -17200,6 +17214,8 @@ async def _save_unit_edit(application, row, info: dict, by: str, force: bool = F
     """Saves new details on a pending unit: tells @Utdreg_bot first when it has the unit, then stores them (with the
     history), records a new account's email/username and drops a half-finished chat form of the old ones.
     {ok, stored, utd} or {ok: False, error, status, busy?, needs_force?}. by: admin | customer | coworker | chatbot."""
+    if not row:
+        return {"ok": False, "status": 404, "error": "That item no longer exists."}
     fid, order_id, user_id, item_id = row[0], row[1], row[2], row[3]
     order = db_get_order(order_id)
     told, utd_note = None, ""   # @Utdreg_bot: True heard it, False to be told by automation_push_job, None not involved
