@@ -2079,7 +2079,7 @@ function openTransfer(t){
 }
 function closeTransfer(){ document.getElementById('trOverlay').classList.remove('on'); tr=null; clearTimeout(trTimer); }
 function transferWhoChanged(){
-  if(!tr) return; tr.ok=false; document.getElementById('trSend').disabled=true;
+  if(!tr) return; tr.ok=false; tr.toId=null; ++trSeq; document.getElementById('trSend').disabled=true;
   clearTimeout(trTimer); trTimer=setTimeout(previewTransfer,450);
 }
 async function previewTransfer(){
@@ -2093,17 +2093,17 @@ async function previewTransfer(){
     out.style.color='';
     out.textContent='→ '+d.to.label+' · ID '+d.to.user_id+(d.to.warning?'\n⚠️ '+d.to.warning:'')+
       (d.kind==='import'?'':d.moves_order?'\nThe whole order #'+d.order_id+' moves with it.':'\nOnly this item moves; order #'+d.order_id+' stays with the buyer.');
-    tr.ok=true; tr.label=d.to.label; document.getElementById('trSend').disabled=false;
+    tr.ok=true; tr.label=d.to.label; tr.toId=d.to.user_id; document.getElementById('trSend').disabled=false;
   }catch(e){ if(tr&&seq===trSeq){ out.style.color='#ef4444'; out.textContent=e.message; } }
 }
 function sendTransfer(){
-  if(!tr||!tr.ok) return;
+  if(!tr||!tr.ok||!tr.toId) return;
   const t=tr;
   askConfirm('Transfer it to '+t.label+'?',async()=>{
     const msg=document.getElementById('trMsg'), btn=document.getElementById('trSend');
     btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Transferring…';
     try{
-      const d=await adminPost('/api/admin_transfer_delivery',{delivery_id:t.id,customer:document.getElementById('trWho').value.trim(),
+      const d=await adminPost('/api/admin_transfer_delivery',{delivery_id:t.id,customer:String(t.toId),
         notify_new:document.getElementById('trNotifyNew').checked,notify_old:document.getElementById('trNotifyOld').checked});
       closeTransfer(); showToast(d.note||'Transferred'); if(t.done) t.done();
     }catch(e){ msg.style.color='#ef4444'; msg.textContent=e.message; btn.disabled=false; }

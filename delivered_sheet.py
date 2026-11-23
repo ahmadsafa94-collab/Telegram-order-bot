@@ -381,9 +381,10 @@ async def _apply_transfer(tab: str, payload: dict) -> str:
     if hit is None:
         return f"order #{order} isn't in the sheet"
     n = hit + 1
-    await _call("POST", f"{SHEETS_API}/{sheet_id()}/values:batchUpdate", json={"valueInputOption": "RAW", "data": [
-        {"range": f"'{tab}'!K{n}", "values": [[str(payload.get("new_id") or "")]]},
-        {"range": f"'{tab}'!L{n}", "values": [[(payload.get("new_username") or "").lstrip("@")]]}]})
+    data = [{"range": f"'{tab}'!K{n}", "values": [[str(payload.get("new_id") or "")]]}]
+    if (payload.get("new_username") or "").lstrip("@"):   # no username: L (e.g. an admin order's note) is kept
+        data.append({"range": f"'{tab}'!L{n}", "values": [[payload["new_username"].lstrip("@")]]})
+    await _call("POST", f"{SHEETS_API}/{sheet_id()}/values:batchUpdate", json={"valueInputOption": "RAW", "data": data})
     return f"row {n}: moved to {payload.get('new_id')}"
 
 

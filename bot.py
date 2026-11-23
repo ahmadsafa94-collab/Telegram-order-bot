@@ -13693,7 +13693,7 @@ async def http_admin_transfer_delivery(request):
     notes = [f"🔁 {name}{order_part} moved from {plan['from_label']} to {plan['to_label']}"
              + ("" if plan["kind"] == "import" else
                 " with its order" if plan["moves_order"] else "; the order stays with the buyer") + "."]
-    if data.get("notify_new") is True:
+    if data.get("notify_new", True) is True:   # on unless turned off, like the Mini App's tick
         try:
             sent = await bot.send_message(chat_id=new, text=f"🔑 Here are your account details for {name}{order_part}:"
                                                             f"\n\n{plan['message']}")
@@ -14758,9 +14758,12 @@ async def http_my_orders(request):
         conn = sqlite3.connect(DB_PATH)
         marks = ",".join("?" * len(order_ids))
         messages = {}
+        # a customer's own deliveries only (a 🔁 transferred unit's text isn't the buyer's to search, 23 Nov 2026);
+        # a coworker account sees every delivery of its orders
+        own = "" if coworker_id else " AND user_id = ?"
         for d_order, d_item, d_msg in conn.execute(
-            f"SELECT order_id, item_id, message FROM deliveries WHERE order_id IN ({marks}) ORDER BY id",
-            order_ids,
+            f"SELECT order_id, item_id, message FROM deliveries WHERE order_id IN ({marks}){own} ORDER BY id",
+            order_ids + ([] if coworker_id else [user_id]),
         ):
             messages.setdefault((d_order, d_item), []).append(d_msg)
         conn.close()
@@ -14904,18 +14907,32 @@ async def http_my_order_detail(request):
         # Two units of the same subscription in one order each have their own
         # delivery: this unit's is the one at its position among the order's
         # delivered units of that item.
-        rank = conn.execute(
-            "SELECT COUNT(*) FROM fulfilment WHERE order_id = ? AND item_id = ? "
-            "AND state = 'delivered' AND id < ?",
-            (order_id, item_id, fid),
-        ).fetchone()[0]
-        deliv = conn.execute(
-            "SELECT message FROM deliveries WHERE order_id = ? AND item_id = ? ORDER BY id LIMIT 1 OFFSET ?",
-            (order_id, item_id, rank),
-        ).fetchone() or conn.execute(
-            "SELECT message FROM deliveries WHERE order_id = ? AND item_id = ? ORDER BY id LIMIT 1",
-            (order_id, item_id),
-        ).fetchone()
+        if coworker_id:
+            rank = conn.execute(
+                "SELECT COUNT(*) FROM fulfilment WHERE order_id = ? AND item_id = ? "
+                "AND state = 'delivered' AND id < ?",
+                (order_id, item_id, fid),
+            ).fetchone()[0]
+            deliv = conn.execute(
+                "SELECT message FROM deliveries WHERE order_id = ? AND item_id = ? ORDER BY id LIMIT 1 OFFSET ?",
+                (order_id, item_id, rank),
+            ).fetchone() or conn.execute(
+                "SELECT message FROM deliveries WHERE order_id = ? AND item_id = ? ORDER BY id LIMIT 1",
+                (order_id, item_id),
+            ).fetchone()
+        else:
+            # a customer: only their own units and deliveries of it, never someone else's (🔁 a unit transferred
+            # out of the order, 23 Nov 2026), and no fallback to another owner's delivery
+            rank = conn.execute(
+                "SELECT COUNT(*) FROM fulfilment WHERE order_id = ? AND item_id = ? AND user_id = ? "
+                "AND state = 'delivered' AND id < ?",
+                (order_id, item_id, user_id, fid),
+            ).fetchone()[0]
+            deliv = conn.execute(
+                "SELECT message FROM deliveries WHERE order_id = ? AND item_id = ? AND user_id = ? "
+                "ORDER BY id LIMIT 1 OFFSET ?",
+                (order_id, item_id, user_id, rank),
+            ).fetchone()
         conn.close()
         credentials = deliv[0] if deliv else None
     if credentials is None:
