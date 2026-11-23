@@ -11437,8 +11437,52 @@ async def http_submit_receipt(request):
 # the same strings the checkout stores (db_set_payment_method), limited to
 # the receipt-based methods. Telegram Stars and credits confirm instantly
 # and never need a receipt, so they're not offered here.
+# Paid from Palestine (owner, 23 Nov 2026): only the support chatbot offers it (not at the shop's checkout), when a
+# customer says they want to pay from Palestine. The amount is in ILS at the day's USD rate.
+CHAT_ONLY_PAYMENT_METHODS = ["Palestine"]
+PALESTINE_PAYMENT_TEXT = (
+    "0597660180\n\n"
+    "🛑🛑 سبب التحويل : تجارة او بضاعة حصرا\n\n"
+    "بنك فلسطين\n"
+    "ماهر البغدادي\n"
+    "او البغدادي ماركت"
+)
+USD_ILS_RATE_URLS = [u for u in os.environ.get(
+    "USD_ILS_RATE_URLS", "https://open.er-api.com/v6/latest/USD,https://api.frankfurter.dev/v1/latest?base=USD&symbols=ILS"
+).split(",") if u.strip()]
+_usd_ils_cache = {"rate": None, "at": 0.0}
+
+
+async def usd_ils_rate():
+    """Today's USD → ILS rate from a public rates service (kept 3 hours), or None when none answers."""
+    import httpx
+    import time as _t
+    if _usd_ils_cache["rate"] and _t.time() - _usd_ils_cache["at"] < 3 * 3600:
+        return _usd_ils_cache["rate"]
+    for url in USD_ILS_RATE_URLS:
+        try:
+            async with httpx.AsyncClient(timeout=8) as http:
+                resp = await http.get(url.strip())
+            rate = float((resp.json().get("rates") or {}).get("ILS") or 0)
+            if 1 < rate < 10:   # a sane USD → ILS rate
+                _usd_ils_cache.update(rate=rate, at=_t.time())
+                return rate
+        except Exception as exc:
+            logger.warning("USD → ILS rate from %s failed: %s", url, exc)
+    return _usd_ils_cache["rate"]   # an older one if there is, else None
+
+
+def palestine_payment_text(total_usd: float, rate: float) -> tuple:
+    """(amount text, instructions) for a payment from Palestine: whole shekels, rounded up."""
+    import math
+    ils = math.ceil(total_usd * rate)
+    amount = f"{ils} ILS (≈{CURRENCY}{total_usd:.2f} at 1 USD = {rate:.3f} ILS)"
+    return amount, f"Amount to pay: {amount}\n\n{PALESTINE_PAYMENT_TEXT}"
+
+
 def reply_bot_payment_method_codes() -> list:
-    return list(LOCAL_PAYMENT_COUNTRIES) + list(USA_PAYMENT_APPS) + ["card", "Cryptocurrency", "PayPal"]
+    return (list(LOCAL_PAYMENT_COUNTRIES) + list(USA_PAYMENT_APPS) + ["card", "Cryptocurrency", "PayPal"]
+            + CHAT_ONLY_PAYMENT_METHODS)
 
 
 CREATE_ORDER_MAX_UNITS = 5
@@ -11494,7 +11538,12 @@ async def http_payment_details(request):
     if db_is_out_of_stock(item_id):
         return web.json_response({"error": f"{MENU[item_id][0]} is out of stock"}, status=409)
     total = _reply_bot_order_total(user_id, {item_id: 1})  # the same price the order will have
-    if method in USA_APP_INSTRUCTIONS:
+    if method == "Palestine":
+        rate = await usd_ils_rate()
+        if not rate:
+            return web.json_response({"error": "today's USD to ILS rate couldn't be fetched"}, status=503)
+        amount, text = palestine_payment_text(total, rate)
+    elif method in USA_APP_INSTRUCTIONS:
         amount = convert_for_country(total, "USA")
         text = f"{method}\n\nAmount to pay: {amount}\n\n{USA_APP_INSTRUCTIONS[method]}"
     elif method == "Cryptocurrency":
