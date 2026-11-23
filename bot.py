@@ -7944,7 +7944,9 @@ async def send_delivery_promo(context: ContextTypes.DEFAULT_TYPE, user_id: int):
     """Sent as a follow-up right after every account delivery, whichever
     path it came through. Isolated with its own error handling — a
     failure here must never affect the actual delivery, which has
-    already happened by the time this runs."""
+    already happened by the time this runs. Not for an order by the admin (no Telegram customer)."""
+    if user_id == ADMIN_ORDER_USER_ID:
+        return
     try:
         await context.bot.send_message(chat_id=user_id, text=DELIVERY_PROMO_MESSAGE)
     except Exception:
@@ -7970,7 +7972,8 @@ async def post_subscription_to_channel(context: ContextTypes.DEFAULT_TYPE, order
     _, user_id, username_tg, items_json, total, status, created_at = order
 
     name = MENU.get(item_id, (item_id or "Subscription",))[0]
-    who = f"@{username_tg}" if username_tg else str(user_id)
+    who = (_admin_order_who(order_id) if user_id == ADMIN_ORDER_USER_ID
+           else f"@{username_tg}" if username_tg else str(user_id))
     date_str = datetime.now().strftime("%Y-%m-%d")
     login_username, login_password = extract_login_from_delivery_message(delivery_message)
 
@@ -12751,16 +12754,21 @@ def db_admin_pending() -> list:
     conn.close()
     out = []
     for fid, oid, uid, uname, iid, unit_no, state, created in rows:
+        alabel, acw = _admin_order_info(oid) if uid == ADMIN_ORDER_USER_ID else (None, None)
+        by_admin = acw is not None
         out.append({
             "fid": fid, "order_id": oid, "item_id": iid, "name": MENU.get(iid, (iid,))[0], "unit": unit_no,
-            "user_id": uid, "customer": f"@{uname}" if uname else str(uid), "state": state, "date": (created or "")[:10],
+            "user_id": uid, "customer": (alabel or "🧾 by admin") if by_admin else (f"@{uname}" if uname else str(uid)),
+            "state": state, "date": (created or "")[:10],
+            # 🧾 an order by the admin (23 Nov 2026): tagged like the Delivered tab; no customer to ask again
+            "admin": {"label": alabel or "", "coworker": acw or "Me"} if by_admin else None,
             "info": format_fulfilment_info(iid, info.get(fid)) if info.get(fid) else "",
             "fields": [{"label": l, "value": v} for l, v in fulfilment_info_fields(info.get(fid))],
             "imd": iid in IMD_TRIGGER_ITEMS, "template": delivery_template_kind(iid), "via": via.get(oid), "order_done": done.get(oid, 0),
             "title": delivery_title_duration(MENU.get(iid, (iid,))[0])[0],
             "duration": delivery_title_duration(MENU.get(iid, (iid,))[0])[1],
             # 🔁 Ask again (22 Nov 2026)
-            "can_reask": _reask_offered(iid), "can_switch": _reask_can_switch(iid),
+            "can_reask": _reask_offered(iid) and not by_admin, "can_switch": _reask_can_switch(iid),
             "account_type": _unit_account_type(info.get(fid)), "asked_again": _reask_waiting(fid, state),
             "prev_fields": [{"label": l, "value": v} for l, v in _reask_prev_fields(fid)] if _reask_waiting(fid, state) else [],
             # ✏️ Edit details (23 Nov 2026)
@@ -12834,17 +12842,55 @@ async def http_admin_deliver(request):
     return web.json_response({"ok": True, "name": name, "order_id": order_id, "delivery_id": delivery_id}, headers=headers)
 
 
-# 🧾 New order (by admin), owner 23 Nov 2026: a sale made outside the bot, with no Telegram customer. It is stored
-# like any order (paid and delivered, counted in the sales, the daily Excel and the statistics on the chosen day) but
-# with user_id ADMIN_ORDER_USER_ID: no Telegram account has id 0, so it never shows up in a real customer's (or the
-# admin's own) My Subscriptions, purchase history, credits or the chatbot's lookups for a customer, and nothing is
-# ever sent for it. orders.source = 'admin' marks it ("🧾 by admin" in the admin's lists); the coworker it is
-# registered for only goes in column I of the delivered sheet (orders.admin_coworker), never in orders.coworker_id,
-# so coworker statements and owed amounts are untouched.
+# 🧾 New order (by admin), owner 23 Nov 2026: a sale made outside the bot, with no Telegram customer. Stored with
+# user_id ADMIN_ORDER_USER_ID: no Telegram account has id 0, so it never shows up in a real customer's (or the admin's
+# own) My Subscriptions, purchase history, credits or the chatbot's lookups for a customer. orders.source = 'admin'
+# marks it ("🧾 by admin" in the admin's lists); the coworker it is registered for only goes in column I of the
+# delivered sheet (orders.admin_coworker), never in orders.coworker_id, so coworker statements and owed amounts are
+# untouched. Since the owner's 23 Nov 2026 follow-up ("the order should ask for credentials like an order put by anyone
+# else and follow those rules") it collects the product's account details exactly like a cart order, is saved PAID
+# (counted in the sales on the chosen day) and follows the normal path: UpToDate → @Utdreg_bot → approve → deliver,
+# iMD → its automation, others → Pending → 📤 Send. Whatever the normal flow sends the customer goes to the admin's
+# chat instead, headed "🧾 Admin order #N · <label>: forward it to the customer" (_send_to_customer). Orders saved
+# before that (paid and delivered from a typed text) stay as they are.
 ADMIN_ORDER_SOURCE = "admin"
 ADMIN_ORDER_USER_ID = 0
 ADMIN_ORDER_METHOD = "By admin"
 ADMIN_ORDER_MAX_DAYS_BACK = 365
+
+
+def _admin_order_info(order_id: int) -> tuple:
+    """(label, coworker name) of an order by the admin; (None, None) for any other order."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT admin_label, admin_coworker FROM orders WHERE id = ? AND source = ?",
+                       (order_id, ADMIN_ORDER_SOURCE)).fetchone()
+    conn.close()
+    return (row[0] or "", row[1] or "Me") if row else (None, None)
+
+
+def _admin_order_who(order_id: int) -> str:
+    """'🧾 by admin — <label>' for the admin's own lists and notices."""
+    label = _admin_order_info(order_id)[0]
+    return "🧾 by admin" + (f" — {label}" if label else "")
+
+
+def _admin_fwd(order_id: int) -> str:
+    """The header of what the normal flow would have sent the customer of an order by the admin."""
+    label = _admin_order_info(order_id)[0]
+    return f"🧾 Admin order #{order_id}" + (f" · {label}" if label else "") + ": forward it to the customer\n\n"
+
+
+def _unit_chat(user_id: int):
+    """Where the customer's messages for an order unit go: the admin's chat for an order by the admin (user 0)."""
+    return ADMIN_CHAT_ID if user_id == ADMIN_ORDER_USER_ID else user_id
+
+
+async def _send_to_customer(bot, user_id: int, order_id: int, text: str, **kwargs):
+    """Sends what the normal flow sends the customer. An order by the admin has no Telegram customer: it goes to the
+    admin's chat with the "forward it to the customer" header."""
+    if user_id == ADMIN_ORDER_USER_ID:
+        return await bot.send_message(chat_id=ADMIN_CHAT_ID, text=_admin_fwd(order_id) + text, **kwargs)
+    return await bot.send_message(chat_id=user_id, text=text, **kwargs)
 
 
 def _admin_order_when(day_text) -> datetime:
@@ -12868,33 +12914,38 @@ def _admin_order_when(day_text) -> datetime:
     return datetime.combine(day, dt_time(12, 0)) - offset
 
 
-def db_create_admin_order(item_id: str, price: float, text: str, access: str, coworker_name: str, label: str,
-                          when: datetime) -> tuple:
-    """Stores a sale made outside the bot as a paid, delivered order with one delivered unit and its delivery row
-    (+ the delivered-sheet row, with coworker_name in column I). Messages no one. Returns (order_id, delivery_id)."""
-    stamp = when.isoformat()
-    known_costs = db_get_item_costs()
-    costs_json = json.dumps({item_id: known_costs[item_id]} if item_id in known_costs else {})
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.execute(
-        "INSERT INTO orders (user_id, username, items_json, total, status, created_at, paid_at, delivered_at, "
-        "credentials, payment_method, costs_json, source, admin_label, admin_coworker) "
-        "VALUES (?, NULL, ?, ?, 'delivered', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (ADMIN_ORDER_USER_ID, json.dumps({item_id: 1}), round(float(price), 2), stamp, stamp, stamp, text,
-         ADMIN_ORDER_METHOD, costs_json, ADMIN_ORDER_SOURCE, label or None, coworker_name))
-    order_id = cur.lastrowid
-    conn.execute("INSERT INTO fulfilment (order_id, user_id, item_id, unit_no, state, created_at) "
-                 "VALUES (?, ?, ?, 1, 'delivered', ?)", (order_id, ADMIN_ORDER_USER_ID, item_id, stamp))
-    conn.commit()
-    conn.close()
-    delivery_id = db_add_delivery(order_id, ADMIN_ORDER_USER_ID, item_id, text, None, access=access,
-                                  delivered_at=when, coworker_name=coworker_name)
-    return order_id, delivery_id
+def _admin_order_details(item_id: str, details) -> tuple:
+    """The account details of an order by the admin, checked like a cart order's (the Mini App's validateDetails, and
+    the server's rules for new accounts: a real email, the username/password rules, an email or username not used for
+    this subscription before). (info, None) or (None, what to tell the admin)."""
+    kind = _register_kind(item_id)
+    if kind not in ("imd", "generic"):
+        return {"account_type": "new"}, None        # a code, a book, manual access: nothing to fill in
+    if not isinstance(details, dict):
+        return None, "Fill in the account details."
+    clean = {str(k): v.strip()[:200] for k, v in details.items() if isinstance(v, str) and v.strip()}
+    info, err = _clean_register_info(kind, clean)
+    if err:
+        msg = err["error"]
+        if msg.startswith("missing account details: "):
+            msg = "Fill in the account details: " + msg.split(": ", 1)[1].replace("_", " ")
+        return None, msg[0].upper() + msg[1:] + ("" if msg.endswith(".") else ".")
+    if info["account_type"] == "new":
+        if not _EMAIL_RE.match(info["email"]):
+            return None, "Enter a valid email."
+        if len(info["username"]) < 6:
+            return None, "The username needs at least 6 characters."
+        for field in ("email", "username"):
+            if db_credential_already_used(ADMIN_ORDER_USER_ID, item_id, field, info[field]):
+                return None, f"This {field} was already used to register for this subscription. Choose a different one."
+    return info, None
 
 
 async def http_admin_create_order(request):
-    """🧾 New order (by admin) in the admin Mini App: {item_id, price, text, access, coworker_id (0 = Me, -1 = coworker_name typed by the admin), label, date
-    (YYYY-MM-DD, local, ≤ today)}. Saved as a paid, delivered order; nothing is sent to anyone."""
+    """🧾 New order (by admin) in the admin Mini App: {item_id, price, details (the product's account details, as the
+    cart collects them: account_type new|renew + its fields), coworker_id (0 = Me, -1 = coworker_name typed by the
+    admin), label, date (YYYY-MM-DD, local, ≤ today, ≤ 365 days back: the sale's day)}. Saved as a PAID order waiting
+    for delivery that follows the normal path (start_order_fulfilment); what the customer would get goes to the admin."""
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
@@ -12910,12 +12961,12 @@ async def http_admin_create_order(request):
         return web.json_response({"ok": False, "error": msg}, status=400, headers=headers)
 
     if data.get("action") == "form":
-        # what the form offers: every subscription (regular price, ready-made delivery template) and the coworkers
+        # what the form offers: every subscription (regular price, which details it takes) and the coworkers
         products = []
         for iid, v in MENU.items():
-            title, duration = delivery_title_duration(v[0])
-            products.append({"id": iid, "name": v[0], "price": round(float(v[1]), 2), "template": delivery_template_kind(iid),
-                             "title": title, "duration": duration})
+            products.append({"id": iid, "name": v[0], "price": round(float(v[1]), 2),
+                             "details": _register_kind(iid) in ("imd", "generic"),
+                             "addon": iid in UPTODATE_AI_ADDONS})
         products.sort(key=lambda x: x["name"].lower())
         coworkers = [{"id": r[0], "name": r[1]} for r in db_list_coworkers()]
         today_d = (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date()
@@ -12926,6 +12977,9 @@ async def http_admin_create_order(request):
     item_id = data.get("item_id")
     if not isinstance(item_id, str) or item_id not in MENU:
         return bad("Pick the subscription.")
+    problem = addon_problem({item_id: 1})       # an Uptodate AI add-on alone is refused, as in the cart
+    if problem:
+        return bad(problem)
     price = data.get("price")
     if isinstance(price, str):
         try:
@@ -12934,12 +12988,6 @@ async def http_admin_create_order(request):
             price = None
     if isinstance(price, bool) or not isinstance(price, (int, float)) or price != price or not (0 <= price <= 10000):
         return bad("Type the price in USD (0 or more).")
-    text = data.get("text")
-    if not isinstance(text, str) or not text.strip() or len(text) > 3500:
-        return bad("Type the account details (username and password).")
-    access = data.get("access")
-    if not isinstance(access, str) or not access.strip():
-        return bad("Fill in Access first.")
     label = data.get("label") or ""
     if not isinstance(label, str):
         return bad("Invalid customer name.")
@@ -12964,17 +13012,42 @@ async def http_admin_create_order(request):
         when = _admin_order_when(data.get("date"))
     except ValueError as exc:
         return bad(str(exc))
-    order_id, delivery_id = db_create_admin_order(item_id, float(price), text.strip(), access.strip()[:100],
-                                                  coworker_name, label.strip()[:100], when)
+    info, problem = _admin_order_details(item_id, data.get("details"))
+    if problem:
+        return bad(problem)
+
+    items = {item_id: 1}
+    order_id = db_create_order(ADMIN_ORDER_USER_ID, None, items, round(float(price), 2))
+    stamp = when.isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    # created_at/paid_at on the sale's day (the sales, the daily Excel, 📈); delivery and its sheet row use the real day
+    conn.execute("UPDATE orders SET source = ?, admin_label = ?, admin_coworker = ?, created_at = ?, paid_at = ? "
+                 "WHERE id = ?", (ADMIN_ORDER_SOURCE, label.strip()[:100] or None, coworker_name, stamp, stamp, order_id))
+    conn.commit()
+    conn.close()
+    db_set_payment_method(order_id, ADMIN_ORDER_METHOD)
+    if info.get("account_type") == "new" and (info.get("email") or info.get("username")):
+        db_record_used_credentials(ADMIN_ORDER_USER_ID, item_id, info.get("email"), info.get("username"))
+    db_add_fulfilment_items(order_id, ADMIN_ORDER_USER_ID, items)
+    conn = sqlite3.connect(DB_PATH)
+    fid = conn.execute("SELECT id FROM fulfilment WHERE order_id = ?", (order_id,)).fetchone()[0]
+    conn.close()
+    db_set_fulfilment_info(fid, info)
+    db_update_status(order_id, "paid")          # paid_at set above stays (COALESCE)
     local_day = (when + timedelta(hours=REPORT_UTC_OFFSET)).date()
-    logger.info("Admin order #%s: %s, %s USD, for %s (%s)", order_id, item_id, price, coworker_name, local_day)
+    logger.info("Admin order #%s: %s, %s USD, for %s (%s), %s", order_id, item_id, price, coworker_name, local_day,
+                info.get("account_type"))
+    # the normal path from here (no finalize_order_confirmation: no customer, referral credit or payments post)
+    await start_order_fulfilment(_HttpContext(request.app["application"], ADMIN_CHAT_ID), order_id,
+                                 ADMIN_ORDER_USER_ID, items)
     if local_day < (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date():
         # a finished day changed: a fresh DAILY_SALES line, so the nightly sync updates that day in the owner's sheet
         try:
             log_daily_sales(local_day)
         except Exception:
             logger.exception("DAILY_SALES for %s after admin order #%s failed", local_day, order_id)
-    return web.json_response({"ok": True, "order_id": order_id, "delivery_id": delivery_id,
+    state = (db_get_fulfilment(fid) or (None,) * 6)[5]
+    return web.json_response({"ok": True, "order_id": order_id, "fulfilment_id": fid, "state": state,
                               "name": MENU[item_id][0], "coworker": coworker_name}, headers=headers)
 
 
@@ -16278,7 +16351,8 @@ async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
         name = MENU.get(item_id, (item_id,))[0]
         suffix = f" #{unit_no}" if unit_no > 1 else ""
         flag = "📝" if state == "awaiting_delivery" else "⌛"
-        who = f"@{username}" if username else str(user_id)
+        who = (_admin_order_who(order_id) if user_id == ADMIN_ORDER_USER_ID
+               else f"@{username}" if username else str(user_id))
         label = f"{flag} {name}{suffix} — {who} (#{order_id}) — {_short_submitted(created_at)}"
         buttons.append([InlineKeyboardButton(label[:64], callback_data=f"apend:{fid}")])
 
@@ -16651,8 +16725,9 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
 
     text = (
         f"{name}{f' #{unit_no}' if unit_no > 1 else ''}\n"
-        f"Order #{order_id} — {f'@{username}' if username else ''} (ID: {user_id})\n"
-        f"Status: {state}\n"
+        + (f"Order #{order_id} — {_admin_order_who(order_id)} (for {_admin_order_info(order_id)[1]})\n"
+           if user_id == ADMIN_ORDER_USER_ID else f"Order #{order_id} — {f'@{username}' if username else ''} (ID: {user_id})\n")
+        + f"Status: {state}\n"
         f"Submitted: {created_at[:19] if created_at else 'unknown'}\n"
         f"Paid: {_paid_label('paid', paid_at)}\n"
         + (f"Credentials sent: {delivered_at[:19]}\n" if delivered_at else "")
@@ -16692,11 +16767,14 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     # Anything that isn't a no-details item (code delivery, manual-access
     # grant, or a book link) actually has credentials a customer could be
     # asked to resend.
-    if item_id not in UPTODATE_AI_TRIGGER_ITEMS and item_id not in MANUAL_ACCESS_ITEMS and not item_id.startswith("book_"):
+    by_admin = user_id == ADMIN_ORDER_USER_ID   # 🧾 no customer to ask or message
+    if item_id not in UPTODATE_AI_TRIGGER_ITEMS and item_id not in MANUAL_ACCESS_ITEMS and not item_id.startswith("book_") \
+            and not by_admin:
         buttons.append(
             [InlineKeyboardButton("🔁 Ask for details again", callback_data=f"askresend:{fulfilment_id}")]
         )
-    buttons.append([InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{order_id}")])
+    if not by_admin:
+        buttons.append([InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{order_id}")])
     dm_btn = _dm_button(username)
     if dm_btn:
         buttons.append([dm_btn])
@@ -16887,6 +16965,8 @@ def _reask_problem(row, paid: bool = True):
         return "This item has no account details to ask for."
     if row[5] == "delivered":
         return "This item was already delivered."
+    if paid and row[2] == ADMIN_ORDER_USER_ID:
+        return "Order by admin: there's no customer to ask. Use ✏️ Edit details."
     order = db_get_order(row[1])
     if not order:
         return f"Order #{row[1]} no longer exists."
@@ -17589,7 +17669,7 @@ async def imd_manual_deliver(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"✅ Order #{order_id} was already delivered{_delivered_when(order_id, item_id)}. Nothing was sent again.",
                 reply_markup=back)
             return
-        await context.bot.send_message(chat_id=user_id, text=message)
+        await _send_to_customer(context.bot, user_id, order_id, message)
         db_set_fulfilment_state(fulfilment_id, "delivered")
         await send_delivery_promo(context, user_id)
         db_save_delivery(order_id, message)
@@ -17600,7 +17680,8 @@ async def imd_manual_deliver(update: Update, context: ContextTypes.DEFAULT_TYPE)
     _end_customer_steps_for_unit(context, user_id, fulfilment_id)
 
     await query.edit_message_text(
-        f"✅ iMD details sent to the customer (Order #{order_id}).", reply_markup=back
+        (f"✅ iMD details sent to you to forward (🧾 admin order #{order_id})." if user_id == ADMIN_ORDER_USER_ID
+         else f"✅ iMD details sent to the customer (Order #{order_id})."), reply_markup=back
     )
 
     # Continue with any remaining items in the same order.
@@ -17832,7 +17913,7 @@ async def _finish_imd_manual_delivery(context: ContextTypes.DEFAULT_TYPE, order_
     # Delivering a delivered unit again is on purpose here (🔁 renew/register again); the lock only keeps it
     # from running alongside another delivery of the same unit.
     async with unit_lock(fulfilment_id):
-        await context.bot.send_message(chat_id=user_id, text=message)
+        await _send_to_customer(context.bot, user_id, order_id, message)
         db_set_fulfilment_state(fulfilment_id, "delivered")
         await send_delivery_promo(context, user_id)
         db_save_delivery(order_id, message)
@@ -17844,7 +17925,8 @@ async def _finish_imd_manual_delivery(context: ContextTypes.DEFAULT_TYPE, order_
 
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
-        text=f"✅ {name} delivered to the customer (Order #{order_id}).",
+        text=(f"✅ {name} sent to you to forward (🧾 admin order #{order_id})." if user_id == ADMIN_ORDER_USER_ID
+              else f"✅ {name} delivered to the customer (Order #{order_id})."),
     )
 
     # Continue with any remaining items in the same order.
@@ -17865,7 +17947,8 @@ async def admin_pending_back(update: Update, context: ContextTypes.DEFAULT_TYPE)
         name = MENU.get(item_id, (item_id,))[0]
         suffix = f" #{unit_no}" if unit_no > 1 else ""
         flag = "📝" if state == "awaiting_delivery" else "⌛"
-        who = f"@{username}" if username else str(user_id)
+        who = (_admin_order_who(order_id) if user_id == ADMIN_ORDER_USER_ID
+               else f"@{username}" if username else str(user_id))
         label = f"{flag} {name}{suffix} — {who} (#{order_id}) — {_short_submitted(created_at)}"
         buttons.append([InlineKeyboardButton(label[:64], callback_data=f"apend:{fid}")])
 
@@ -18578,12 +18661,13 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
             # different system, so just a clean "paid, grant access" notice.
             db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
             if ADMIN_CHAT_ID:
-                who = f"@{order_row[2]}" if order_row and order_row[2] else str(user_id)
+                who = (_admin_order_who(order_id) if user_id == ADMIN_ORDER_USER_ID
+                       else (f"@{order_row[2]}" if order_row and order_row[2] else str(user_id)) + f" (ID: {user_id})")
                 await context.bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
                     text=(
                         f"🤖 {item_name} paid — Order #{order_id}\n"
-                        f"Customer: {who} (ID: {user_id})\n\n"
+                        f"Customer: {who}\n\n"
                         "Grant them access, then use the 📤 Send Credentials button to "
                         "send a confirmation message."
                     ),
@@ -18615,7 +18699,8 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
                     chat_id=ADMIN_CHAT_ID,
                     text=(
                         f"📝 Ready to deliver ({tag}) — Order #{order_id}\n"
-                        f"Product: {item_name}\n\n{cred_lines}\n\n"
+                        + (f"Customer: {_admin_order_who(order_id)}\n" if user_id == ADMIN_ORDER_USER_ID else "")
+                        + f"Product: {item_name}\n\n{cred_lines}\n\n"
                         "Deliver using the 📤 Send Credentials button."
                     ),
                     reply_markup=InlineKeyboardMarkup(
@@ -18629,6 +18714,19 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
         await process_next_in_queue(context, user_id, order_id)
         return
 
+    if user_id == ADMIN_ORDER_USER_ID and item_id not in UPTODATE_AI_TRIGGER_ITEMS and not item_id.startswith("book_"):
+        # an order by the admin has no customer to ask: it waits for the admin (📤 Deliver / ✏️ Edit details)
+        db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(f"📝 {item_name} — Order #{order_id} ({_admin_order_who(order_id)}) has no account details on "
+                      "file and no customer to ask. Deliver it with 📤 Deliver."),
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("📤 Deliver", callback_data=f"deliver:{fulfilment_id}")]]),
+            )
+        await process_next_in_queue(context, user_id, order_id)
+        return
     if item_id in IMD_TRIGGER_ITEMS:
         await start_imd_collection(context, order_id, user_id, item_id, fulfilment_id)
     elif item_id in UPTODATE_AI_TRIGGER_ITEMS:
@@ -18849,7 +18947,8 @@ async def send_uptodate_ai_bundle_code(context: ContextTypes.DEFAULT_TYPE, order
                     text=(
                         f"⚠️ Order #{order_id} — {product} sold but the codes pool is empty ({SERIAL_POOL_LABELS.get(pool, pool)}), "
                         "so the Telegram code wasn't sent. Add codes (➕ Add Serials → "
-                        f"{SERIAL_POOL_LABELS.get(pool, pool)}) and send the customer (ID {user_id}) one with: Click "
+                        f"{SERIAL_POOL_LABELS.get(pool, pool)}) and send the customer "
+                        f"({_admin_order_who(order_id) if user_id == ADMIN_ORDER_USER_ID else f'ID {user_id}'}) one with: Click "
                         "@Up2down_bot, type /Redeem <code>."
                     ),
                 )
@@ -18867,7 +18966,7 @@ async def send_uptodate_ai_bundle_code(context: ContextTypes.DEFAULT_TYPE, order
     )
     db_add_delivery(order_id, user_id, item_id, message)
     try:
-        await context.bot.send_message(chat_id=user_id, text=message)
+        await _send_to_customer(context.bot, user_id, order_id, message)
     except Exception:
         logger.exception("Failed to send the Uptodate Telegram chat code to user %s", user_id)
     if ADMIN_CHAT_ID:
@@ -18925,7 +19024,7 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
     db_add_delivery(order_id, user_id, item_id, message)
 
     try:
-        await context.bot.send_message(chat_id=user_id, text=message)
+        await _send_to_customer(context.bot, user_id, order_id, message)
     except Exception:
         logger.exception("Failed to deliver Uptodate AI code to user %s", user_id)
     else:
@@ -19276,6 +19375,23 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
         _IMD_RUNS_IN_PROGRESS.discard(order_id)
 
 
+async def _imd_admin_order_problem(context, order_id: int, data: dict, admin_note: str):
+    """iMD refused the username or email of an order by the admin: there's no customer to ask for another, so the unit
+    waits for delivery and the admin finishes it by hand (📤 Deliver → 🤖 Register / Renew on iMD with other details)."""
+    fid = data.get("fulfilment_id")
+    if fid:
+        db_set_fulfilment_state(fid, "awaiting_delivery")
+    buttons = [[InlineKeyboardButton("📤 Deliver (🤖 Register / Renew on iMD)", callback_data=f"deliver:{fid}")]] if fid else []
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=(admin_note.replace("The customer has been asked to choose another. ", "")
+              .replace("The customer has been asked to send their correct username. ", "")
+              + f"\n\n🧾 Order by admin ({_admin_order_who(order_id)}): there's no customer to ask. Tap 📤 Deliver → "
+                "🤖 Register / Renew on iMD with other details, then forward what you get."),
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+    )
+
+
 async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int):
     """Pulls a serial from the pool matching this order's duration and
     performs the registration or renewal, then handles the outcome.
@@ -19463,8 +19579,9 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
             chat_id=ADMIN_CHAT_ID,
             text=f"✅ {action_label} confirmed for order #{order_id}. Serial used: {serial_code}\n\n{detail}",
         )
-        if customer_user_id:
-            await context.bot.send_message(chat_id=customer_user_id, text=delivery_message)
+        if customer_user_id is not None:
+            # an order by the admin: the delivery goes to the admin's chat, to forward
+            await _send_to_customer(context.bot, customer_user_id, order_id, delivery_message)
             await send_delivery_promo(context, customer_user_id)
             await post_subscription_to_channel(context, order_id, data.get("item_id"), delivery_message)
             if data.get("fulfilment_id"):
@@ -19553,6 +19670,9 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
             )
             retry_field = "username"
 
+        if order and customer_user_id == ADMIN_ORDER_USER_ID:
+            await _imd_admin_order_problem(context, order_id, data, admin_note)
+            return
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_note)
         if customer_user_id:
             customer_data = context.application.user_data[customer_user_id]
@@ -19572,6 +19692,12 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
 
     # ---- Email problem: ask the customer for a different address.
     if status == "email_error":
+        if order and customer_user_id == ADMIN_ORDER_USER_ID:
+            await _imd_admin_order_problem(context, order_id, data, (
+                f"🟠 EMAIL PROBLEM — Order #{order_id} ({action_label})\n\n"
+                f"iMD didn't accept the email '{data.get('email')}'. "
+                f"Serial {serial_code} returned to the pool.\n\n{detail}"))
+            return
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
             text=(
@@ -20032,15 +20158,17 @@ async def _deliver_credentials(context, fulfilment_id: int, credentials_text: st
         if only_if_undelivered and state == "delivered":
             raise UnitAlreadyDelivered(fulfilment_id)
 
-        sent_message = await context.bot.send_message(
-            chat_id=user_id,
-            text=f"🔑 Here are your account details for {name} (Order #{order_id}):\n\n{credentials_text}",
+        # an order by the admin: to the admin's chat, to forward (its message id isn't the customer's)
+        sent_message = await _send_to_customer(
+            context.bot, user_id, order_id,
+            f"🔑 Here are your account details for {name} (Order #{order_id}):\n\n{credentials_text}",
         )
         # Marked first, so a second delivery waiting on the lock sees it at once.
         db_set_fulfilment_state(fulfilment_id, "delivered")
         await send_delivery_promo(context, user_id)
         db_save_delivery(order_id, credentials_text)
-        delivery_id = db_add_delivery(order_id, user_id, item_id, credentials_text, sent_message.message_id, access=access,
+        delivery_id = db_add_delivery(order_id, user_id, item_id, credentials_text,
+                                      None if user_id == ADMIN_ORDER_USER_ID else sent_message.message_id, access=access,
                                       sheet_row=sheet_row, sheet_below=sheet_below)
         await post_subscription_to_channel(context, order_id, item_id, credentials_text)
         if item_id in IMD_TRIGGER_ITEMS:
@@ -21569,7 +21697,10 @@ def _utd_order_payload(row, info: dict) -> dict:
         info["email"] = _utd_unique_alias(utd_alias_email(real, info.get("username") or "", order_id), fid, order_id)
     return {"fulfilment_id": fid, "order_id": order_id, "user_id": user_id, "item_id": item_id,
             "item_name": MENU.get(item_id, (item_id,))[0], "kind": kind, "info": info,
-            "username": db_get_username(user_id) or ""}
+            "username": db_get_username(user_id) or "",
+            # 🧾 an order by the admin (user 0): @Utdreg_bot shows this instead of a @username (23 Nov 2026)
+            **({"customer_label": "🧾 admin order" + (f" · {_admin_order_info(order_id)[0]}" if _admin_order_info(order_id)[0] else "")}
+               if user_id == ADMIN_ORDER_USER_ID else {})}
 
 
 def _utd_units_to_push() -> list:
@@ -21810,7 +21941,9 @@ async def http_deliver_unit(request):
                                  status=409)
     # a new account and a renewal both go out as the ready-made form, filled in; a coworker's order just the login
     # and the app-only remark (owner, 20 Nov 2026)
-    text = (coworker_credentials_text(row[3], username, password) if _order_coworker_id(order_id)
+    # 🧾 an order by the admin registered for a coworker (column I) gets the coworker form too
+    text = (coworker_credentials_text(row[3], username, password)
+            if _order_coworker_id(order_id) or (_admin_order_info(order_id)[1] or "Me") != "Me"
             else uptodate_delivery_form(row[3], username, password))
     try:
         result = await _deliver_credentials(_HttpContext(request.app["application"], ADMIN_CHAT_ID), fid, text,
@@ -21920,7 +22053,8 @@ async def automation_run_callback(update: Update, context: ContextTypes.DEFAULT_
         info = {}
     payload = _utd_order_payload(row, info) if row[3] in UPTODATE_PLAN_ITEMS else {
         "fulfilment_id": fid, "order_id": row[1], "user_id": row[2], "item_id": row[3],
-        "item_name": MENU.get(row[3], (row[3],))[0], "info": info}
+        "item_name": MENU.get(row[3], (row[3],))[0], "info": info,
+        **({"customer_label": _admin_order_who(row[1])} if row[2] == ADMIN_ORDER_USER_ID else {})}
     status, body = await _automation_post("/api/run_request", payload)
     if status == 200 and body.get("ok"):
         await query.message.reply_text(f"🤖 Sent order #{row[1]} to @Utdreg_bot: choose the site there.")

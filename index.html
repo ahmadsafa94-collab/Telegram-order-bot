@@ -634,7 +634,7 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
       <span class="ci-i">🏷</span><span class="ci-t"><div class="ci-n">Discount codes</div><div class="ci-s">Issue and manage codes</div></span><span class="ci-c">›</span>
     </button>
     <button class="contact-row" onclick="openAdminOrder()">
-      <span class="ci-i">🧾</span><span class="ci-t"><div class="ci-n">New order (by admin)</div><div class="ci-s">A sale made outside the bot: subscription, login, coworker</div></span><span class="ci-c">›</span>
+      <span class="ci-i">🧾</span><span class="ci-t"><div class="ci-n">New order (by admin)</div><div class="ci-s">A sale made outside the bot: subscription, account details, coworker</div></span><span class="ci-c">›</span>
     </button>
     <button class="contact-row" onclick="openAdminSerials()">
       <span class="ci-i">🔑</span><span class="ci-t"><div class="ci-n">Serials</div><div class="ci-s">Add, view and remove serial codes</div></span><span class="ci-c">›</span>
@@ -858,7 +858,7 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
   </div>
 </div>
 
-<!-- 🧾 New order (by admin): a sale made outside the bot, saved as a paid, delivered order (23 Nov 2026) -->
+<!-- 🧾 New order (by admin): a sale made outside the bot, saved as a paid order that waits for delivery (23 Nov 2026) -->
 <div class="overlay" id="aoOverlay" onclick="if(event.target===this)closeAdminOrder()">
   <div class="sheet">
     <div class="sheet-handle"></div>
@@ -2079,7 +2079,7 @@ function drawAdminPending(){
       o.units.map(i=>
         '<div class="t-card" id="ap-'+i.fid+'"><div class="t-top"><div class="t-title">'+escHtml(i.name)+(i.unit>1?' #'+i.unit:'')+'</div>'+
         '<span class="t-pill '+(i.state==='needs_info'?'open':'ok')+'">'+(i.asked_again?'⌛ Asked again':i.state==='needs_info'?'⌛ Waiting for customer':'📤 Ready')+'</span></div>'+
-        '<div style="margin-top:6px">'+viaTag(i.via)+'</div>'+
+        '<div style="margin-top:6px">'+(i.admin?adminTag(i.admin):viaTag(i.via))+'</div>'+
         fieldsHtml(i)+
         '<div style="display:flex;gap:8px;margin-top:10px">'+
           (i.imd?'':'<button class="btn" style="margin:0;padding:10px;width:auto;flex:1.4" onclick="openDeliver('+i.fid+')">📤 Deliver</button>')+
@@ -2109,12 +2109,14 @@ function openDeliver(fid){
   const i=adminPending.find(x=>x.fid===fid); if(!i) return;
   deliverFid=fid; editDelivery=null;
   document.getElementById('delTitle').textContent=i.name+' · Order #'+i.order_id;
-  document.getElementById('delInfo').innerHTML=escHtml(i.customer)+'<div style="margin:5px 0">'+viaTag(i.via)+'</div>'+(i.state==='needs_info'?'<br>The customer has not sent their details yet.':'')+((i.fields&&i.fields.length)||i.info?fieldsHtml(i):'')+prevHtml(i);
+  document.getElementById('delInfo').innerHTML=escHtml(i.customer)+'<div style="margin:5px 0">'+(i.admin?adminTag(i.admin):viaTag(i.via))+'</div>'+(i.state==='needs_info'?'<br>The customer has not sent their details yet.':'')+((i.fields&&i.fields.length)||i.info?fieldsHtml(i):'')+prevHtml(i);
   document.getElementById('delLabel').textContent='Account details to send to the customer — fill in what is missing';
   document.getElementById('delNotifyRow').style.display='none';
   document.getElementById('delAccessBox').style.display=''; document.getElementById('delAccess').value='';
-  document.getElementById('delSend').textContent='📤 Send to customer';
-  const box=document.getElementById('delText'); box.value=deliveryTemplate(i); document.getElementById('delMsg').textContent='';
+  // 🧾 an order by the admin: it comes to your chat to forward; registered for a coworker → the coworker's form
+  document.getElementById('delSend').textContent=i.admin?'📤 Send to my chat (to forward)':'📤 Send to customer';
+  const tplOf=i.admin&&i.admin.coworker&&i.admin.coworker!=='Me'?Object.assign({},i,{via:{name:i.admin.coworker}}):i;
+  const box=document.getElementById('delText'); box.value=deliveryTemplate(tplOf); document.getElementById('delMsg').textContent='';
   document.getElementById('delOverlay').classList.add('on');
   setTimeout(()=>{ box.focus(); const k=box.value.indexOf('Username:'); const p=k>=0?k+'Username:'.length:box.value.length; try{ box.setSelectionRange(p,p); }catch(e){} box.scrollTop=0; },150);
 }
@@ -2339,9 +2341,11 @@ async function sendDeliverNow(fid,text,msg,btn,access){
   finally{ btn.disabled=false; }
 }
 
-// ── 🧾 New order (by admin), 23 Nov 2026: a sale made outside the bot (no Telegram customer). Saved as a paid,
-// delivered order counted in the sales; the coworker goes in column I of the delivered sheet. Nobody is messaged.
-let aoForm=null, aoTpl='';
+// ── 🧾 New order (by admin), 23 Nov 2026: a sale made outside the bot (no Telegram customer). Takes the product's
+// account details exactly like the cart (same fields, same checks), is saved as a PAID order waiting for delivery and
+// follows the normal path (UpToDate → @Utdreg_bot, iMD → its automation, others → Pending → 📤). What the customer
+// would get comes to the admin's chat to forward. The coworker goes in column I of the delivered sheet.
+let aoForm=null;
 function closeAdminOrder(){ document.getElementById('aoOverlay').classList.remove('on'); }
 async function openAdminOrder(){
   const box=document.getElementById('aoContent');
@@ -2350,23 +2354,21 @@ async function openAdminOrder(){
   try{ aoForm=await adminPost('/api/admin_create_order',{action:'form'}); }
   catch(e){ box.innerHTML='<div class="search-empty"></div><button class="btn sec" onclick="closeAdminOrder()">Close</button>'; box.firstChild.textContent=e.message; return; }
   const lbl=t=>'<div style="font-size:12px;color:var(--hint);margin:6px 0 3px">'+t+'</div>';
-  box.innerHTML='<div class="t-meta" style="margin:6px 0 8px">Saved as a paid, delivered order marked 🧾 by admin and counted in the sales. Nobody gets a message.</div>'
+  box.innerHTML='<div class="t-meta" style="margin:6px 0 8px">Saved as paid; waits in Pending like any order. What the customer would get comes to your chat to forward.</div>'
     +lbl('Subscription')
     +'<input id="aoSearch" class="cw-input" type="text" autocomplete="off" placeholder="🔎 Search subscriptions" aria-label="Search subscriptions" style="margin-bottom:6px">'
     +'<select id="aoItem" class="cw-input" aria-label="Subscription" style="margin-bottom:4px"></select>'
+    +lbl('Account details')
+    +'<div id="aoDetails"></div>'
     +lbl('Price (USD)')
     +'<input id="aoPrice" class="cw-input" type="number" inputmode="decimal" min="0" step="0.01" aria-label="Price">'
     +lbl('Registered for (column I of your delivered sheet)')
     +'<select id="aoCw" class="cw-input" aria-label="Coworker"></select>'
     +'<input id="aoCwName" class="cw-input" type="text" maxlength="60" autocomplete="off" placeholder="Type the name" aria-label="Other name" style="display:none;margin-top:6px">'
-    +lbl('Date')
-    +'<input id="aoDate" class="cw-input" type="date" aria-label="Date">'
+    +lbl('Sale date (counts in the sales on this day)')
+    +'<input id="aoDate" class="cw-input" type="date" aria-label="Sale date">'
     +lbl('Customer name / note (optional, only in your lists)')
     +'<input id="aoLabel" class="cw-input" type="text" maxlength="100" autocomplete="off" placeholder="e.g. Ahmad (WhatsApp)" aria-label="Customer name or note">'
-    +lbl('Access (column H of your delivered sheet)')
-    +'<input id="aoAccess" class="cw-input" type="text" maxlength="100" autocomplete="off" placeholder="e.g. Mexico udg, Istanbul, Zimb" aria-label="Access">'
-    +lbl('Account details (username and password)')
-    +'<textarea id="aoText" class="cw-input" rows="12" maxlength="3500" aria-label="Account details" style="font-size:13.5px;line-height:1.45"></textarea>'
     +'<div id="aoMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>'
     +'<button class="btn" id="aoSave" onclick="saveAdminOrder()">🧾 Save order</button>'
     +'<button class="btn sec" style="margin-top:8px" onclick="closeAdminOrder()">Cancel</button>';
@@ -2377,11 +2379,10 @@ async function openAdminOrder(){
   opt(cw,'-1','✏️ Other name…');   // a name typed by the admin, for the sheet only (owner, 23 Nov 2026)
   const cwName=document.getElementById('aoCwName');
   const d=document.getElementById('aoDate'); d.max=aoForm.today; if(aoForm.earliest) d.min=aoForm.earliest; d.value=aoForm.today;
-  aoTpl=''; drawAdminOrderItems('');
+  drawAdminOrderItems('');
   document.getElementById('aoSearch').oninput=e=>drawAdminOrderItems(e.target.value);
   document.getElementById('aoItem').onchange=()=>aoItemChanged(true);
-  cw.onchange=()=>{ cwName.style.display=cw.value==='-1'?'':'none'; if(cw.value==='-1') cwName.focus(); aoItemChanged(false); };
-  cwName.oninput=()=>aoItemChanged(false); d.onchange=()=>aoItemChanged(false);
+  cw.onchange=()=>{ cwName.style.display=cw.value==='-1'?'':'none'; if(cw.value==='-1') cwName.focus(); };
   aoItemChanged(true);
 }
 function drawAdminOrderItems(q){
@@ -2390,48 +2391,45 @@ function drawAdminOrderItems(q){
   const list=(aoForm.products||[]).filter(p=>!q||p.name.toLowerCase().includes(q)||p.id.toLowerCase()===q);
   if(!list.length){ const o=document.createElement('option'); o.value=''; o.textContent='No subscription matches'; sel.appendChild(o); }
   list.forEach(p=>{ const o=document.createElement('option'); o.value=p.id; o.textContent=p.name+' · $'+p.price; sel.appendChild(o); });
-  if(list.some(p=>p.id===keep)) sel.value=keep; else if(list.length) aoItemChanged(true);
+  if(list.some(p=>p.id===keep)) sel.value=keep; else aoItemChanged(true);
 }
 function aoItemChanged(newPrice){
   const p=(aoForm.products||[]).find(x=>x.id===document.getElementById('aoItem').value);
+  const box=document.getElementById('aoDetails'); if(!box) return;
+  box.innerHTML='';
   if(!p) return;
   if(newPrice) document.getElementById('aoPrice').value=p.price;
-  const cwSel=document.getElementById('aoCw'), cwId=+cwSel.value;
-  const cwName=cwId===-1?(document.getElementById('aoCwName').value.trim()||'other'):cwSel.options[cwSel.selectedIndex].textContent;
-  const tpl=deliveryTemplate({name:p.name,title:p.title,duration:p.duration,template:p.template,
-    via:cwId?{name:cwName}:null,day:document.getElementById('aoDate').value});
-  const box=document.getElementById('aoText');
-  if(!box.value.trim()||box.value===aoTpl) box.value=tpl;   // the admin's own typing is kept
-  aoTpl=tpl;
+  // the cart's own detail block (same fields, New / Renewal toggle), without its × remove button
+  const block=p.details?makeDetailBlock(p.id,escHtml(p.name),p.price,'ao'):makeNoDetailsBlock(p.id,escHtml(p.name),p.price,'ao');
+  const rm=block.querySelector('.rm'); if(rm) rm.style.display='none';
+  if(p.addon){ const n=document.createElement('div'); n.style.cssText='font-size:12px;color:#dc2626;padding:0 2px 8px'; n.textContent='An Uptodate AI add-on comes with an Uptodate plan: it can\'t be ordered alone.'; block.appendChild(n); }
+  box.appendChild(block);
 }
 async function saveAdminOrder(){
   const msg=document.getElementById('aoMsg'), btn=document.getElementById('aoSave');
   const bad=t=>{ msg.style.color='#dc2626'; msg.textContent=t; };
   const item=document.getElementById('aoItem').value, priceTxt=document.getElementById('aoPrice').value.trim();
-  const text=document.getElementById('aoText').value.trim(), access=document.getElementById('aoAccess').value.trim();
   const day=document.getElementById('aoDate').value;
   if(!item) return bad('Pick the subscription.');
+  const box=document.getElementById('aoDetails');
+  if(!validateDetails(box)) return bad('Fix the highlighted account details.');
   const price=Number(priceTxt);
   if(priceTxt===''||!isFinite(price)||price<0) return bad('Type the price in USD (0 or more).');
   if(!day) return bad('Pick the date.');
   if(day>aoForm.today) return bad("The date can't be after today.");
   if(aoForm.earliest&&day<aoForm.earliest) return bad('The date can be at most 365 days back.');
-  if(!access){ document.getElementById('aoAccess').focus(); return bad('Fill in Access first (it goes in column H of your delivered sheet).'); }
-  if(!text) return bad('Type the account details (username and password).');
   const cwId=+document.getElementById('aoCw').value, cwOther=document.getElementById('aoCwName').value.trim();
   if(cwId===-1&&!cwOther){ document.getElementById('aoCwName').focus(); return bad('Type the name it was registered for.'); }
-  const go=async()=>{
-    btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Saving…';
-    try{
-      const d=await adminPost('/api/admin_create_order',{item_id:item,price:price,text:text,access:access,
-        coworker_id:cwId,coworker_name:cwId===-1?cwOther:'',label:document.getElementById('aoLabel').value.trim(),date:day});
-      closeAdminOrder(); showToast('🧾 Saved · '+d.name+' · Order #'+d.order_id);
-      if(ADMIN_EDIT&&document.getElementById('pSubs').classList.contains('on')) loadAdminDelivered(true);
-    }catch(e){ bad(e.message); }
-    finally{ btn.disabled=false; }
-  };
-  if(/^Username:[ \t]*$/m.test(text)&&/^Password:[ \t]*$/m.test(text)) return askConfirm('Username and Password are both still empty. Save anyway?',go);
-  go();
+  const details=collectDetails(box)[0]||{};
+  btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Saving…';
+  try{
+    const d=await adminPost('/api/admin_create_order',{item_id:item,price:price,details:details,
+      coworker_id:cwId,coworker_name:cwId===-1?cwOther:'',label:document.getElementById('aoLabel').value.trim(),date:day});
+    closeAdminOrder(); showToast('🧾 Saved · '+d.name+' · Order #'+d.order_id+(d.state==='delivered'?' · delivered to your chat':' · in Pending'));
+    if(ADMIN_EDIT&&document.getElementById('pSubs').classList.contains('on')) loadAdminDelivered(true);
+    if(ADMIN_EDIT&&document.getElementById('pPending').classList.contains('on')) renderAdminPending();
+  }catch(e){ bad(e.message); }
+  finally{ btn.disabled=false; }
 }
 
 // ── Support tab: tickets, announcements, credits and the free-accounts link ──
@@ -3928,7 +3926,7 @@ function makeDetailBlock(id,name,price,idx){
   const lbl=idx>0?` #${idx+1}`:'';
   const isImd=IMD.has(id);
   const firstFlds=isImd?imdNewFlds(id,idx):newFlds(id,idx);
-  const body=`<div class="toggle"><button class="tbtn active" onclick="setType(this,'new','${id}',${idx})">🆕 New</button><button class="tbtn" onclick="setType(this,'renew','${id}',${idx})">🔄 Renewal</button></div><div id="ff-${id}-${idx}">${firstFlds}</div>`;
+  const body=`<div class="toggle"><button class="tbtn active" onclick="setType(this,'new','${id}','${idx}')">🆕 New</button><button class="tbtn" onclick="setType(this,'renew','${id}','${idx}')">🔄 Renewal</button></div><div id="ff-${id}-${idx}">${firstFlds}</div>`;
   w.innerHTML=`<div class="dheader"><div class="ri"><div class="rn">${name}${lbl}</div></div><div class="ptag">$${price}</div>`+
     `<button class="rm" title="Remove" onclick="removeDetailItem('${id}')">×</button></div>${body}`;
   return w;
@@ -3949,9 +3947,10 @@ function setType(btn,type,id,idx){
 }
 
 // ── Validation ────────────────────────────────────────────────────────
-function validateDetails(){
+// root: only the blocks inside it (the admin's 🧾 New order form has its own; the cart's stay out of it)
+function validateDetails(root){
   let ok=true;
-  document.querySelectorAll('.dblock').forEach(block=>{
+  (root||document).querySelectorAll('.dblock').forEach(block=>{
     const id=block.dataset.id, idx=parseInt(block.dataset.idx||0);
     const isImd=IMD.has(id);
     const type=block.dataset.type||'new';
@@ -4285,7 +4284,7 @@ const OTHER_COUNTRIES=[
 ];
 
 // ── Submit order ──────────────────────────────────────────────────────
-function collectDetails(){
+function collectDetails(root){
   const out=[];
   // Which Uptodate account (plan item, its unit 1..n) each AI add-on was set up with, so the bot gives the add-on
   // that account's details (16 Nov 2026).
@@ -4294,7 +4293,7 @@ function collectDetails(){
     unitOf[s.plan]=(unitOf[s.plan]||0)+1;
     if(s.ai) (withPlan[s.ai]=withPlan[s.ai]||[]).push([s.plan, unitOf[s.plan]]);
   });
-  document.querySelectorAll('.dblock').forEach(block=>{
+  (root||document).querySelectorAll('.dblock').forEach(block=>{
     const id=block.dataset.id, idx=parseInt(block.dataset.idx||0);
     const type=block.dataset.type||'new';
     const entry={id,account_type:type};
