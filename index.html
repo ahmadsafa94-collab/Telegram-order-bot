@@ -385,6 +385,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .via.cw{background:rgba(var(--acc-rgb),.2);color:var(--teal2)}
 .via.owed{background:rgba(245,158,11,.16);color:#fbbf24}
 .via.ok{background:rgba(34,197,94,.15);color:#4ade80}
+.via.adm{background:rgba(139,92,246,.18);color:#a78bfa}
 .fld-list{margin-top:8px;display:flex;flex-direction:column;gap:5px}
 .fld{display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:8px 10px;border-radius:9px;border:1px solid rgba(var(--fg-rgb),.1);background:rgba(var(--fg-rgb),.03);color:var(--text);font-size:12.5px;cursor:pointer}
 .fld:active{background:rgba(var(--acc-rgb),.18)}
@@ -632,6 +633,9 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
     <button class="contact-row" onclick="openAdminDiscounts()">
       <span class="ci-i">🏷</span><span class="ci-t"><div class="ci-n">Discount codes</div><div class="ci-s">Issue and manage codes</div></span><span class="ci-c">›</span>
     </button>
+    <button class="contact-row" onclick="openAdminOrder()">
+      <span class="ci-i">🧾</span><span class="ci-t"><div class="ci-n">New order (by admin)</div><div class="ci-s">A sale made outside the bot: subscription, login, coworker</div></span><span class="ci-c">›</span>
+    </button>
     <button class="contact-row" onclick="openAdminSerials()">
       <span class="ci-i">🔑</span><span class="ci-t"><div class="ci-n">Serials</div><div class="ci-s">Add, view and remove serial codes</div></span><span class="ci-c">›</span>
     </button>
@@ -851,6 +855,15 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
       <button class="btn" id="delSend" onclick="sendDeliver()">📤 Send to customer</button>
       <button class="btn sec" style="margin-top:8px" onclick="closeDeliver()">Cancel</button>
     </div>
+  </div>
+</div>
+
+<!-- 🧾 New order (by admin): a sale made outside the bot, saved as a paid, delivered order (23 Nov 2026) -->
+<div class="overlay" id="aoOverlay" onclick="if(event.target===this)closeAdminOrder()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">🧾 New order (by admin)</div>
+    <div id="aoContent" style="padding:0 15px 15px"></div>
   </div>
 </div>
 
@@ -1990,11 +2003,12 @@ async function loadAdminDelivered(reset){
     const data=await apiGet('/api/admin_delivered?q='+encodeURIComponent(q)+'&offset='+adminDel.offset);
     if(seq!==adminDelSeq) return;
     adminDel.items=adminDel.items.concat(data.items||[]); adminDel.total=data.total||0; adminDel.offset=adminDel.items.length;
-    if(!adminDel.items.length){ el.innerHTML='<div class="search-empty">'+(q?'No delivered subscription matches your search.':'Nothing has been delivered yet.')+'</div>'; return; }
-    el.innerHTML='<div class="t-meta" style="margin:0 0 8px">'+adminDel.total+' delivered'+(q?' match your search':'')+'</div>'+
+    const newBtn='<button class="tk-btn" style="margin:0 0 10px" onclick="openAdminOrder()">🧾 New order (by admin)</button>';
+    if(!adminDel.items.length){ el.innerHTML=newBtn+'<div class="search-empty">'+(q?'No delivered subscription matches your search.':'Nothing has been delivered yet.')+'</div>'; return; }
+    el.innerHTML=newBtn+'<div class="t-meta" style="margin:0 0 8px">'+adminDel.total+' delivered'+(q?' match your search':'')+'</div>'+
       adminDel.items.map((i,n)=>
         '<div class="t-card" id="ad-'+n+'"><div class="t-top" style="cursor:pointer" onclick="toggleAdminCard('+n+')">'+
-        '<div class="t-title">'+escHtml(i.name)+' <span style="color:var(--hint);font-weight:400">#'+i.order_id+'</span><div class="t-meta">'+cardMeta(i)+'</div><div style="margin-top:5px">'+viaTag(i.via)+'</div></div>'+
+        '<div class="t-title">'+escHtml(i.name)+' <span style="color:var(--hint);font-weight:400">#'+i.order_id+'</span><div class="t-meta">'+cardMeta(i)+'</div><div style="margin-top:5px">'+(i.admin?adminTag(i.admin):viaTag(i.via))+'</div></div>'+
         '<span class="t-pill ok">✅</span></div>'+
         '<div class="ad-body" style="display:none"><div class="t-body">'+(i.text?escHtml(i.text):'<span style="color:var(--hint)">No text on file for this delivery.</span>')+'</div>'+
         '<div style="display:flex;gap:8px;margin-top:10px">'+
@@ -2145,7 +2159,7 @@ function openEditDelivery(n){
   document.getElementById('delInfo').textContent=i.customer;
   document.getElementById('delLabel').textContent='Account details the customer received';
   document.getElementById('delAccessBox').style.display='none';
-  document.getElementById('delNotifyRow').style.display='flex'; document.getElementById('delNotify').checked=true;
+  document.getElementById('delNotifyRow').style.display=i.admin?'none':'flex'; document.getElementById('delNotify').checked=!i.admin;
   document.getElementById('delSend').textContent='💾 Save changes';
   document.getElementById('delText').value=i.text||''; document.getElementById('delMsg').textContent='';
   document.getElementById('delOverlay').classList.add('on');
@@ -2158,6 +2172,7 @@ function copyText(text,okMsg){
   const fallback=()=>{ try{ const t=document.createElement('textarea'); t.value=text; t.style.position='fixed'; t.style.opacity='0'; document.body.appendChild(t); t.select(); const ok=document.execCommand('copy'); t.remove(); showToast(ok?okMsg:'Select the text and copy it'); }catch(e){ showToast('Select the text and copy it'); } };
   try{ navigator.clipboard.writeText(text).then(()=>showToast(okMsg)).catch(fallback); }catch(e){ fallback(); }
 }
+function adminTag(a){ return '<span class="via adm">🧾 by admin</span>'+(a.coworker&&a.coworker!=='Me'?'<span class="via cw">🤝 for '+escHtml(a.coworker)+'</span>':''); }
 function viaTag(v){
   if(!v) return '<span class="via direct">👤 Direct</span>';
   return '<span class="via cw">🤝 via '+escHtml(v.name)+'</span>'+(v.pay?'<span class="via '+(v.pay==='paid'?'ok':'owed')+'">📒 '+(v.pay==='paid'?'paid':'unpaid')+'</span>':'');
@@ -2185,7 +2200,7 @@ function deliveryTemplate(i){
     if(utd) l.push('',TPL_CW_UTD);
     return l.join('\n');
   }
-  const date=new Date().toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
+  const date=(i.day?new Date(i.day+'T12:00:00'):new Date()).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
   const dur=i.duration||'1 Year', durl=dur.toLowerCase(), title=i.title||i.name;
   const guar='♦️Your subscription is guaranteed the whole duration of '+durl+'.';
   const remarksApp=['Remarks:','',TPL_WARN_APP,'','',TPL_UP_RENEW,'',guar,'',TPL_LOSE];
@@ -2239,6 +2254,94 @@ async function sendDeliverNow(fid,text,msg,btn,access){
     showToast('Delivered · '+data.name+' · Order #'+data.order_id);
   }catch(e){ bad('Network error — please try again.'); }
   finally{ btn.disabled=false; }
+}
+
+// ── 🧾 New order (by admin), 23 Nov 2026: a sale made outside the bot (no Telegram customer). Saved as a paid,
+// delivered order counted in the sales; the coworker goes in column I of the delivered sheet. Nobody is messaged.
+let aoForm=null, aoTpl='';
+function closeAdminOrder(){ document.getElementById('aoOverlay').classList.remove('on'); }
+async function openAdminOrder(){
+  const box=document.getElementById('aoContent');
+  document.getElementById('aoOverlay').classList.add('on');
+  box.innerHTML=loadingHtml;
+  try{ aoForm=await adminPost('/api/admin_create_order',{action:'form'}); }
+  catch(e){ box.innerHTML='<div class="search-empty"></div><button class="btn sec" onclick="closeAdminOrder()">Close</button>'; box.firstChild.textContent=e.message; return; }
+  const lbl=t=>'<div style="font-size:12px;color:var(--hint);margin:6px 0 3px">'+t+'</div>';
+  box.innerHTML='<div class="t-meta" style="margin:6px 0 8px">Saved as a paid, delivered order marked 🧾 by admin and counted in the sales. Nobody gets a message.</div>'
+    +lbl('Subscription')
+    +'<input id="aoSearch" class="cw-input" type="text" autocomplete="off" placeholder="🔎 Search subscriptions" aria-label="Search subscriptions" style="margin-bottom:6px">'
+    +'<select id="aoItem" class="cw-input" aria-label="Subscription" style="margin-bottom:4px"></select>'
+    +lbl('Price (USD)')
+    +'<input id="aoPrice" class="cw-input" type="number" inputmode="decimal" min="0" step="0.01" aria-label="Price">'
+    +lbl('Registered for (column I of your delivered sheet)')
+    +'<select id="aoCw" class="cw-input" aria-label="Coworker"></select>'
+    +lbl('Date')
+    +'<input id="aoDate" class="cw-input" type="date" aria-label="Date">'
+    +lbl('Customer name / note (optional, only in your lists)')
+    +'<input id="aoLabel" class="cw-input" type="text" maxlength="100" autocomplete="off" placeholder="e.g. Ahmad (WhatsApp)" aria-label="Customer name or note">'
+    +lbl('Access (column H of your delivered sheet)')
+    +'<input id="aoAccess" class="cw-input" type="text" maxlength="100" autocomplete="off" placeholder="e.g. Mexico udg, Istanbul, Zimb" aria-label="Access">'
+    +lbl('Account details (username and password)')
+    +'<textarea id="aoText" class="cw-input" rows="12" maxlength="3500" aria-label="Account details" style="font-size:13.5px;line-height:1.45"></textarea>'
+    +'<div id="aoMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>'
+    +'<button class="btn" id="aoSave" onclick="saveAdminOrder()">🧾 Save order</button>'
+    +'<button class="btn sec" style="margin-top:8px" onclick="closeAdminOrder()">Cancel</button>';
+  // names set through the DOM, never into the HTML
+  const cw=document.getElementById('aoCw');
+  const opt=(sel,v,t)=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; sel.appendChild(o); };
+  opt(cw,'0','Me'); (aoForm.coworkers||[]).forEach(c=>opt(cw,String(c.id),c.name));
+  const d=document.getElementById('aoDate'); d.max=aoForm.today; if(aoForm.earliest) d.min=aoForm.earliest; d.value=aoForm.today;
+  aoTpl=''; drawAdminOrderItems('');
+  document.getElementById('aoSearch').oninput=e=>drawAdminOrderItems(e.target.value);
+  document.getElementById('aoItem').onchange=()=>aoItemChanged(true);
+  cw.onchange=()=>aoItemChanged(false); d.onchange=()=>aoItemChanged(false);
+  aoItemChanged(true);
+}
+function drawAdminOrderItems(q){
+  const sel=document.getElementById('aoItem'), keep=sel.value; q=(q||'').trim().toLowerCase();
+  sel.innerHTML='';
+  const list=(aoForm.products||[]).filter(p=>!q||p.name.toLowerCase().includes(q)||p.id.toLowerCase()===q);
+  if(!list.length){ const o=document.createElement('option'); o.value=''; o.textContent='No subscription matches'; sel.appendChild(o); }
+  list.forEach(p=>{ const o=document.createElement('option'); o.value=p.id; o.textContent=p.name+' · $'+p.price; sel.appendChild(o); });
+  if(list.some(p=>p.id===keep)) sel.value=keep; else if(list.length) aoItemChanged(true);
+}
+function aoItemChanged(newPrice){
+  const p=(aoForm.products||[]).find(x=>x.id===document.getElementById('aoItem').value);
+  if(!p) return;
+  if(newPrice) document.getElementById('aoPrice').value=p.price;
+  const cwSel=document.getElementById('aoCw'), cwId=+cwSel.value;
+  const tpl=deliveryTemplate({name:p.name,title:p.title,duration:p.duration,template:p.template,
+    via:cwId?{name:cwSel.options[cwSel.selectedIndex].textContent}:null,day:document.getElementById('aoDate').value});
+  const box=document.getElementById('aoText');
+  if(!box.value.trim()||box.value===aoTpl) box.value=tpl;   // the admin's own typing is kept
+  aoTpl=tpl;
+}
+async function saveAdminOrder(){
+  const msg=document.getElementById('aoMsg'), btn=document.getElementById('aoSave');
+  const bad=t=>{ msg.style.color='#dc2626'; msg.textContent=t; };
+  const item=document.getElementById('aoItem').value, priceTxt=document.getElementById('aoPrice').value.trim();
+  const text=document.getElementById('aoText').value.trim(), access=document.getElementById('aoAccess').value.trim();
+  const day=document.getElementById('aoDate').value;
+  if(!item) return bad('Pick the subscription.');
+  const price=Number(priceTxt);
+  if(priceTxt===''||!isFinite(price)||price<0) return bad('Type the price in USD (0 or more).');
+  if(!day) return bad('Pick the date.');
+  if(day>aoForm.today) return bad("The date can't be after today.");
+  if(aoForm.earliest&&day<aoForm.earliest) return bad('The date can be at most 365 days back.');
+  if(!access){ document.getElementById('aoAccess').focus(); return bad('Fill in Access first (it goes in column H of your delivered sheet).'); }
+  if(!text) return bad('Type the account details (username and password).');
+  const go=async()=>{
+    btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Saving…';
+    try{
+      const d=await adminPost('/api/admin_create_order',{item_id:item,price:price,text:text,access:access,
+        coworker_id:+document.getElementById('aoCw').value,label:document.getElementById('aoLabel').value.trim(),date:day});
+      closeAdminOrder(); showToast('🧾 Saved · '+d.name+' · Order #'+d.order_id);
+      if(ADMIN_EDIT&&document.getElementById('pSubs').classList.contains('on')) loadAdminDelivered(true);
+    }catch(e){ bad(e.message); }
+    finally{ btn.disabled=false; }
+  };
+  if(/^Username:[ \t]*$/m.test(text)&&/^Password:[ \t]*$/m.test(text)) return askConfirm('Username and Password are both still empty. Save anyway?',go);
+  go();
 }
 
 // ── Support tab: tickets, announcements, credits and the free-accounts link ──

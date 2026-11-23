@@ -1064,6 +1064,9 @@ def db_init():
         # Postpaid coworkers order without paying: on_credit marks such an order, settled_at is when
         # the owner marked it paid (NULL = still owed).
         ("on_credit", "INTEGER DEFAULT 0"), ("settled_at", "TEXT"),
+        # 🧾 New order (by admin), 23 Nov 2026: a sale made outside the bot. source = 'admin', the admin's free-text
+        # customer name/note, and the coworker it is registered for (column I of the delivered sheet only).
+        ("source", "TEXT"), ("admin_label", "TEXT"), ("admin_coworker", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE orders ADD COLUMN {column} {coltype}")
@@ -1493,55 +1496,67 @@ def db_init():
 
 
 def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, message_id: int = None,
-                    access: str = None, sheet_row: bool = True, sheet_below: str = "") -> int:
+                    access: str = None, sheet_row: bool = True, sheet_below: str = "",
+                    delivered_at: datetime = None, coworker_name: str = None) -> int:
     """Records one delivered subscription. An order with several products
     produces several rows here, so 'My Subscriptions' can list them
     separately instead of lumping a whole order into one entry.
 
     message_id is the id of the Telegram message sent to the customer,
     stored so an admin can later edit it in place. Returns the new
-    delivery row's id."""
+    delivery row's id. delivered_at (UTC) and coworker_name (column I of the delivered sheet) are for an order the
+    admin enters for a sale made outside the bot (http_admin_create_order)."""
+    when = delivered_at or datetime.utcnow()
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute(
         "INSERT INTO deliveries (order_id, user_id, item_id, message, message_id, delivered_at, access) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (order_id, user_id, item_id, message, message_id, datetime.utcnow().isoformat(), access),
+        (order_id, user_id, item_id, message, message_id, when.isoformat(), access),
     )
     delivery_id = cur.lastrowid
     conn.commit()
     conn.close()
     if sheet_row:   # a renewal @Utdreg_bot already wrote into its existing row doesn't get a second one
-        _queue_sheet_row(order_id, user_id, item_id, message, access, below=sheet_below)
+        _queue_sheet_row(order_id, user_id, item_id, message, access, below=sheet_below,
+                         delivered_utc=delivered_at, coworker_name=coworker_name)
     return delivery_id
 
 
 def _sheet_row_for(order_id: int, user_id: int, item_id: str, message: str, access: str = None,
-                   delivered_utc: datetime = None, serials: list = None) -> tuple:
+                   delivered_utc: datetime = None, serials: list = None, coworker_name: str = None) -> tuple:
     """(tab, row) for the owner's delivered-subscriptions sheet. iMD goes on the iMD tab with the serial(s) used in H;
-    a code delivered from the serials pool also has its serial in H."""
+    a code delivered from the serials pool also has its serial in H. coworker_name (column I) beats the order's
+    coworker; an order by the admin (no Telegram customer) has its customer name/note in L and nothing in K."""
     conn = sqlite3.connect(DB_PATH)
     if serials is None:
         serials = [r[0] for r in conn.execute(
             "SELECT code FROM serials WHERE used_for_order = ? AND status = 'used' ORDER BY used_at, id", (order_id,)).fetchall()]
-    row = conn.execute("SELECT coworker_id FROM orders WHERE id = ?", (order_id,)).fetchone()
+    row = conn.execute("SELECT coworker_id, source, admin_label, admin_coworker FROM orders WHERE id = ?",
+                       (order_id,)).fetchone()
     conn.close()
+    by_admin = bool(row) and row[1] == ADMIN_ORDER_SOURCE
+    if coworker_name is None and by_admin:
+        coworker_name = row[3] or "Me"
     coworker = db_get_coworker(row[0]) if row and row[0] else None
+    coworker_col = coworker_name or (coworker[1] if coworker else "Me")
     name = MENU.get(item_id, (item_id,))[0] if item_id else ""
     imd = item_id in IMD_TRIGGER_ITEMS
     h_value = access or (", ".join(serials) if serials and (imd or item_id in UPTODATE_AI_TRIGGER_ITEMS
                                                                  or item_id == "uptodate_ai_bundle_3m") else "")
     sheet_row = dsheet.build_row(name, item_id or "", (delivered_utc or datetime.utcnow()) + timedelta(hours=REPORT_UTC_OFFSET),
-                                 message, h_value, coworker[1] if coworker else "Me", order_id, user_id,
-                                 db_get_username(user_id) or "")
+                                 message, h_value, coworker_col, order_id, "" if by_admin else user_id,
+                                 (row[2] or "") if by_admin else (db_get_username(user_id) or ""))
     return (dsheet.IMD_TAB if imd else dsheet.MAIN_TAB), sheet_row
 
 
-def _queue_sheet_row(order_id: int, user_id: int, item_id: str, message: str, access: str = None, below: str = ""):
+def _queue_sheet_row(order_id: int, user_id: int, item_id: str, message: str, access: str = None, below: str = "",
+                     delivered_utc: datetime = None, coworker_name: str = None):
     """A row for the owner's delivered-subscriptions sheet (sent to Google by sheet_outbox_job). Never lets a
     delivery fail. `below`: a username whose UpToDate row the new one goes right under (a paid renewal for another
     year, owner 20 Nov 2026); at the bottom when that username isn't in the sheet."""
     try:
-        tab, sheet_row = _sheet_row_for(order_id, user_id, item_id, message, access)
+        tab, sheet_row = _sheet_row_for(order_id, user_id, item_id, message, access, delivered_utc,
+                                        coworker_name=coworker_name)
         if below and tab == dsheet.MAIN_TAB:
             username, _, number = below.partition("|")
             dsheet.enqueue_row_below(DB_PATH, tab, sheet_row, username, number)
@@ -8327,6 +8342,7 @@ PAYMENT_METHOD_ICONS = {
     "Discount Code (Full)": "🏷️",
     "Mini App": "📱",
     "Postpaid": "📒",
+    "By admin": "🧾",
     "Unknown": "❔",
 }
 
@@ -11272,6 +11288,8 @@ async def http_all_orders(request):
             "status": ostatus, "status_meaning": ORDER_STATUS_MEANINGS.get(ostatus, ostatus),
             "created_at": created_at, "payment_method": payment_method, "payer_name": payer_name,
             "items": [{"name": MENU.get(i, (i,))[0], "quantity": q} for i, q in items.items()],
+            # 🧾 a sale the admin entered from outside the bot: user_id 0 is no Telegram customer
+            "by_admin": uid == ADMIN_ORDER_USER_ID,
         })
     return web.json_response({"orders": orders})
 
@@ -12576,7 +12594,7 @@ def db_admin_delivered(query: str = "", offset: int = 0, limit: int = ADMIN_PAGE
     `query` matches the order number, subscription, customer (name or id) or the delivered text."""
     conn = sqlite3.connect(DB_PATH)
     ful = conn.execute(
-        "SELECT f.id, f.order_id, f.item_id, f.user_id, o.username, o.created_at "
+        "SELECT f.id, f.order_id, f.item_id, f.user_id, o.username, o.created_at, o.source, o.admin_label, o.admin_coworker "
         "FROM fulfilment f JOIN orders o ON o.id = f.order_id WHERE f.state = 'delivered' ORDER BY f.id").fetchall()
     dels = conn.execute("SELECT id, order_id, item_id, message, delivered_at FROM deliveries ORDER BY id").fetchall()
     conn.close()
@@ -12584,15 +12602,18 @@ def db_admin_delivered(query: str = "", offset: int = 0, limit: int = ADMIN_PAGE
     for did, oid, iid, msg, dat in dels:
         by_key.setdefault((oid, iid), []).append((did, msg, dat))
     seen, items = {}, []
-    for fid, oid, iid, uid, uname, created in ful:      # oldest first, so the nth unit gets the nth delivery
+    for fid, oid, iid, uid, uname, created, source, alabel, acw in ful:   # oldest first: the nth unit gets the nth delivery
         n = seen.get((oid, iid), 0)
         seen[(oid, iid)] = n + 1
         lst = by_key.get((oid, iid), [])
         did, msg, dat = lst[n] if n < len(lst) else (None, "", created)
+        by_admin = source == ADMIN_ORDER_SOURCE
         items.append({
             "fid": fid, "order_id": oid, "item_id": iid, "name": MENU.get(iid, (iid,))[0],
-            "user_id": uid, "customer": f"@{uname}" if uname else str(uid),
+            "user_id": uid, "customer": (alabel or "🧾 by admin") if by_admin else (f"@{uname}" if uname else str(uid)),
             "date": (dat or created or "")[:10], "text": (msg or "")[:2000], "delivery_id": did,
+            # 🧾 an order the admin entered for a sale made outside the bot (23 Nov 2026)
+            "admin": {"label": alabel or "", "coworker": acw or "Me"} if by_admin else None,
         })
     items.reverse()
     q = (query or "").strip().lower()
@@ -12605,7 +12626,9 @@ def db_admin_delivered(query: str = "", offset: int = 0, limit: int = ADMIN_PAGE
     elif q:
         items = [i for i in items if q in str(i["order_id"]) or q in i["name"].lower() or q in i["customer"].lower()
                  or q == str(i["user_id"]) or q in i["text"].lower()
-                 or (i["via"] and q in i["via"]["name"].lower())]
+                 or (i["via"] and q in i["via"]["name"].lower())
+                 or (i["admin"] and (("by admin".startswith(q) and len(q) >= 3) or q in ("admin", "🧾")
+                                     or q in i["admin"]["coworker"].lower()))]
     return items[offset:offset + limit], len(items)
 
 
@@ -12799,6 +12822,142 @@ async def http_admin_deliver(request):
                                  status=502, headers=headers)
     name, order_id, delivery_id = result
     return web.json_response({"ok": True, "name": name, "order_id": order_id, "delivery_id": delivery_id}, headers=headers)
+
+
+# 🧾 New order (by admin), owner 23 Nov 2026: a sale made outside the bot, with no Telegram customer. It is stored
+# like any order (paid and delivered, counted in the sales, the daily Excel and the statistics on the chosen day) but
+# with user_id ADMIN_ORDER_USER_ID: no Telegram account has id 0, so it never shows up in a real customer's (or the
+# admin's own) My Subscriptions, purchase history, credits or the chatbot's lookups for a customer, and nothing is
+# ever sent for it. orders.source = 'admin' marks it ("🧾 by admin" in the admin's lists); the coworker it is
+# registered for only goes in column I of the delivered sheet (orders.admin_coworker), never in orders.coworker_id,
+# so coworker statements and owed amounts are untouched.
+ADMIN_ORDER_SOURCE = "admin"
+ADMIN_ORDER_USER_ID = 0
+ADMIN_ORDER_METHOD = "By admin"
+ADMIN_ORDER_MAX_DAYS_BACK = 365
+
+
+def _admin_order_when(day_text) -> datetime:
+    """The UTC timestamp an admin order is recorded at: now for today (local day, REPORT_UTC_OFFSET), else local noon
+    of the chosen earlier day. ValueError with what to tell the admin."""
+    offset = timedelta(hours=REPORT_UTC_OFFSET)
+    now = datetime.utcnow()
+    today = (now + offset).date()
+    if day_text in (None, ""):
+        return now
+    try:
+        day = datetime.strptime(str(day_text).strip(), "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError("Pick a valid date.")
+    if day > today:
+        raise ValueError("The date can't be after today.")
+    if day < today - timedelta(days=ADMIN_ORDER_MAX_DAYS_BACK):
+        raise ValueError(f"The date can be at most {ADMIN_ORDER_MAX_DAYS_BACK} days back.")
+    if day == today:
+        return now
+    return datetime.combine(day, dt_time(12, 0)) - offset
+
+
+def db_create_admin_order(item_id: str, price: float, text: str, access: str, coworker_name: str, label: str,
+                          when: datetime) -> tuple:
+    """Stores a sale made outside the bot as a paid, delivered order with one delivered unit and its delivery row
+    (+ the delivered-sheet row, with coworker_name in column I). Messages no one. Returns (order_id, delivery_id)."""
+    stamp = when.isoformat()
+    known_costs = db_get_item_costs()
+    costs_json = json.dumps({item_id: known_costs[item_id]} if item_id in known_costs else {})
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        "INSERT INTO orders (user_id, username, items_json, total, status, created_at, paid_at, delivered_at, "
+        "credentials, payment_method, costs_json, source, admin_label, admin_coworker) "
+        "VALUES (?, NULL, ?, ?, 'delivered', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (ADMIN_ORDER_USER_ID, json.dumps({item_id: 1}), round(float(price), 2), stamp, stamp, stamp, text,
+         ADMIN_ORDER_METHOD, costs_json, ADMIN_ORDER_SOURCE, label or None, coworker_name))
+    order_id = cur.lastrowid
+    conn.execute("INSERT INTO fulfilment (order_id, user_id, item_id, unit_no, state, created_at) "
+                 "VALUES (?, ?, ?, 1, 'delivered', ?)", (order_id, ADMIN_ORDER_USER_ID, item_id, stamp))
+    conn.commit()
+    conn.close()
+    delivery_id = db_add_delivery(order_id, ADMIN_ORDER_USER_ID, item_id, text, None, access=access,
+                                  delivered_at=when, coworker_name=coworker_name)
+    return order_id, delivery_id
+
+
+async def http_admin_create_order(request):
+    """🧾 New order (by admin) in the admin Mini App: {item_id, price, text, access, coworker_id (0 = Me), label, date
+    (YYYY-MM-DD, local, ≤ today)}. Saved as a paid, delivered order; nothing is sent to anyone."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        data = await request.json()
+        assert isinstance(data, dict)
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+
+    def bad(msg):
+        return web.json_response({"ok": False, "error": msg}, status=400, headers=headers)
+
+    if data.get("action") == "form":
+        # what the form offers: every subscription (regular price, ready-made delivery template) and the coworkers
+        products = []
+        for iid, v in MENU.items():
+            title, duration = delivery_title_duration(v[0])
+            products.append({"id": iid, "name": v[0], "price": round(float(v[1]), 2), "template": delivery_template_kind(iid),
+                             "title": title, "duration": duration})
+        products.sort(key=lambda x: x["name"].lower())
+        coworkers = [{"id": r[0], "name": r[1]} for r in db_list_coworkers()]
+        today_d = (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date()
+        today, earliest = today_d.isoformat(), (today_d - timedelta(days=ADMIN_ORDER_MAX_DAYS_BACK)).isoformat()
+        return web.json_response({"ok": True, "products": products, "coworkers": coworkers, "today": today,
+                                  "earliest": earliest},
+                                 headers=headers)
+    item_id = data.get("item_id")
+    if not isinstance(item_id, str) or item_id not in MENU:
+        return bad("Pick the subscription.")
+    price = data.get("price")
+    if isinstance(price, str):
+        try:
+            price = float(price.strip())
+        except ValueError:
+            price = None
+    if isinstance(price, bool) or not isinstance(price, (int, float)) or price != price or not (0 <= price <= 10000):
+        return bad("Type the price in USD (0 or more).")
+    text = data.get("text")
+    if not isinstance(text, str) or not text.strip() or len(text) > 3500:
+        return bad("Type the account details (username and password).")
+    access = data.get("access")
+    if not isinstance(access, str) or not access.strip():
+        return bad("Fill in Access first.")
+    label = data.get("label") or ""
+    if not isinstance(label, str):
+        return bad("Invalid customer name.")
+    coworker_id = data.get("coworker_id") or 0
+    if isinstance(coworker_id, bool) or not isinstance(coworker_id, int):
+        return bad("Pick the coworker.")
+    coworker_name = "Me"
+    if coworker_id:
+        cw = db_get_coworker(coworker_id)
+        if not cw:
+            return bad("That coworker no longer exists.")
+        coworker_name = cw[1]
+    try:
+        when = _admin_order_when(data.get("date"))
+    except ValueError as exc:
+        return bad(str(exc))
+    order_id, delivery_id = db_create_admin_order(item_id, float(price), text.strip(), access.strip()[:100],
+                                                  coworker_name, label.strip()[:100], when)
+    local_day = (when + timedelta(hours=REPORT_UTC_OFFSET)).date()
+    logger.info("Admin order #%s: %s, %s USD, for %s (%s)", order_id, item_id, price, coworker_name, local_day)
+    if local_day < (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date():
+        # a finished day changed: a fresh DAILY_SALES line, so the nightly sync updates that day in the owner's sheet
+        try:
+            log_daily_sales(local_day)
+        except Exception:
+            logger.exception("DAILY_SALES for %s after admin order #%s failed", local_day, order_id)
+    return web.json_response({"ok": True, "order_id": order_id, "delivery_id": delivery_id,
+                              "name": MENU[item_id][0], "coworker": coworker_name}, headers=headers)
 
 
 async def http_admin_reask(request):
@@ -14585,6 +14744,8 @@ async def start_api_server(application):
     api_app.router.add_get("/api/admin_delivered", http_admin_delivered)
     api_app.router.add_get("/api/admin_pending", http_admin_pending)
     api_app.router.add_post("/api/admin_deliver", http_admin_deliver)
+    api_app.router.add_post("/api/admin_create_order", http_admin_create_order)
+    api_app.router.add_options("/api/admin_create_order", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_reask", http_admin_reask)
     api_app.router.add_options("/api/admin_reask", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_sheet", http_admin_sheet)
@@ -16324,6 +16485,11 @@ async def admin_msg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     order_id = int(query.data.split(":", 1)[1])
+    order = db_get_order(order_id)
+    if order and order[1] == ADMIN_ORDER_USER_ID:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID,
+                                       text=f"Order #{order_id} is 🧾 by admin (a sale outside the bot): no customer to message.")
+        return
     clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_admin_message_for_order"] = order_id
     await context.bot.send_message(
@@ -19713,6 +19879,8 @@ async def _apply_delivery_edit(context, row, new_text: str, notify: bool):
     delivery_id, order_id, user_id, item_id, _old_message, message_id, delivered_at = row
     name = MENU.get(item_id, (item_id,))[0]
     status_note = "— customer was NOT notified"
+    if user_id == ADMIN_ORDER_USER_ID:   # an order by the admin has no Telegram customer to tell
+        notify, status_note = False, "(order by admin, no customer to notify)"
     if notify:
         new_body = f"🔑 Here are your account details for {name} (Order #{order_id}):\n\n{new_text}"
         edited_in_place = False
@@ -19953,12 +20121,12 @@ async def customer_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for order_id, user_id, username, items_json, status, created_at in rows:
         items = json.loads(items_json)
         item_names = ", ".join(MENU[i][0] for i in items if i in MENU)
-        who = f"@{username}" if username else str(user_id)
+        who = "🧾 by admin" if user_id == ADMIN_ORDER_USER_ID else (f"@{username}" if username else str(user_id))
         label = f"#{order_id} {who} — {item_names} — {status} — {_short_submitted(created_at)}"
-        buttons.append([
-            InlineKeyboardButton(label[:60], callback_data=f"ordlkview:{order_id}"),
-            InlineKeyboardButton("💬", callback_data=f"admin_msg:{order_id}"),
-        ])
+        row = [InlineKeyboardButton(label[:60], callback_data=f"ordlkview:{order_id}")]
+        if user_id != ADMIN_ORDER_USER_ID:   # an order by the admin has no customer to message
+            row.append(InlineKeyboardButton("💬", callback_data=f"admin_msg:{order_id}"))
+        buttons.append(row)
 
     await update.message.reply_text("Recent orders:", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -19985,9 +20153,17 @@ def _build_order_lookup_view(order_id: int):
     items = json.loads(items_json)
     item_names = ", ".join(MENU[i][0] for i in items if i in MENU)
 
+    by_admin = user_id == ADMIN_ORDER_USER_ID
+    if by_admin:   # 🧾 a sale made outside the bot: no Telegram customer
+        conn = sqlite3.connect(DB_PATH)
+        extra = conn.execute("SELECT admin_label, admin_coworker FROM orders WHERE id = ?", (oid,)).fetchone() or (None, None)
+        conn.close()
+        customer_line = "🧾 by admin" + (f" — {extra[0]}" if extra[0] else "") + f" (for {extra[1] or 'Me'})"
+    else:
+        customer_line = f"{username or 'unknown'} (ID: {user_id})"
     text = (
         f"Order #{oid}\n"
-        f"Customer: {username or 'unknown'} (ID: {user_id})\n"
+        f"Customer: {customer_line}\n"
         f"Items: {item_names}\n"
         f"Total: {CURRENCY}{total:.2f}\n"
         f"Status: {status}\n"
@@ -20019,7 +20195,7 @@ def _build_order_lookup_view(order_id: int):
     ).fetchall()
     conn.close()
 
-    buttons = [[InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{oid}")]]
+    buttons = [] if by_admin else [[InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{oid}")]]
     dm_btn = _dm_button(username)
     if dm_btn:
         buttons.append([dm_btn])
