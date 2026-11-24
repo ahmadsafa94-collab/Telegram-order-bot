@@ -12817,6 +12817,8 @@ def db_admin_pending() -> list:
             "prev_fields": [{"label": l, "value": v} for l, v in _reask_prev_fields(fid)] if _reask_waiting(fid, state) else [],
             # ✏️ Edit details (23 Nov 2026)
             "can_edit": _reask_can_switch(iid) and _edit_unit_problem(db_get_fulfilment(fid)) is None,
+            # 🔀 Change subscription (24 Nov 2026), in the same ✏️ sheet
+            "can_change": _change_item_problem(db_get_fulfilment(fid)) is None,
         })
     return out
 
@@ -12964,10 +12966,11 @@ def _admin_order_when(day_text) -> datetime:
     return datetime.combine(day, dt_time(12, 0)) - offset
 
 
-def _admin_order_details(item_id: str, details) -> tuple:
+def _admin_order_details(item_id: str, details, user_id: int = ADMIN_ORDER_USER_ID) -> tuple:
     """The account details of an order by the admin, checked like a cart order's (the Mini App's validateDetails, and
     the server's rules for new accounts: a real email, the username/password rules, an email or username not used for
-    this subscription before). (info, None) or (None, what to tell the admin)."""
+    this subscription before by `user_id`; 🔀 Change subscription passes the order's customer). (info, None) or (None,
+    what to tell the admin)."""
     kind = _register_kind(item_id)
     if kind not in ("imd", "generic"):
         return {"account_type": "new"}, None        # a code, a book, manual access: nothing to fill in
@@ -12986,9 +12989,30 @@ def _admin_order_details(item_id: str, details) -> tuple:
         if len(info["username"]) < 6:
             return None, "The username needs at least 6 characters."
         for field in ("email", "username"):
-            if db_credential_already_used(ADMIN_ORDER_USER_ID, item_id, field, info[field]):
+            if db_credential_already_used(user_id, item_id, field, info[field]):
                 return None, f"This {field} was already used to register for this subscription. Choose a different one."
     return info, None
+
+
+def _admin_order_products(coworker_id=None, extra: bool = False) -> list:
+    """Every subscription the admin can pick (🧾 New order, 🔀 Change subscription), by name: {id, name, price,
+    details (it takes account details), addon}. coworker_id: that coworker's price. extra adds oos (out of stock) and
+    instant (delivered right away: a code, the iMD automation)."""
+    out_of_stock = db_out_of_stock_items() if extra else set()
+    products = []
+    for iid, v in MENU.items():
+        if extra and iid.startswith("book_"):
+            continue
+        price = _coworker_unit_price_by_id(iid, coworker_id) if coworker_id else v[1]
+        p = {"id": iid, "name": v[0], "price": round(float(price), 2),
+             "details": _register_kind(iid) in ("imd", "generic") and not (extra and iid in UPTODATE_AI_ON_ACCOUNT),
+             "addon": iid in UPTODATE_AI_ADDONS}
+        if extra:
+            p.update(oos=iid in out_of_stock, instant=iid in UPTODATE_AI_TRIGGER_ITEMS or iid in UPTODATE_AI_BUNDLE_ITEMS
+                     or iid in IMD_TRIGGER_ITEMS)
+        products.append(p)
+    products.sort(key=lambda x: x["name"].lower())
+    return products
 
 
 async def http_admin_create_order(request):
@@ -13012,12 +13036,7 @@ async def http_admin_create_order(request):
 
     if data.get("action") == "form":
         # what the form offers: every subscription (regular price, which details it takes) and the coworkers
-        products = []
-        for iid, v in MENU.items():
-            products.append({"id": iid, "name": v[0], "price": round(float(v[1]), 2),
-                             "details": _register_kind(iid) in ("imd", "generic"),
-                             "addon": iid in UPTODATE_AI_ADDONS})
-        products.sort(key=lambda x: x["name"].lower())
+        products = _admin_order_products()
         coworkers = [{"id": r[0], "name": r[1]} for r in db_list_coworkers()]
         today_d = (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date()
         today, earliest = today_d.isoformat(), (today_d - timedelta(days=ADMIN_ORDER_MAX_DAYS_BACK)).isoformat()
@@ -15104,6 +15123,8 @@ async def start_api_server(application):
     api_app.router.add_post("/api/admin_reask", http_admin_reask)
     api_app.router.add_get("/api/unit_details", http_unit_details)
     api_app.router.add_options("/api/unit_details", http_imd_search_options)
+    api_app.router.add_post("/api/admin_change_unit_item", http_admin_change_unit_item)
+    api_app.router.add_options("/api/admin_change_unit_item", http_set_coworker_price_options)
     api_app.router.add_post("/api/edit_unit_details", http_edit_unit_details)
     api_app.router.add_options("/api/edit_unit_details", http_set_coworker_price_options)
     api_app.router.add_options("/api/admin_reask", http_set_coworker_price_options)
@@ -17024,7 +17045,8 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         buttons.append([InlineKeyboardButton("📤 Deliver Manually", callback_data=f"deliver:{fulfilment_id}")])
     if asked_again:
         buttons.append([InlineKeyboardButton("↩️ Cancel re-ask", callback_data=f"askresend_c:{fulfilment_id}")])
-    edit_url = _shop_url(ADMIN_CHAT_ID, open_view=f"edit{fulfilment_id}") if _edit_unit_problem(row) is None else ""
+    edit_url = (_shop_url(ADMIN_CHAT_ID, open_view=f"edit{fulfilment_id}")
+                if _edit_unit_problem(row) is None or _change_item_problem(row) is None else "")
     if edit_url:
         # ✏️ Edit details (23 Nov 2026): the Mini App's sheet, not a second chat form
         buttons.append([InlineKeyboardButton("✏️ Edit details", web_app=WebAppInfo(url=edit_url))])
@@ -17266,8 +17288,9 @@ def db_reask_unit(fulfilment_id: int, ask_type, note=None):
         return None   # delivered (or deleted) meanwhile
     # the details sent next go to @Utdreg_bot again even when they're the same as before
     try:
+        # ('reopen': 🔀 changed back to UpToDate, 24 Nov 2026, @Utdreg_bot still has to put it back on its list)
         conn.execute("UPDATE automation_outbox SET info_hash = 'reask' WHERE fulfilment_id = ? AND info_hash IS NOT NULL "
-                     "AND info_hash NOT LIKE 'edit%'",
+                     "AND info_hash NOT LIKE 'edit%' AND info_hash != 'reopen'",
                      (fulfilment_id,))
     except sqlite3.OperationalError:
         pass   # no outbox yet (utd_automation_init not run)
@@ -17337,7 +17360,7 @@ async def cancel_reask(application, fulfilment_id: int) -> dict:
         try:
             # a re-ask @Utdreg_bot never heard of is dropped; the details go to it again either way
             conn.execute("UPDATE automation_outbox SET reask_pending = NULL, reask_tries = 0, "
-                         "info_hash = CASE WHEN info_hash IS NULL OR info_hash LIKE 'edit%' THEN info_hash ELSE 'reask' END WHERE fulfilment_id = ?",
+                         "info_hash = CASE WHEN info_hash IS NULL OR info_hash LIKE 'edit%' OR info_hash = 'reopen' THEN info_hash ELSE 'reask' END WHERE fulfilment_id = ?",
                          (fulfilment_id,))
         except sqlite3.OperationalError:
             pass
@@ -17383,6 +17406,30 @@ def _utd_unit_sent(fulfilment_id) -> bool:
         row = None
     conn.close()
     return row is not None
+
+
+async def _send_reask_message(application, fulfilment_id: int, user_id: int, order_id: int, name: str, ask_type,
+                              note=None, again: bool = True) -> bool:
+    """The customer's 🔐 message with 🔄 Resend Credentials (🔁 ask again; 🔀 Change subscription asks for the new
+    subscription's details, again=False). True when it reached them."""
+    text = (f"🔐 Please send the account details {'again ' if again else ''}for {name} (Order #{order_id}).")
+    if ask_type == "new":
+        text += " It will be set up as a 🆕 new account."
+    elif ask_type == "renew":
+        text += " It will be set up as a 🔄 renewal of your existing account."
+    if note:
+        text += f"\n\n{note}"
+    text += "\n\nTap below to get started:"
+    try:
+        await application.bot.send_message(
+            chat_id=user_id, text=text,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔄 Resend Credentials", callback_data=f"resendcred:{fulfilment_id}")]]),
+        )
+        return True
+    except Exception:
+        logger.exception("Failed to send the ask-again request for fulfilment #%s", fulfilment_id)
+        return False
 
 
 async def reask_unit(application, fulfilment_id: int, ask_type: str = "any", note=None, force: bool = False) -> dict:
@@ -17435,24 +17482,7 @@ async def reask_unit(application, fulfilment_id: int, ask_type: str = "any", not
         for key in ("awaiting_generic_field", "generic_data", "generic_account_type"):
             customer_data.pop(key, None)
 
-    text = f"🔐 Please send the account details again for {name} (Order #{order_id})."
-    if ask_type == "new":
-        text += " It will be set up as a 🆕 new account."
-    elif ask_type == "renew":
-        text += " It will be set up as a 🔄 renewal of your existing account."
-    if note:
-        text += f"\n\n{note}"
-    text += "\n\nTap below to get started:"
-    reached = True
-    try:
-        await application.bot.send_message(
-            chat_id=user_id, text=text,
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔄 Resend Credentials", callback_data=f"resendcred:{fulfilment_id}")]]),
-        )
-    except Exception:
-        reached = False
-        logger.exception("Failed to send the ask-again request for fulfilment #%s", fulfilment_id)
+    reached = await _send_reask_message(application, fulfilment_id, user_id, order_id, name, ask_type, note)
     logger.info("Order #%s unit %s: details asked again (%s)", order_id, fulfilment_id, ask_type or "customer chooses")
     who = "the coworker" if _order_coworker_id(order_id) else "the customer"
     as_what = (f" as a {REASK_TYPE_WORDS[ask_type]}" + (f" (was {REASK_TYPE_WORDS[was]})" if was and was != ask_type else "")
@@ -17699,11 +17729,22 @@ async def http_unit_details(request):
         return web.json_response({"ok": False, "error": "Not found"}, status=404, headers=headers)
     info = _unit_info(row[6])
     problem = _edit_unit_problem(row)
-    return web.json_response({
+    out = {
         "ok": True, "fulfilment_id": fid, "order_id": row[1], "name": MENU.get(row[3], (row[3],))[0],
         "editable": problem is None, "problem": problem or "", "account_type": _unit_account_type(row[6]),
         "fields": {k: str(v) for k, v in info.items() if k in REGISTER_FIELDS[("generic", "new")] + REGISTER_FIELDS[("generic", "renew")]},
-    }, headers=headers)
+    }
+    if user_id == ADMIN_CHAT_ID:
+        # 🔀 Change subscription (24 Nov 2026): only ever in the admin's answer
+        change_problem = _change_item_problem(row)
+        out.update(can_change=change_problem is None, change_problem=change_problem or "", item_id=row[3],
+                   by_admin=row[2] == ADMIN_ORDER_USER_ID,
+                   all_fields={k: str(v) for k, v in info.items() if isinstance(v, (str, int, float))})
+        if change_problem is None:
+            order = db_get_order(row[1])
+            out.update(total=round(float(order[4] or 0), 2) if order else 0.0,
+                       products=_admin_order_products(_order_coworker_id(row[1]), extra=True))
+    return web.json_response(out, headers=headers)
 
 
 async def http_edit_unit_details(request):
@@ -17733,6 +17774,374 @@ async def http_edit_unit_details(request):
                 out[k] = result[k]
         return web.json_response(out, status=result.get("status") or 409, headers=headers)
     return web.json_response({"ok": True, "note": result["note"], "changed": result["changed"]}, headers=headers)
+
+
+# ── 🔀 Change subscription (owner, 24 Nov 2026) ──────────────────────
+# "For the pending order, allow the admin to change the subscription in edit. For example change from UpToDate to
+# anything else." Admin only, from ✏️ Edit details in the Mini App: a paid unit not delivered yet becomes another
+# product, with its details entered by the admin or asked from the customer. The order's items_json/costs_json follow
+# (the sales count the new product on the original paid day); the total stays unless the admin types one (no refund
+# or credit). @Utdreg_bot is told first when the unit leaves (closed: "changed") or changes within UpToDate (an edit);
+# entering UpToDate after it was taken off its list puts it back (reopen). The new product then takes the normal path
+# (process_next_in_queue for that unit only): iMD automation, a code from the pool, the 📝 Ready to deliver notice …
+
+
+def _order_paid_local_day(order_id: int):
+    """The local day the order counts on in the sales (COALESCE(settled_at, paid_at, created_at)), or None."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT COALESCE(settled_at, paid_at, created_at) FROM orders WHERE id = ?", (order_id,)).fetchone()
+    conn.close()
+    try:
+        return (datetime.fromisoformat(row[0]) + timedelta(hours=REPORT_UTC_OFFSET)).date() if row and row[0] else None
+    except ValueError:
+        return None
+
+
+def _order_items(order_id: int) -> dict:
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT items_json FROM orders WHERE id = ?", (order_id,)).fetchone()
+    conn.close()
+    try:
+        items = json.loads(row[0]) if row and row[0] else {}
+    except ValueError:
+        items = {}
+    return items if isinstance(items, dict) else {}
+
+
+def _change_item_problem(row, new_item=None):
+    """Why this unit's subscription can't be changed (None when it can). new_item None: only the unit itself."""
+    if not row:
+        return "That item no longer exists."
+    fid, order_id, user_id, item_id, unit_no, state = row[:6]
+    if state == "delivered":
+        return "This item was already delivered."
+    order = db_get_order(order_id)
+    if not order:
+        return f"Order #{order_id} no longer exists."
+    if order[5] in ("cancelled", "rejected"):
+        return f"Order #{order_id} was {order[5]}."
+    if order[5] not in ("paid", "delivered"):
+        return f"Order #{order_id} isn't paid."
+    if _reask_waiting(fid, state):
+        return "This item is waiting for its details again: ↩️ Cancel re-ask first."
+    if order_id in _IMD_RUNS_IN_PROGRESS:
+        return f"An iMD registration of order #{order_id} is running right now. Wait for it to finish, then try again."
+    if new_item is None:
+        return None
+    if not isinstance(new_item, str) or new_item not in MENU:
+        return "Pick the subscription."
+    if new_item == item_id:
+        return "That's already its subscription."
+    if new_item.startswith("book_"):
+        return "A book can't be chosen here."
+    items = _order_items(order_id)
+    if items.get(item_id):
+        items[item_id] -= 1
+        if items[item_id] <= 0:
+            del items[item_id]
+    items[new_item] = items.get(new_item, 0) + 1
+    return addon_problem(items)
+
+
+def _change_item_needs_force(row):
+    """What the admin confirms before the change (None when nothing): something already happened for this unit."""
+    info = _unit_info(row[6])
+    if info.get("imd2y_step") == 2:
+        return ("Step 1 of this iMD 2-Year order already ran on iMD (a serial was used); that account stays as it is.")
+    sent = db_get_meta(f"bundle_code_sent:{row[0]}")
+    if sent and not str(sent).startswith("pool empty"):
+        return f"The Telegram code of this bundle was already sent ({sent}); the customer keeps it."
+    return None
+
+
+def db_change_unit_item(fid: int, old_item: str, new_item: str, info, total=None, outbox=None):
+    """The swap, in one transaction: the unit becomes new_item (needs_info, with `info` or none), numbered after the
+    order's other new_item units (later old_item units move down one); reask_json keeps only the edit history plus this
+    change; the order's items_json/costs_json (and total when given) follow; a new account's used email/username moves
+    to the new item. outbox: None | "closed" (@Utdreg_bot took it off its list) | "reopen" | ("hash", value).
+    {order_id, prev, unit_no} or None when the unit was delivered (or changed) meanwhile."""
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute("SELECT order_id, user_id, unit_no, info_json, reask_json FROM fulfilment WHERE id = ? "
+                           "AND item_id = ? AND state != 'delivered'", (fid, old_item)).fetchone()
+        if not row:
+            return None
+        order_id, user_id, old_no, old_info_json, reask_json = row
+        prev = _unit_info(old_info_json)
+        try:
+            old_reask = json.loads(reask_json) if reask_json else {}
+        except ValueError:
+            old_reask = {}
+        edits = [e for e in ((old_reask or {}).get("edits") or []) if isinstance(e, dict)]
+        edits.append({"at": now, "by": "admin", "prev": prev, "prev_item": old_item})
+        new_no = conn.execute("SELECT COUNT(*) FROM fulfilment WHERE order_id = ? AND item_id = ?",
+                              (order_id, new_item)).fetchone()[0] + 1
+        cur = conn.execute("UPDATE fulfilment SET item_id = ?, unit_no = ?, info_json = ?, state = 'needs_info', "
+                           "reask_json = ? WHERE id = ? AND item_id = ? AND state != 'delivered'",
+                           (new_item, new_no, json.dumps(info) if info else None,
+                            json.dumps({"edits": edits[-EDIT_HISTORY_MAX:]}), fid, old_item))
+        if not cur.rowcount:
+            conn.rollback()
+            return None
+        for other, no in conn.execute("SELECT id, unit_no FROM fulfilment WHERE order_id = ? AND item_id = ? AND unit_no > ? "
+                                      "ORDER BY unit_no", (order_id, old_item, old_no)).fetchall():
+            conn.execute("UPDATE fulfilment SET unit_no = ? WHERE id = ?", (no - 1, other))
+        order = conn.execute("SELECT items_json, costs_json, total FROM orders WHERE id = ?", (order_id,)).fetchone()
+        try:
+            items = json.loads(order[0]) if order and order[0] else {}
+        except ValueError:
+            items = {}
+        try:
+            costs = json.loads(order[1]) if order and order[1] else {}
+        except ValueError:
+            costs = {}
+        if items.get(old_item):
+            items[old_item] -= 1
+            if items[old_item] <= 0:
+                del items[old_item]
+                costs.pop(old_item, None)
+        items[new_item] = items.get(new_item, 0) + 1
+        known = db_get_item_costs()
+        if new_item in known and new_item not in costs:
+            costs[new_item] = known[new_item]     # its cost today (the old item's stays frozen while it's still in it)
+        conn.execute("UPDATE orders SET items_json = ?, costs_json = ?, total = ? WHERE id = ?",
+                     (json.dumps(items), json.dumps(costs), round(float(total), 2) if total is not None else order[2],
+                      order_id))
+        if prev.get("account_type") == "new" and (prev.get("email") or prev.get("username")):
+            conn.execute("DELETE FROM used_credentials WHERE id = (SELECT id FROM used_credentials WHERE user_id = ? "
+                         "AND item_id = ? AND LOWER(COALESCE(email, '')) = LOWER(?) AND "
+                         "LOWER(COALESCE(username, '')) = LOWER(?) ORDER BY id DESC LIMIT 1)",
+                         (user_id, old_item, prev.get("email") or "", prev.get("username") or ""))
+        if info and info.get("account_type") == "new" and (info.get("email") or info.get("username")):
+            conn.execute("INSERT INTO used_credentials (user_id, item_id, email, username, created_at) VALUES (?, ?, ?, ?, ?)",
+                         (user_id, new_item, info.get("email"), info.get("username"), datetime.utcnow().isoformat()))
+        try:
+            conn.execute("UPDATE automation_outbox SET reask_pending = NULL, reask_tries = 0 WHERE fulfilment_id = ?", (fid,))
+            if outbox == "closed":
+                conn.execute("UPDATE automation_outbox SET closed_sent = ? WHERE fulfilment_id = ?", (now, fid))
+            elif outbox == "reopen":
+                conn.execute("UPDATE automation_outbox SET info_hash = 'reopen', sent_at = NULL, closed_sent = NULL, "
+                             "tries = 0, error = NULL, alerted = 0 WHERE fulfilment_id = ?", (fid,))
+            elif isinstance(outbox, tuple):
+                conn.execute("UPDATE automation_outbox SET info_hash = ? WHERE fulfilment_id = ?", (outbox[1], fid))
+        except sqlite3.OperationalError:
+            pass   # no outbox yet (utd_automation_init not run)
+        conn.commit()
+        return {"order_id": order_id, "prev": prev, "unit_no": new_no}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _utd_closed_already(fid) -> bool:
+    """@Utdreg_bot was sent this unit at some point (it may have taken it off its list since: closed_sent)."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute("SELECT 1 FROM automation_outbox WHERE fulfilment_id = ? AND (closed_sent IS NOT NULL OR "
+                           "sent_at IS NOT NULL)", (fid,)).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    conn.close()
+    return row is not None
+
+
+async def change_unit_item(application, fulfilment_id: int, new_item: str, mode: str = "details", details=None,
+                           ask_type: str = "any", note=None, total=None, notify: bool = True,
+                           force: bool = False) -> dict:
+    """🔀 Change subscription of a pending unit (the admin's ✏️ Edit details). mode: details (the admin enters them;
+    a product without details takes none) | ask (the customer is asked, 🔄 Resend Credentials). total: the order's new
+    total, None keeps it. {ok, note} or {ok: False, error, status, busy?, needs_force?}."""
+    row = db_get_fulfilment(fulfilment_id)
+    problem = _change_item_problem(row, new_item)
+    if problem:
+        return {"ok": False, "status": 409 if not row or problem != "Pick the subscription." else 400, "error": problem}
+    fid, order_id, user_id, old_item, unit_no, state, info_json = row
+    by_admin = user_id == ADMIN_ORDER_USER_ID
+    if total is not None:
+        if isinstance(total, str):
+            try:
+                total = float(total.strip())
+            except ValueError:
+                return {"ok": False, "status": 400, "error": "Type the order total in USD (0 to 10000)."}
+        if isinstance(total, bool) or not isinstance(total, (int, float)) or total != total or not (0 <= total <= 10000):
+            return {"ok": False, "status": 400, "error": "Type the order total in USD (0 to 10000)."}
+    if mode not in ("details", "ask"):
+        return {"ok": False, "status": 400, "error": "Invalid request"}
+    kind = _register_kind(new_item)
+    takes_details = kind in ("imd", "generic") and new_item not in UPTODATE_AI_ON_ACCOUNT
+    ask_type = ask_type if ask_type in ("new", "renew") and kind == "generic" else None
+    note = (note or "").strip() if isinstance(note, str) else ""
+    if len(note) > REASK_NOTE_MAX:
+        return {"ok": False, "status": 400, "error": f"The note is {len(note)} characters; it can be at most {REASK_NOTE_MAX}."}
+    info, asking = None, False
+    if not takes_details:
+        info = None if new_item in UPTODATE_AI_ON_ACCOUNT else {"account_type": "new"}   # the add-on: its plan's details
+    elif mode == "ask":
+        asking = not by_admin           # an order by the admin has no customer: no details, the admin delivers it
+    else:
+        info, err = _admin_order_details(new_item, details, user_id=user_id)
+        if err:
+            return {"ok": False, "status": 400, "error": err}
+    warn = _change_item_needs_force(row)
+    if warn and not force:
+        return {"ok": False, "status": 409, "needs_force": True, "error": warn}
+    old_name, new_name = MENU.get(old_item, (old_item,))[0], MENU[new_item][0]
+
+    # @Utdreg_bot first, while it still has the unit
+    utd_note, outbox, told, utd_kind = "", None, None, None
+    if old_item in UTD_AUTOMATION_ITEMS and _utd_unit_sent(fid) and AUTOMATION_API_URL and CATALOG_API_KEY:
+        if new_item in UTD_AUTOMATION_ITEMS and asking:
+            utd_kind = "reask"
+            payload = {"fulfilment_id": fid, "order_id": order_id, "reask": True, "kind": ask_type, "force": bool(force)}
+        elif new_item in UTD_AUTOMATION_ITEMS and info:
+            utd_kind = "edit"
+            payload = _utd_order_payload((fid, order_id, user_id, new_item), info)
+            payload.update(update=True, edit=True, force=bool(force))
+        else:
+            utd_kind = "closed"
+            payload = {"fulfilment_id": fid, "order_id": order_id, "closed": "changed", "force": bool(force)}
+        status, body = await _automation_post("/api/order_pending", payload)
+        if status == 200 and body.get("ok"):
+            told = True
+            utd_note = body.get("superseded") or ("taken off its 📥 Pending orders" if utd_kind == "closed" else
+                                                  "it has the new details")
+        elif status == 409:
+            return {"ok": False, "status": 409, "busy": bool(body.get("busy")),
+                    "needs_force": bool(body.get("needs_force")) and not force,
+                    "error": body.get("error") or "@Utdreg_bot can't take the change now."}
+        else:
+            told = False
+            utd_note = "@Utdreg_bot didn't answer; it's told as soon as it does"
+        if utd_kind == "closed" and told:
+            outbox = "closed"
+        elif utd_kind == "edit":
+            outbox = ("hash", hashlib.sha256(json.dumps(info).encode()).hexdigest() if told else "edit-admin")
+    elif new_item in UTD_AUTOMATION_ITEMS and (old_item not in UTD_AUTOMATION_ITEMS or not _utd_unit_sent(fid)) \
+            and _utd_closed_already(fid):
+        outbox = "reopen"   # taken off @Utdreg_bot's list before: it goes back on it as a new pending order
+        utd_note = "it goes back on @Utdreg_bot's 📥 Pending orders"
+    elif new_item in UTD_AUTOMATION_ITEMS:
+        utd_note = "it goes to @Utdreg_bot's 📥 Pending orders" + ("" if info else " once its details are sent")
+
+    async with unit_lock(fid):
+        db_snapshot_order(order_id)
+        swapped = db_change_unit_item(fid, old_item, new_item, info, total, outbox)
+    if swapped is None:
+        return {"ok": False, "status": 409, "error": "This item was already delivered."}
+    if utd_kind == "reask" and told is False:
+        _set_reask_pending(fid, {"kind": ask_type, "applied": True})
+
+    # a half-finished chat form or iMD run of the old product mustn't carry on
+    held = []
+    customer_data = (getattr(application, "user_data", None) or {}).get(user_id)
+    if customer_data is not None:
+        if customer_data.get("generic_fulfilment_id") == fid:
+            for key in ("awaiting_generic_field", "generic_data", "generic_account_type", "generic_fulfilment_id",
+                        "generic_item_id", "generic_order_id"):
+                customer_data.pop(key, None)
+        if customer_data.get("registration_fulfilment_id") == fid:
+            for key in [k for k in customer_data if k.startswith("registration_") or k == "awaiting_registration_field"]:
+                customer_data.pop(key, None)
+    if old_item in IMD_TRIGGER_ITEMS:
+        pending = application.bot_data.get("pending_registrations", {})
+        if isinstance(pending.get(order_id), dict) and pending[order_id].get("fulfilment_id") == fid:
+            pending.pop(order_id, None)
+        conn = sqlite3.connect(DB_PATH)
+        held = [c for (c,) in conn.execute("SELECT code FROM serials WHERE status = 'held' AND used_for_order = ?",
+                                           (order_id,)).fetchall()]
+        conn.close()
+
+    ctx = _HttpContext(application, ADMIN_CHAT_ID)
+    reached = None
+    if asking:
+        db_reask_unit(fid, ask_type or "any", note)
+        reached = await _send_reask_message(application, fid, user_id, order_id, new_name, ask_type, note, again=False)
+        nxt = ("the customer was asked for its details (🔄 Resend Credentials)" if reached else
+               "⚠️ the customer couldn't be reached; it waits for their details (Mini App: Complete Registration)")
+    else:
+        try:
+            await process_next_in_queue(ctx, user_id, order_id, only_fid=fid)
+        except Exception:
+            logger.exception("change_unit_item: the next step of order #%s unit %s failed", order_id, fid)
+        after = db_get_fulfilment(fid)
+        nxt = {"delivered": "delivered", "awaiting_delivery": "📤 ready to deliver"}.get(
+            after[5] if after else "", "waiting for its details")
+        if new_item in IMD_TRIGGER_ITEMS and info:
+            nxt = "the iMD automation was started"
+
+    # money: the total stays unless typed; a finished day's sales line is logged again
+    order = db_get_order(order_id)
+    new_total = float(order[4] or 0) if order else 0.0
+    cw = _order_coworker_id(order_id)
+    old_price, new_price = _coworker_unit_price_by_id(old_item, cw) if old_item in MENU else 0, _coworker_unit_price_by_id(new_item, cw)
+    day = _order_paid_local_day(order_id)
+    if day and day < (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date():
+        try:
+            log_daily_sales(day)
+        except Exception:
+            logger.exception("DAILY_SALES for %s after changing order #%s failed", day, order_id)
+
+    if notify and not by_admin and user_id:
+        try:
+            await application.bot.send_message(chat_id=user_id, text=(
+                f"🔀 Order #{order_id}: {old_name} → {new_name}" + (f"\nOrder total: ${new_total:g}" if total is not None else "")))
+        except Exception:
+            logger.exception("change_unit_item: couldn't tell user %s", user_id)
+    lines = [f"🔀 Order #{order_id}: {old_name} → {new_name}",
+             (f"Total: ${new_total:g} (typed)" if total is not None else f"Total kept: ${new_total:g}")
+             + f" · list price ${old_price:g} → ${new_price:g}"]
+    if utd_note:
+        lines.append(f"🤖 @Utdreg_bot: {utd_note}")
+    if held:
+        lines.append(f"🎟 iMD serial{'s' if len(held) > 1 else ''} held for this order: {', '.join(held)} (still held)")
+    if warn:
+        lines.append(f"⚠️ {warn}")
+    lines.append(f"Next: {nxt}")
+    note_text = "\n".join(lines)
+    if ADMIN_CHAT_ID:
+        try:
+            await application.bot.send_message(chat_id=ADMIN_CHAT_ID, text=note_text)
+        except Exception:
+            logger.exception("change_unit_item: couldn't tell the admin about order #%s", order_id)
+    logger.info("Order #%s unit %s: subscription changed %s → %s by the admin (%s)", order_id, fid, old_item, new_item,
+                "asked" if asking else "details" if info else "no details")
+    return {"ok": True, "note": note_text, "order_id": order_id, "item_id": new_item, "name": new_name,
+            "total": new_total, "reached": reached}
+
+
+async def http_admin_change_unit_item(request):
+    """POST ?uid&tok {fulfilment_id, item_id, mode: details|ask, details, ask_type, note, total (null keeps it), notify,
+    force}: 🔀 Change subscription (admin only). 400 {error} for a value to fix; 409 {error, busy?, needs_force?}."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        data = await request.json()
+        fid = data["fulfilment_id"]
+        assert isinstance(data, dict)
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if isinstance(fid, bool) or not isinstance(fid, int):
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    total = data.get("total")
+    if total == "":
+        total = None
+    result = await change_unit_item(request.app["application"], fid, data.get("item_id"), data.get("mode") or "details",
+                                    data.get("details"), data.get("ask_type") or "any", data.get("note"), total,
+                                    notify=data.get("notify", True) is not False, force=bool(data.get("force")))
+    if not result.get("ok"):
+        out = {"ok": False, "error": result.get("error")}
+        for k in ("busy", "needs_force"):
+            if result.get(k):
+                out[k] = result[k]
+        return web.json_response(out, status=result.get("status") or 409, headers=headers)
+    return web.json_response({"ok": True, "note": result["note"], "name": result["name"], "total": result["total"],
+                              "reached": result["reached"]}, headers=headers)
 
 
 async def resend_cred_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -18778,13 +19187,15 @@ async def start_order_fulfilment(context: ContextTypes.DEFAULT_TYPE, order_id: i
             )
 
 
-async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int, order_id: int = None):
+async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int, order_id: int = None,
+                                only_fid: int = None):
     """Starts collection for the next product still needing details.
 
     Reads the queue from the database rather than memory, so a restart or
     redeploy can't lose track of a half-finished order. If no order_id is
     given, picks up whichever of this customer's orders still needs
-    something."""
+    something. only_fid (🔀 Change subscription, 24 Nov 2026): just that unit, if it still needs its details, and the
+    queue isn't advanced after it."""
     if order_id is None:
         pending = db_user_pending_items(user_id)
         needs = [row for row in pending if row[4] == "needs_info"]
@@ -18792,7 +19203,13 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
             return
         order_id = needs[0][1]
 
-    nxt = db_next_needs_info(order_id)
+    if only_fid is not None:
+        one = db_get_fulfilment(only_fid)
+        if not one or one[1] != order_id or one[5] != "needs_info":
+            return
+        nxt = (one[0], one[3])
+    else:
+        nxt = db_next_needs_info(order_id)
     if not nxt:
         # Nothing left for the customer to fill in.
         # If there are non-iMD items still waiting for admin delivery, send
@@ -18977,7 +19394,8 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
 
         # Advance the queue — safe because state was already changed above
         # so the next call won't re-process this item
-        await process_next_in_queue(context, user_id, order_id)
+        if only_fid is None:
+            await process_next_in_queue(context, user_id, order_id)
         return
 
     if user_id == ADMIN_ORDER_USER_ID and item_id not in UPTODATE_AI_TRIGGER_ITEMS and not item_id.startswith("book_"):
@@ -18991,7 +19409,8 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("📤 Deliver", callback_data=f"deliver:{fulfilment_id}")]]),
             )
-        await process_next_in_queue(context, user_id, order_id)
+        if only_fid is None:
+            await process_next_in_queue(context, user_id, order_id)
         return
     if item_id in IMD_TRIGGER_ITEMS:
         await start_imd_collection(context, order_id, user_id, item_id, fulfilment_id)
@@ -22006,14 +22425,18 @@ def _utd_units_reasked() -> list:
 
 
 def _utd_units_closed() -> list:
-    """Units sent to @Utdreg_bot that were since delivered here (by hand or by @Utdreg_bot) or whose order was
-    cancelled: (fulfilment id, order id, why), to take them off its 📥 Pending orders."""
+    """Units sent to @Utdreg_bot that were since delivered here (by hand or by @Utdreg_bot), whose order was cancelled,
+    or that are no longer an UpToDate plan (🔀 Change subscription, 24 Nov 2026): (fulfilment id, order id, why), to
+    take them off its 📥 Pending orders."""
+    marks = ",".join("?" * len(UTD_AUTOMATION_ITEMS))
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT f.id, f.order_id, CASE WHEN f.state = 'delivered' THEN 'delivered' ELSE 'cancelled' END FROM automation_outbox a "
+        "SELECT f.id, f.order_id, CASE WHEN f.state = 'delivered' THEN 'delivered' "
+        f"WHEN o.status NOT IN ('paid', 'delivered') THEN 'cancelled' ELSE 'changed' END FROM automation_outbox a "
         "JOIN fulfilment f ON f.id = a.fulfilment_id JOIN orders o ON o.id = f.order_id "
         "WHERE a.sent_at IS NOT NULL AND a.closed_sent IS NULL "
-        "AND (f.state = 'delivered' OR o.status NOT IN ('paid', 'delivered'))").fetchall()
+        f"AND (f.state = 'delivered' OR o.status NOT IN ('paid', 'delivered') OR f.item_id NOT IN ({marks}))",
+        sorted(UTD_AUTOMATION_ITEMS)).fetchall()
     conn.close()
     return rows
 
@@ -22037,7 +22460,7 @@ async def automation_push_job(context: ContextTypes.DEFAULT_TYPE):
                 continue
             conn = sqlite3.connect(DB_PATH)
             conn.execute("UPDATE automation_outbox SET reask_pending = NULL, reask_tries = 0, info_hash = "
-                         "CASE WHEN info_hash IS NULL OR info_hash LIKE 'edit%' THEN info_hash ELSE 'reask' END WHERE fulfilment_id = ?", (fid,))
+                         "CASE WHEN info_hash IS NULL OR info_hash LIKE 'edit%' OR info_hash = 'reopen' THEN info_hash ELSE 'reask' END WHERE fulfilment_id = ?", (fid,))
             conn.commit(); conn.close()
             continue
         status, body = await _automation_post("/api/order_pending", {
@@ -22078,6 +22501,9 @@ async def automation_push_job(context: ContextTypes.DEFAULT_TYPE):
             # ✏️ Edit details saved while @Utdreg_bot didn't answer (23 Nov 2026): what it started from the old ones goes;
             # a result waiting for approval is dropped only when the admin made the edit (or chose 💾 Save anyway)
             payload.update(edit=True, force=r[7] == "edit-admin")
+        elif r[7] == "reopen":
+            # 🔀 changed back to an UpToDate plan after @Utdreg_bot took it off its list (24 Nov 2026): back on it
+            payload["reopen"] = True
         status, body = await _automation_post("/api/order_pending", payload)
         conn = sqlite3.connect(DB_PATH)
         if status == 200 and body.get("ok"):
@@ -22124,7 +22550,9 @@ async def automation_push_job(context: ContextTypes.DEFAULT_TYPE):
         if status in (502, 503):
             return   # @Utdreg_bot is down: the rest wait for the next minute
     for fid, order_id, why in _utd_units_closed():
-        status, body = await _automation_post("/api/order_pending", {"fulfilment_id": fid, "order_id": order_id, "closed": why})
+        # 'changed': the admin already chose to change it (🔀 Change subscription), so a result waiting there goes too
+        status, body = await _automation_post("/api/order_pending", {"fulfilment_id": fid, "order_id": order_id, "closed": why,
+                                                                     **({"force": True} if why == "changed" else {})})
         if status == 200 and body.get("ok"):
             conn = sqlite3.connect(DB_PATH)
             conn.execute("UPDATE automation_outbox SET closed_sent = ? WHERE fulfilment_id = ?",
