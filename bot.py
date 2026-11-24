@@ -11602,9 +11602,11 @@ CREATE_ORDER_MAX_UNITS = 10
 
 
 def _reply_bot_sellable() -> set:
+    # the supplier-panel subscriptions of the All Subscriptions tab too (Wiley ejournals, Springer Journals + ebooks…;
+    # owner, 24 Nov 2026: the chatbot didn't recognise them)
     return set(all_toggleable_items()) | {
         i for i in MANUAL_ACCESS_ITEMS if not ITEM_OVERRIDES.get(i, (None, None, None, False))[3]
-    }
+    } | {i for i in PANEL_ITEM_IDS if i in MENU}
 
 
 def _reply_bot_check_items(requested: dict):
@@ -12365,6 +12367,13 @@ async def http_public_catalog(request):
         }
         for item_id in dict.fromkeys(item_ids)
         if item_id in MENU
+    ]
+    # the All Subscriptions tab's supplier-panel products (owner, 24 Nov 2026), marked so the chatbot lists them apart
+    listed = {p["id"] for p in products}
+    products += [
+        {"id": i, "name": MENU[i][0], "price": MENU[i][1], "currency": "USD", "in_stock": i not in out_of_stock,
+         "section": "all"}
+        for i in sorted(PANEL_ITEM_IDS, key=lambda x: (MENU.get(x, ("",))[0].lower(), x)) if i in MENU and i not in listed
     ]
     local = [
         {
