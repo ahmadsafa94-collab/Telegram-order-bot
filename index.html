@@ -891,6 +891,7 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
     <div class="sheet-title" id="editTitle">✏️ Edit details</div>
     <div style="padding:0 15px 15px">
       <div class="t-meta" id="editSub" style="margin:6px 0 10px"></div>
+      <div id="editNote" style="display:none;font-size:12px;margin-top:8px;padding:7px 9px;border-radius:8px;background:rgba(234,179,8,.12);white-space:pre-wrap;word-break:break-word;margin:0 0 10px"></div>
       <!-- 🔀 Change subscription: the admin only (24 Nov 2026) -->
       <div id="editChange" style="display:none"></div>
       <div id="editChangeBody" style="display:none"></div>
@@ -899,6 +900,22 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
       <div id="editMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>
       <button class="btn" id="editSend" onclick="saveEdit()">💾 Save changes</button>
       <button class="btn sec" style="margin-top:8px" onclick="closeEdit()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- 📝 Admin note on an order: the admin only (24 Nov 2026) -->
+<div class="overlay" id="noteOverlay" onclick="if(event.target===this)closeNote()">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title" id="noteTitle">📝 Note</div>
+    <div style="padding:0 15px 15px">
+      <div class="t-meta" style="margin:6px 0 10px">Only you see it, under the order's details (never the customer or a coworker).</div>
+      <textarea id="noteText" class="cw-input" rows="4" maxlength="1000" placeholder="e.g. Paid the rest on WhatsApp" aria-label="Note"></textarea>
+      <div id="noteMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>
+      <button class="btn" id="noteSave" onclick="saveNote(false)">💾 Save note</button>
+      <button class="btn sec" style="margin-top:8px" onclick="saveNote(true)">🧹 Clear note</button>
+      <button class="btn sec" style="margin-top:8px" onclick="closeNote()">Cancel</button>
     </div>
   </div>
 </div>
@@ -2050,6 +2067,7 @@ async function loadAdminDelivered(reset){
         '<div class="t-title">'+escHtml(i.name)+' <span style="color:var(--hint);font-weight:400">#'+i.order_id+'</span><div class="t-meta">'+cardMeta(i)+'</div><div style="margin-top:5px">'+(i.admin?adminTag(i.admin):viaTag(i.via))+'</div></div>'+
         '<span class="t-pill ok">✅</span></div>'+
         '<div class="ad-body" style="display:none"><div class="t-body">'+(i.text?escHtml(i.text):'<span style="color:var(--hint)">No text on file for this delivery.</span>')+'</div>'+
+        (i.admin_note?'<div class="adm-note" data-n="'+n+'" style="font-size:12px;margin-top:8px;padding:7px 9px;border-radius:8px;background:rgba(234,179,8,.12);white-space:pre-wrap;word-break:break-word"></div>':'')+
         '<div style="display:flex;gap:8px;margin-top:10px">'+
           (i.text?'<button class="tk-btn" onclick="copyAdminText('+n+')">📋 Copy</button>':'')+
           (i.delivery_id?'<button class="tk-btn" onclick="openEditDelivery('+n+')">✏️ Edit</button>':'')+
@@ -2057,6 +2075,8 @@ async function loadAdminDelivered(reset){
           (i.can_transfer?'<button class="tk-btn" onclick="openTransferDelivered('+n+')">🔁 Transfer</button>':'')+
         '</div></div></div>').join('')+
       (adminDel.items.length<adminDel.total?'<button class="btn sec" style="margin:4px 0 8px" onclick="loadAdminDelivered(false)">Show more</button>':'');
+    // 📝 the admin's note, read-only here, only through textContent
+    el.querySelectorAll('.adm-note[data-n]').forEach(d=>{ const i=adminDel.items[+d.dataset.n]; d.textContent='📝 '+(i?i.admin_note:''); });
   }catch(e){ if(seq===adminDelSeq) el.innerHTML=failHtml(e); }
 }
 // 🔁 Transfer (owner, 23 Nov 2026): a delivered subscription moves to another customer. The customer typed is
@@ -2157,6 +2177,7 @@ function drawAdminPending(){
         '<span class="t-pill '+(i.state==='needs_info'?'open':'ok')+'">'+(i.asked_again?'⌛ Asked again':i.state==='needs_info'?'⌛ Waiting for customer':'📤 Ready')+'</span></div>'+
         '<div style="margin-top:6px">'+(i.admin?adminTag(i.admin):viaTag(i.via))+'</div>'+
         fieldsHtml(i)+
+        (i.admin_note?'<div class="adm-note" data-fid="'+i.fid+'" style="font-size:12px;margin-top:8px;padding:7px 9px;border-radius:8px;background:rgba(234,179,8,.12);white-space:pre-wrap;word-break:break-word"></div>':'')+
         '<div style="display:flex;gap:8px;margin-top:10px">'+
           (i.imd?'':'<button class="btn" style="margin:0;padding:10px;width:auto;flex:1.4" onclick="openDeliver('+i.fid+')">📤 Deliver</button>')+
           '<button class="tk-btn" style="flex:1;width:auto;white-space:nowrap" onclick="adminChat(\'deliver\','+i.fid+')">'+(i.imd?'🤖 Renew / deliver in chat':'💬 Open in chat')+'</button>'+
@@ -2165,7 +2186,34 @@ function drawAdminPending(){
         (i.can_reask?'<button class="tk-btn" style="margin-top:8px" onclick="openReask('+i.fid+')">🔁 Ask again'+(i.can_switch?' · new / renewal':'')+'</button>':'')+
         (i.asked_again?'<button class="tk-btn" style="margin-top:8px" onclick="cancelReask('+i.fid+')">↩️ Cancel re-ask</button>':'')+
         (i.can_edit||i.can_change?'<button class="tk-btn" style="margin-top:8px" onclick="openEdit('+i.fid+')">✏️ Edit details'+(i.can_change?' · 🔀 subscription':'')+'</button>':'')+
+        '<button class="tk-btn" style="margin-top:8px" onclick="openNote('+i.order_id+')">📝 Note</button>'+
         '</div>').join('')).join('');
+  // the admin's note only ever goes in through textContent
+  el.querySelectorAll('.adm-note[data-fid]').forEach(d=>{ const i=adminPending.find(x=>String(x.fid)===d.dataset.fid); d.textContent='📝 '+(i?i.admin_note:''); });
+}
+// 📝 Admin note on an order (owner, 24 Nov 2026): one per order, the admin only
+let noteOrder=null;
+function openNote(orderId){
+  const i=adminPending.find(x=>x.order_id===orderId);
+  noteOrder=orderId;
+  document.getElementById('noteTitle').textContent='📝 Note · Order #'+orderId;
+  document.getElementById('noteText').value=i&&i.admin_note?i.admin_note:'';
+  document.getElementById('noteMsg').textContent='';
+  document.getElementById('noteOverlay').classList.add('on');
+}
+function closeNote(){ document.getElementById('noteOverlay').classList.remove('on'); noteOrder=null; }
+async function saveNote(clear){
+  const oid=noteOrder; if(!oid) return;
+  const msg=document.getElementById('noteMsg'), btn=document.getElementById('noteSave');
+  const note=clear?'':document.getElementById('noteText').value.trim();
+  if(note.length>1000){ msg.style.color='#dc2626'; msg.textContent='At most 1000 characters.'; return; }
+  btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Saving…';
+  try{
+    const d=await adminPost('/api/admin_order_note',{order_id:oid,note:note});
+    adminPending.forEach(x=>{ if(x.order_id===oid) x.admin_note=d.note||''; });
+    closeNote(); drawAdminPending(); showToast(d.note?'📝 Note saved':'Note cleared');
+  }catch(e){ msg.style.color='#dc2626'; msg.textContent=e.message; }
+  finally{ btn.disabled=false; }
 }
 function deleteAdminOrder(orderId){
   const units=adminPending.filter(x=>x.order_id===orderId); if(!units.length) return;
@@ -2185,7 +2233,9 @@ function openDeliver(fid){
   const i=adminPending.find(x=>x.fid===fid); if(!i) return;
   deliverFid=fid; editDelivery=null;
   document.getElementById('delTitle').textContent=i.name+' · Order #'+i.order_id;
-  document.getElementById('delInfo').innerHTML=escHtml(i.customer)+'<div style="margin:5px 0">'+(i.admin?adminTag(i.admin):viaTag(i.via))+'</div>'+(i.state==='needs_info'?'<br>The customer has not sent their details yet.':'')+((i.fields&&i.fields.length)||i.info?fieldsHtml(i):'')+prevHtml(i);
+  document.getElementById('delInfo').innerHTML=escHtml(i.customer)+'<div style="margin:5px 0">'+(i.admin?adminTag(i.admin):viaTag(i.via))+'</div>'+(i.state==='needs_info'?'<br>The customer has not sent their details yet.':'')+((i.fields&&i.fields.length)||i.info?fieldsHtml(i):'')+prevHtml(i)+
+    (i.admin_note?'<div id="delNote" style="font-size:12px;margin-top:8px;padding:7px 9px;border-radius:8px;background:rgba(234,179,8,.12);white-space:pre-wrap;word-break:break-word"></div>':'');
+  if(i.admin_note) document.getElementById('delNote').textContent='📝 '+i.admin_note;
   document.getElementById('delLabel').textContent='Account details to send to the customer — fill in what is missing';
   document.getElementById('delNotifyRow').style.display='none';
   document.getElementById('delAccessBox').style.display=''; document.getElementById('delAccess').value='';
@@ -2257,7 +2307,7 @@ async function openEdit(fid){
   document.getElementById('editTitle').textContent='✏️ Edit details';
   document.getElementById('editSub').textContent='Loading…';
   document.getElementById('editTypes').innerHTML=''; document.getElementById('editFields').innerHTML='';
-  ['editChange','editChangeBody'].forEach(id=>{ const b=document.getElementById(id); b.innerHTML=''; b.style.display='none'; });
+  ['editChange','editChangeBody','editNote'].forEach(id=>{ const b=document.getElementById(id); b.innerHTML=''; b.style.display='none'; });
   document.getElementById('editSend').style.display='none'; document.getElementById('editSend').textContent='💾 Save changes'; msg.textContent='';
   document.getElementById('editOverlay').classList.add('on');
   try{
@@ -2267,6 +2317,7 @@ async function openEdit(fid){
     if(!d.ok) throw new Error(d.error||('HTTP '+resp.status));
     editD=d;
     document.getElementById('editTitle').textContent='✏️ '+d.name+' · Order #'+d.order_id;
+    const en=document.getElementById('editNote'); en.style.display=d.admin_note?'':'none'; en.textContent=d.admin_note?'📝 '+d.admin_note:'';
     editType=d.account_type==='renew'?'renew':'new'; editVals=Object.assign({},d.fields||{});
     if(d.can_change){ drawEditChange(); return; }
     if(!d.editable){ document.getElementById('editSub').textContent=d.problem||'These details can\'t be edited now.'; return; }

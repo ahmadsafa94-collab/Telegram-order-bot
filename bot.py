@@ -1070,6 +1070,8 @@ def db_init():
         # 🧾 New order (by admin), 23 Nov 2026: a sale made outside the bot. source = 'admin', the admin's free-text
         # customer name/note, and the coworker it is registered for (column I of the delivered sheet only).
         ("source", "TEXT"), ("admin_label", "TEXT"), ("admin_coworker", "TEXT"),
+        # 📝 the admin's own note on an order (24 Nov 2026): shown to the admin only, never to a customer
+        ("admin_note", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE orders ADD COLUMN {column} {coltype}")
@@ -3696,6 +3698,43 @@ def _order_coworker_id(order_id: int):
     return row[0] if row and row[0] else None
 
 
+# ── 📝 Admin note on an order (owner, 24 Nov 2026) ───────────────────
+# "Add an option to add a note by the admin for pending orders that will be under the details, visible for the admin
+# only." One plain-text note per order (orders.admin_note), set, changed or cleared by the admin only (Mini App
+# POST /api/admin_order_note, or 📝 Note in the chat). Only the admin's own views read it: never a customer, coworker,
+# the support chatbot, @Utdreg_bot or the delivered sheet.
+ADMIN_NOTE_MAX = 1000
+
+
+def db_get_admin_note(order_id: int) -> str:
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT admin_note FROM orders WHERE id = ?", (order_id,)).fetchone()
+    conn.close()
+    return (row[0] or "") if row else ""
+
+
+def db_admin_notes(order_ids) -> dict:
+    """{order id: note} of the orders that have one."""
+    ids = sorted({int(i) for i in order_ids})
+    if not ids:
+        return {}
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT id, admin_note FROM orders WHERE admin_note IS NOT NULL AND admin_note != '' AND id IN (%s)"
+                        % ",".join("?" * len(ids)), ids).fetchall()
+    conn.close()
+    return dict(rows)
+
+
+def db_set_admin_note(order_id: int, note) -> bool:
+    """Sets (or with an empty note clears) the order's admin note. False when there's no such order."""
+    note = (note or "").strip()
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("UPDATE orders SET admin_note = ? WHERE id = ?", (note or None, order_id))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
 def db_get_order(order_id: int):
     # Explicit column list (not SELECT *) so existing code that unpacks this
     # tuple keeps working even after new columns are added to the table.
@@ -4355,6 +4394,7 @@ ADMIN_FLOW_KEYS = [
     "awaiting_ticket_edit_answer",
     "awaiting_credentials_fulfilment",
     "awaiting_admin_message_for_order",
+    "awaiting_admin_note_for_order",
     "awaiting_edit_delivery",
     "awaiting_edit_delivery_notify", "edit_delivery_new_text",
     "awaiting_new_sub_field", "new_sub_data",
@@ -4402,6 +4442,7 @@ ADMIN_STEP_WORDS = {
     "awaiting_credentials_fulfilment": "the account details",
     "imd_manual_cred": "the iMD login",
     "awaiting_admin_message_for_order": "your message to the customer",
+    "awaiting_admin_note_for_order": "the order's 📝 admin note",
     "awaiting_comment_for_order": "your comment",
     "awaiting_reject_comment_for_order": "the rejection reason",
     "awaiting_resend_message_for_fulfilment": "the message to send again",
@@ -4436,7 +4477,8 @@ ADMIN_AS_CUSTOMER_KEYS = [
 
 def _admin_step_order(user_data: dict):
     """The order number the admin's current step is about, if it is about one."""
-    for key in ("awaiting_admin_message_for_order", "awaiting_comment_for_order", "awaiting_reject_comment_for_order"):
+    for key in ("awaiting_admin_message_for_order", "awaiting_comment_for_order", "awaiting_reject_comment_for_order",
+                "awaiting_admin_note_for_order"):
         if isinstance(user_data.get(key), int) and not isinstance(user_data.get(key), bool):
             return user_data[key]
     fid = user_data.get("awaiting_credentials_fulfilment") or (user_data.get("imd_manual_cred") or {}).get("fulfilment_id")
@@ -12672,7 +12714,9 @@ def db_admin_delivered(query: str = "", offset: int = 0, limit: int = ADMIN_PAGE
     # who each order came through (shown as a tag, and searchable by coworker name)
     via = _order_via(i["order_id"] for i in items)
     transfers = db_delivery_transfers(i["delivery_id"] for i in items)
+    notes = db_admin_notes(i["order_id"] for i in items)
     for i in items:
+        i["admin_note"] = notes.get(i["order_id"], "")   # 📝 read-only here (24 Nov 2026)
         i["via"] = via.get(i["order_id"])
         i["transfer"] = transfers.get(i["delivery_id"])   # 🔁 from @old (date)
         i["can_transfer"] = bool(i["delivery_id"]) and not i["via"]   # not a coworker's order
@@ -12797,6 +12841,7 @@ def db_admin_pending() -> list:
         "SELECT id, info_json FROM fulfilment WHERE id IN (%s)" % ",".join("?" * len(rows)), [r[0] for r in rows]).fetchall())
     conn.close()
     out = []
+    notes = db_admin_notes(r[1] for r in rows)
     for fid, oid, uid, uname, iid, unit_no, state, created in rows:
         alabel, acw = _admin_order_info(oid) if uid == ADMIN_ORDER_USER_ID else (None, None)
         by_admin = acw is not None
@@ -12819,6 +12864,7 @@ def db_admin_pending() -> list:
             "can_edit": _reask_can_switch(iid) and _edit_unit_problem(db_get_fulfilment(fid)) is None,
             # 🔀 Change subscription (24 Nov 2026), in the same ✏️ sheet
             "can_change": _change_item_problem(db_get_fulfilment(fid)) is None,
+            "admin_note": notes.get(oid, ""),   # 📝 (24 Nov 2026)
         })
     return out
 
@@ -13118,6 +13164,30 @@ async def http_admin_create_order(request):
     state = (db_get_fulfilment(fid) or (None,) * 6)[5]
     return web.json_response({"ok": True, "order_id": order_id, "fulfilment_id": fid, "state": state,
                               "name": MENU[item_id][0], "coworker": coworker_name}, headers=headers)
+
+
+async def http_admin_order_note(request):
+    """POST ?uid&tok {order_id, note}: 📝 the admin's note on an order (empty clears it). Admin only."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        data = await request.json()
+        order_id, note = data["order_id"], data.get("note")
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if isinstance(order_id, bool) or not isinstance(order_id, int) or not (note is None or isinstance(note, str)):
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    note = (note or "").strip()
+    if len(note) > ADMIN_NOTE_MAX:
+        return web.json_response({"ok": False, "error": f"The note is {len(note)} characters; it can be at most "
+                                                        f"{ADMIN_NOTE_MAX}."}, status=400, headers=headers)
+    if not db_set_admin_note(order_id, note):
+        return web.json_response({"ok": False, "error": f"Order #{order_id} no longer exists."}, status=404, headers=headers)
+    logger.info("Order #%s: admin note %s", order_id, "set" if note else "cleared")
+    return web.json_response({"ok": True, "note": note}, headers=headers)
 
 
 async def http_admin_reask(request):
@@ -15123,6 +15193,8 @@ async def start_api_server(application):
     api_app.router.add_post("/api/admin_reask", http_admin_reask)
     api_app.router.add_get("/api/unit_details", http_unit_details)
     api_app.router.add_options("/api/unit_details", http_imd_search_options)
+    api_app.router.add_post("/api/admin_order_note", http_admin_order_note)
+    api_app.router.add_options("/api/admin_order_note", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_change_unit_item", http_admin_change_unit_item)
     api_app.router.add_options("/api/admin_change_unit_item", http_set_coworker_price_options)
     api_app.router.add_post("/api/edit_unit_details", http_edit_unit_details)
@@ -16858,6 +16930,43 @@ async def inbox_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("Inbox:", reply_markup=_inbox_summary_keyboard())
 
 
+async def admin_note_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """📝 Note (anote:<order id>) on the admin's pending order / order view: waits for the note's text ("-" clears it)."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+    if not db_get_order(order_id):
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"Order #{order_id} no longer exists.")
+        return
+    clear_admin_flow_state(context.user_data)
+    context.user_data["awaiting_admin_note_for_order"] = order_id
+    now = db_get_admin_note(order_id)
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=(
+        f"📝 Type the note for order #{order_id} (only you see it; at most {ADMIN_NOTE_MAX} characters). "
+        "Send - to clear it, /cancel to keep it as it is." + (f"\n\nNow: {now}" if now else "")))
+
+
+async def admin_note_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """The admin's typed 📝 note (or "-" to clear it)."""
+    order_id = context.user_data.get("awaiting_admin_note_for_order")
+    if not order_id:
+        return
+    text = (update.message.text or "").strip()
+    if len(text) > ADMIN_NOTE_MAX:
+        await update.message.reply_text(f"That's {len(text)} characters; the note can be at most {ADMIN_NOTE_MAX}. "
+                                        "Send a shorter one, or /cancel.")
+        return
+    context.user_data.pop("awaiting_admin_note_for_order", None)
+    note = "" if text == "-" else text
+    if not db_set_admin_note(order_id, note):
+        await update.message.reply_text(f"Order #{order_id} no longer exists.")
+        return
+    await update.message.reply_text(f"📝 Note on order #{order_id} " + ("saved." if note else "cleared."))
+
+
 async def admin_msg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin tapped '💬 Message Customer' — wait for their next text and
     forward it, tagged with which order it's about."""
@@ -17020,6 +17129,9 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         + (f"Credentials sent: {delivered_at[:19]}\n" if delivered_at else "")
         + f"\n{format_fulfilment_info(item_id, info_json)}"
     )
+    note = db_get_admin_note(order_id)
+    if note:
+        text += f"\n\n📝 Admin note: {note}"
     asked_again = _reask_waiting(fulfilment_id, state)
     if asked_again:
         prev_lines = "\n".join(f"{l}: {v}" for l, v in _reask_prev_fields(fulfilment_id)) or "(none)"
@@ -17066,6 +17178,7 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     dm_btn = _dm_button(username)
     if dm_btn:
         buttons.append([dm_btn])
+    buttons.append([InlineKeyboardButton("📝 Note", callback_data=f"anote:{order_id}")])
     buttons.append([InlineKeyboardButton("🗑 Delete", callback_data=f"pdel:{fulfilment_id}")])
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="apend_back")])
 
@@ -17738,6 +17851,7 @@ async def http_unit_details(request):
         # 🔀 Change subscription (24 Nov 2026): only ever in the admin's answer
         change_problem = _change_item_problem(row)
         out.update(can_change=change_problem is None, change_problem=change_problem or "", item_id=row[3],
+                   admin_note=db_get_admin_note(row[1]),
                    by_admin=row[2] == ADMIN_ORDER_USER_ID,
                    all_fields={k: str(v) for k, v in info.items() if isinstance(v, (str, int, float))})
         if change_problem is None:
@@ -19030,6 +19144,9 @@ async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_CHAT_ID:
         if context.user_data.get("awaiting_admin_message_for_order"):
             await admin_message_reply(update, context)
+            return
+        if context.user_data.get("awaiting_admin_note_for_order"):
+            await admin_note_reply(update, context)
             return
         if context.user_data.get("awaiting_reject_comment_for_order"):
             await reject_comment_reply(update, context)
@@ -21298,6 +21415,9 @@ def _build_order_lookup_view(order_id: int):
         text += f"Credentials sent: {delivered_at[:19]}\n\nCredentials:\n{credentials}"
     else:
         text += "\nNo credentials delivered yet."
+    note = db_get_admin_note(oid)
+    if note:
+        text += f"\n\n📝 Admin note: {note}"
 
     # List each delivered item separately (an order can contain several
     # products) so the admin can pick exactly which one to edit.
@@ -21316,6 +21436,7 @@ def _build_order_lookup_view(order_id: int):
     conn.close()
 
     buttons = [] if by_admin else [[InlineKeyboardButton("💬 Message Customer", callback_data=f"admin_msg:{oid}")]]
+    buttons.append([InlineKeyboardButton("📝 Note", callback_data=f"anote:{oid}")])
     dm_btn = _dm_button(username)
     if dm_btn:
         buttons.append([dm_btn])
@@ -23403,6 +23524,7 @@ def main():
     app.add_handler(CallbackQueryHandler(pending_delete_execute, pattern=r"^pdel_yes:"))
     app.add_handler(CallbackQueryHandler(pending_clear_delivered, pattern=r"^pclear:"))
     app.add_handler(CallbackQueryHandler(admin_msg_start, pattern=r"^admin_msg:"))
+    app.add_handler(CallbackQueryHandler(admin_note_start, pattern=r"^anote:"))
     app.add_handler(CallbackQueryHandler(admin_msg_cancel, pattern=r"^admin_msg_cancel:"))
     app.add_handler(CallbackQueryHandler(customer_reply_start, pattern=r"^cust_reply:"))
     app.add_handler(CallbackQueryHandler(inbox_list, pattern=r"^inbox:"))
