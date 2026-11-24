@@ -2650,6 +2650,9 @@ async function openAdminOrder(){
     +'<input id="aoDate" class="cw-input" type="date" aria-label="Sale date">'
     +lbl('Customer name / note (optional, only in your lists)')
     +'<input id="aoLabel" class="cw-input" type="text" maxlength="100" autocomplete="off" placeholder="e.g. Ahmad (WhatsApp)" aria-label="Customer name or note">'
+    +lbl('Customer (optional: Telegram ID or @username; the order becomes theirs)')
+    +'<input id="aoCustomer" class="cw-input" type="text" maxlength="64" autocomplete="off" spellcheck="false" placeholder="e.g. 123456789 or @name" aria-label="Customer">'
+    +'<div id="aoCustMsg" style="font-size:12px;margin-top:4px;min-height:14px"></div>'
     +'<div id="aoMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>'
     +'<button class="btn" id="aoSave" onclick="saveAdminOrder()">🧾 Save order</button>'
     +'<button class="btn sec" style="margin-top:8px" onclick="closeAdminOrder()">Cancel</button>';
@@ -2664,7 +2667,21 @@ async function openAdminOrder(){
   document.getElementById('aoSearch').oninput=e=>drawAdminOrderItems(e.target.value);
   document.getElementById('aoItem').onchange=()=>aoItemChanged(true);
   cw.onchange=()=>{ cwName.style.display=cw.value==='-1'?'':'none'; if(cw.value==='-1') cwName.focus(); };
+  // 👤 the customer typed is resolved and shown before saving, like 🔁 Transfer (24 Nov 2026)
+  document.getElementById('aoCustomer').oninput=()=>{ clearTimeout(aoCustTimer); aoCustTimer=setTimeout(aoCheckCustomer,400); };
   aoItemChanged(true);
+}
+let aoCustTimer=null, aoCustSeq=0;
+async function aoCheckCustomer(){
+  const box=document.getElementById('aoCustMsg'), v=document.getElementById('aoCustomer').value.trim(), seq=++aoCustSeq;
+  if(!v){ box.textContent=''; return; }
+  box.style.color='var(--hint)'; box.textContent='Checking…';
+  try{
+    const d=await adminPost('/api/admin_create_order',{action:'customer',customer:v});
+    if(seq!==aoCustSeq) return;
+    box.style.color=d.warning?'#d97706':'var(--hint)';
+    box.textContent='→ '+d.label+' · ID '+d.user_id+(d.warning?' · ⚠️ '+d.warning:'')+' · gets the order and every message';
+  }catch(e){ if(seq===aoCustSeq){ box.style.color='#dc2626'; box.textContent=e.message; } }
 }
 function drawAdminOrderItems(q){
   const sel=document.getElementById('aoItem'), keep=sel.value; q=(q||'').trim().toLowerCase();
@@ -2707,8 +2724,10 @@ async function saveAdminOrder(){
   btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Saving…';
   try{
     const d=await adminPost('/api/admin_create_order',{item_id:item,price:price,details:details,
-      coworker_id:cwId,coworker_name:cwId===-1?cwOther:'',label:document.getElementById('aoLabel').value.trim(),date:day});
-    closeAdminOrder(); showToast('🧾 Saved · '+d.name+' · Order #'+d.order_id+(d.state==='delivered'?' · delivered to your chat':' · in Pending'));
+      coworker_id:cwId,coworker_name:cwId===-1?cwOther:'',label:document.getElementById('aoLabel').value.trim(),date:day,
+      customer:document.getElementById('aoCustomer').value.trim()});
+    closeAdminOrder(); showToast('🧾 Saved · '+d.name+' · Order #'+d.order_id+(d.customer?' · for '+d.customer.label:'')+
+      (d.state==='delivered'?(d.customer?' · delivered to them':' · delivered to your chat'):' · in Pending'));
     if(ADMIN_EDIT&&document.getElementById('pSubs').classList.contains('on')) loadAdminDelivered(true);
     if(ADMIN_EDIT&&document.getElementById('pPending').classList.contains('on')) renderAdminPending();
   }catch(e){ bad(e.message); }

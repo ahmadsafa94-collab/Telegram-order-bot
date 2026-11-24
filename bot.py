@@ -1552,6 +1552,7 @@ def _sheet_row_for(order_id: int, user_id: int, item_id: str, message: str, acce
                        (order_id,)).fetchone()
     conn.close()
     by_admin = bool(row) and row[1] == ADMIN_ORDER_SOURCE
+    no_customer = by_admin and user_id == ADMIN_ORDER_USER_ID   # 👤 one for a customer has their K/L (24 Nov 2026)
     if coworker_name is None and by_admin:
         coworker_name = row[3] or "Me"
     coworker = db_get_coworker(row[0]) if row and row[0] else None
@@ -1561,8 +1562,8 @@ def _sheet_row_for(order_id: int, user_id: int, item_id: str, message: str, acce
     h_value = access or (", ".join(serials) if serials and (imd or item_id in UPTODATE_AI_TRIGGER_ITEMS
                                                                  or item_id == "uptodate_ai_bundle_3m") else "")
     sheet_row = dsheet.build_row(name, item_id or "", (delivered_utc or datetime.utcnow()) + timedelta(hours=REPORT_UTC_OFFSET),
-                                 message, h_value, coworker_col, order_id, "" if by_admin else user_id,
-                                 (row[2] or "") if by_admin else (db_get_username(user_id) or ""))
+                                 message, h_value, coworker_col, order_id, "" if no_customer else user_id,
+                                 (row[2] or "") if no_customer else (db_get_username(user_id) or ""))
     return (dsheet.IMD_TAB if imd else dsheet.MAIN_TAB), sheet_row
 
 
@@ -13221,6 +13222,20 @@ def parse_combo(item_id):
         else None
 
 
+def _admin_order_customer(text) -> tuple:
+    """👤 The customer an order by the admin is for (owner, 24 Nov 2026: "assign it to a specific customer by customer id
+    or Telegram id"): (user_id, label, warning) via resolve_customer_ref, or ValueError with what to tell the admin.
+    Never the admin himself, user 0 or a coworker's login (their orders go through coworker_id)."""
+    uid, label, warning = resolve_customer_ref(text)
+    if uid == ADMIN_ORDER_USER_ID:
+        raise ValueError("That isn't a customer's Telegram ID.")
+    if uid == ADMIN_CHAT_ID:
+        raise ValueError("That's your own account: leave the customer empty for an order by you.")
+    if db_get_user_coworker(uid):
+        raise ValueError(f"{label} is logged in as a coworker: their orders are placed from their own Shop.")
+    return uid, label, warning
+
+
 async def http_admin_create_order(request):
     """🧾 New order (by admin) in the admin Mini App: {item_id, price, details (the product's account details, as the
     cart collects them: account_type new|renew + its fields), coworker_id (0 = Me, -1 = coworker_name typed by the
@@ -13249,6 +13264,21 @@ async def http_admin_create_order(request):
         return web.json_response({"ok": True, "products": products, "coworkers": coworkers, "today": today,
                                   "earliest": earliest},
                                  headers=headers)
+    if data.get("action") == "customer":
+        # 👤 the customer typed, resolved and shown before saving (like 🔁 Transfer)
+        try:
+            uid, label, warning = _admin_order_customer(data.get("customer"))
+        except ValueError as exc:
+            return bad(str(exc))
+        return web.json_response({"ok": True, "user_id": uid, "label": label, "warning": warning}, headers=headers)
+    owner, owner_label = ADMIN_ORDER_USER_ID, ""
+    if isinstance(data.get("customer"), str) and data["customer"].strip():
+        try:
+            owner, owner_label, _ = _admin_order_customer(data["customer"])
+        except ValueError as exc:
+            return bad(str(exc))
+    elif data.get("customer") not in (None, ""):
+        return bad("Type the customer's Telegram ID or @username.")
     item_id = data.get("item_id")
     combo = parse_combo(item_id)                # 🔗 a plan + an AI add-on: two items in the order (24 Nov 2026)
     if combo:
@@ -13291,11 +13321,12 @@ async def http_admin_create_order(request):
         when = _admin_order_when(data.get("date"))
     except ValueError as exc:
         return bad(str(exc))
-    info, problem = _admin_order_details(item_id, data.get("details"))
+    info, problem = _admin_order_details(item_id, data.get("details"), user_id=owner)
     if problem:
         return bad(problem)
 
-    order_id = db_create_order(ADMIN_ORDER_USER_ID, None, items, round(float(price), 2))
+    # 👤 for a customer: the order and its units are theirs, everything goes to them like a normal paid order
+    order_id = db_create_order(owner, (db_get_username(owner) or None) if owner else None, items, round(float(price), 2))
     stamp = when.isoformat()
     conn = sqlite3.connect(DB_PATH)
     # created_at/paid_at on the sale's day (the sales, the daily Excel, 📈); delivery and its sheet row use the real day
@@ -13305,8 +13336,8 @@ async def http_admin_create_order(request):
     conn.close()
     db_set_payment_method(order_id, ADMIN_ORDER_METHOD)
     if info.get("account_type") == "new" and (info.get("email") or info.get("username")):
-        db_record_used_credentials(ADMIN_ORDER_USER_ID, item_id, info.get("email"), info.get("username"))
-    db_add_fulfilment_items(order_id, ADMIN_ORDER_USER_ID, items)
+        db_record_used_credentials(owner, item_id, info.get("email"), info.get("username"))
+    db_add_fulfilment_items(order_id, owner, items)
     conn = sqlite3.connect(DB_PATH)
     # the plan's unit gets the details; an add-on takes them from it when the queue reaches it
     fid = conn.execute("SELECT id FROM fulfilment WHERE order_id = ? AND item_id = ? ORDER BY id", (order_id, item_id)).fetchone()[0]
@@ -13318,9 +13349,26 @@ async def http_admin_create_order(request):
     local_day = (when + timedelta(hours=REPORT_UTC_OFFSET)).date()
     logger.info("Admin order #%s: %s, %s USD, for %s (%s), %s", order_id, item_id, price, coworker_name, local_day,
                 info.get("account_type"))
-    # the normal path from here (no finalize_order_confirmation: no customer, referral credit or payments post)
-    await start_order_fulfilment(_HttpContext(request.app["application"], ADMIN_CHAT_ID), order_id,
-                                 ADMIN_ORDER_USER_ID, items)
+    told = None
+    if owner:
+        # one message first; the normal path then asks for what's missing or delivers
+        products = ", ".join(MENU[i][0] for i in items)
+        conn = sqlite3.connect(DB_PATH)
+        waiting = conn.execute("SELECT item_id FROM fulfilment WHERE order_id = ? AND COALESCE(info_json, '') IN ('', '{}')",
+                               (order_id,)).fetchall()
+        conn.close()
+        asks = [i for (i,) in waiting if _register_kind(i) in ("imd", "generic") and i not in UPTODATE_AI_ON_ACCOUNT]
+        nxt = ("please send your account details for it when asked below." if asks else
+               "we'll deliver it here soon.")
+        try:
+            await request.app["application"].bot.send_message(
+                chat_id=owner, text=f"🧾 Order #{order_id} was created for you: {products} — {nxt}")
+            told = True
+        except Exception:
+            told = False
+            logger.exception("Admin order #%s: couldn't tell customer %s", order_id, owner)
+    # the normal path from here (no finalize_order_confirmation: no referral credit or payments post)
+    await start_order_fulfilment(_HttpContext(request.app["application"], ADMIN_CHAT_ID), order_id, owner, items)
     if local_day < (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date():
         # a finished day changed: a fresh DAILY_SALES line, so the nightly sync updates that day in the owner's sheet
         try:
@@ -13331,6 +13379,7 @@ async def http_admin_create_order(request):
     name = MENU[item_id][0] + (f" + {MENU[combo[1]][0]}" if combo else "")
     return web.json_response({"ok": True, "order_id": order_id, "fulfilment_id": fid, "state": state,
                               "name": name, "coworker": coworker_name,
+                              **({"customer": {"user_id": owner, "label": owner_label, "told": told}} if owner else {}),
                               **({"addon_fulfilment_id": addon_fid} if addon_fid else {})}, headers=headers)
 
 
