@@ -13006,6 +13006,8 @@ def db_admin_pending() -> list:
             # 🔀 Change subscription (24 Nov 2026), in the same ✏️ sheet
             "can_change": _change_item_problem(db_get_fulfilment(fid)) is None,
             "admin_note": notes.get(oid, ""),   # 📝 (24 Nov 2026)
+            # 🤖 Send to @Utdreg_bot by hand (24 Nov 2026)
+            "can_utd_push": iid in UTD_AUTOMATION_ITEMS and bool(AUTOMATION_API_URL),
         })
     return out
 
@@ -15433,6 +15435,8 @@ async def start_api_server(application):
     api_app.router.add_post("/api/edit_unit_details", http_edit_unit_details)
     api_app.router.add_options("/api/edit_unit_details", http_set_coworker_price_options)
     api_app.router.add_options("/api/admin_reask", http_set_coworker_price_options)
+    api_app.router.add_post("/api/admin_utd_push", http_admin_utd_push)
+    api_app.router.add_options("/api/admin_utd_push", http_set_coworker_price_options)
     api_app.router.add_post("/api/admin_sheet", http_admin_sheet)
     api_app.router.add_options("/api/admin_sheet", http_set_coworker_price_options)
     api_app.router.add_post("/api/delivered_sheet_renewal", http_delivered_sheet_renewal)
@@ -17395,6 +17399,9 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     if edit_url:
         # ✏️ Edit details (23 Nov 2026): the Mini App's sheet, not a second chat form
         buttons.append([InlineKeyboardButton("✏️ Edit details", web_app=WebAppInfo(url=edit_url))])
+    if item_id in UTD_AUTOMATION_ITEMS and AUTOMATION_API_URL and state != "delivered":
+        # 🤖 Send to @Utdreg_bot by hand (24 Nov 2026): a pending order there, as the push job sends it
+        buttons.append([InlineKeyboardButton("🤖 Send to @Utdreg_bot", callback_data=f"utdpush:{fulfilment_id}")])
     if item_id not in IMD_TRIGGER_ITEMS and AUTOMATION_API_URL:
         buttons.append([InlineKeyboardButton("🤖 Run automation", callback_data=f"asite:runorder:{fulfilment_id}")])
     # Anything that isn't a no-details item (code delivery, manual-access
@@ -23128,6 +23135,129 @@ async def edit_force_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
+# ── 🤖 Send to @Utdreg_bot by hand (owner, 24 Nov 2026) ─────────────
+# A pending UpToDate plan unit the push job missed (or that @Utdreg_bot lost) goes to it from the admin Mini App's
+# Pending tab or the chat's pending order view, with the payload automation_push_job sends, and is recorded in
+# automation_outbox as sent (info_hash = the details' digest), so the job doesn't send it again.
+
+def _utd_push_problem(row, order) -> str:
+    """Why this unit can't be sent to @Utdreg_bot by hand, or ''."""
+    if not row:
+        return "That item no longer exists."
+    if row[3] not in UTD_AUTOMATION_ITEMS:
+        return "Only an UpToDate plan goes to @Utdreg_bot."
+    if not order or order[5] not in ("paid", "delivered"):
+        return "This order isn't paid."
+    if row[5] == "delivered":
+        return "This item was already delivered."
+    if _reask_waiting(row[0], row[5]):
+        return "The customer is being asked for the details again: it goes to @Utdreg_bot when they send them."
+    if (row[6] or "").strip() in ("", "{}", "null"):
+        return "No details yet: fill them with ✏️ Edit details or ask the customer."
+    if row[5] != "awaiting_delivery":
+        return "This item isn't ready yet (its details are still being taken)."
+    return ""
+
+
+async def utd_push_unit(fid: int, force: bool = False) -> dict:
+    """🤖 Send to @Utdreg_bot: never sent → a new pending order there; sent → an update (as ✏️ Edit details does, so
+    what it started from older details is let go: busy refuses, needs_force unless force); taken off its list (closed)
+    → reopen, back to 📥 Pending orders. {ok, how: new|updated|reopened, note} or
+    {ok: False, error, status, busy?, needs_force?}. @Utdreg_bot down: the outbox is left as it was (the job retries)."""
+    if not AUTOMATION_API_URL or not CATALOG_API_KEY:
+        return {"ok": False, "status": 503, "error": "@Utdreg_bot isn't set up (AUTOMATION_API_URL)."}
+    async with unit_lock(fid):
+        row = db_get_fulfilment(fid)
+        problem = _utd_push_problem(row, db_get_order(row[1]) if row else None)
+        if problem:
+            return {"ok": False, "status": 404 if not row else 409, "error": problem}
+        conn = sqlite3.connect(DB_PATH)
+        ob = conn.execute("SELECT info_hash, sent_at, closed_sent, reask_pending FROM automation_outbox "
+                          "WHERE fulfilment_id = ?", (fid,)).fetchone()
+        conn.close()
+        if ob and ob[3]:
+            return {"ok": False, "status": 409, "error": (
+                "@Utdreg_bot hasn't heard the 🔁 ask-again yet; it's told within a minute. Try again after that.")}
+        closed = bool(ob and (ob[2] or ob[0] == "reopen"))
+        sent = bool(ob and (ob[1] or closed))
+        try:
+            info = json.loads(row[6]) if row[6] else {}
+        except ValueError:
+            info = {}
+        payload = _utd_order_payload(row[:7], info if isinstance(info, dict) else {})
+        payload["update"] = sent
+        if closed:
+            payload.update(reopen=True, edit=True, force=True)   # as automation_push_job's reopen
+        elif sent:
+            payload.update(edit=True, force=bool(force))
+        status, body = await _automation_post("/api/order_pending", payload)
+        if status == 200 and body.get("ok"):
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("INSERT INTO automation_outbox (fulfilment_id, info_hash, sent_at, tries, error) VALUES (?, ?, ?, 0, NULL) "
+                         "ON CONFLICT(fulfilment_id) DO UPDATE SET info_hash = excluded.info_hash, sent_at = excluded.sent_at, "
+                         "closed_sent = NULL, tries = 0, error = NULL, alerted = 0",
+                         (fid, hashlib.sha256((row[6] or "").encode()).hexdigest(),
+                          datetime.utcnow().isoformat(timespec="seconds")))
+            conn.commit(); conn.close()
+            how = "reopened" if body.get("reopened") else "new" if body.get("new") else "updated"
+            note = {"new": "Sent to @Utdreg_bot as a new order", "updated": "Sent to @Utdreg_bot: updated",
+                    "reopened": "Sent to @Utdreg_bot: reopened"}[how]
+            if body.get("superseded"):
+                note += f" ({body['superseded']})"
+            logger.info("Order #%s unit %s sent to @Utdreg_bot by hand (%s)", row[1], fid, how)
+            return {"ok": True, "how": how, "note": note}
+        error = str(body.get("error") or body.get("reason") or status)[:300]
+        if status == 409:
+            return {"ok": False, "status": 409, "busy": bool(body.get("busy")),
+                    "needs_force": bool(body.get("needs_force")) and not force, "error": error}
+        if status in (502, 503, 504):
+            return {"ok": False, "status": 502, "error": (
+                f"Couldn't reach @Utdreg_bot: {error}. Nothing was changed; it's sent by itself once it answers.")}
+        return {"ok": False, "status": 502, "error": f"@Utdreg_bot didn't take it: {error}"}
+
+
+async def http_admin_utd_push(request):
+    """POST ?uid&tok {fulfilment_id, force}: 🤖 Send to @Utdreg_bot (utd_push_unit). Admin only."""
+    from aiohttp import web
+    headers = _post_cors_headers()
+    _, err = _admin_shop_request(request)
+    if err:
+        return err
+    try:
+        data = await request.json()
+        fid = data["fulfilment_id"]
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    if isinstance(fid, bool) or not isinstance(fid, int):
+        return web.json_response({"ok": False, "error": "Invalid request"}, status=400, headers=headers)
+    result = await utd_push_unit(fid, force=bool(data.get("force")))
+    if not result.get("ok"):
+        return web.json_response({"ok": False, "error": result.get("error"), "busy": bool(result.get("busy")),
+                                   "needs_force": bool(result.get("needs_force"))},
+                                 status=result.get("status") or 409, headers=headers)
+    return web.json_response({"ok": True, "how": result["how"], "note": result["note"]}, headers=headers)
+
+
+async def utd_push_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🤖 Send to @Utdreg_bot in the chat's pending order view (utdpush:<fid>, utdpushf:<fid> = send anyway)."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    kind, _, raw = query.data.partition(":")
+    fid = int(raw)
+    result = await utd_push_unit(fid, force=kind == "utdpushf")
+    if result.get("ok"):
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"🤖 {result['note']}.")
+    elif result.get("needs_force"):
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"⚠️ {result['error']}",
+                                       reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                                           "🤖 Send anyway", callback_data=f"utdpushf:{fid}")]]))
+    else:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"⚠️ {result['error']}")
+
+
 async def http_deliver_unit(request):
     """POST from @Utdreg_bot (X-Api-Key) when the admin approved a registration (kind new) or renewal (kind renew) that
     came from this order unit: {fulfilment_id, order_id, kind, username, password, access, number, sheet_row}. Delivers
@@ -23955,6 +24085,7 @@ def main():
     app.add_handler(CallbackQueryHandler(ask_resend_force, pattern=r"^askresend_f:"))
     app.add_handler(CallbackQueryHandler(ask_resend_cancel, pattern=r"^askresend_c:"))
     app.add_handler(CallbackQueryHandler(edit_force_tap, pattern=r"^editforce:"))
+    app.add_handler(CallbackQueryHandler(utd_push_tap, pattern=r"^utdpushf?:\d+$"))
     app.add_handler(CallbackQueryHandler(resend_cred_tap, pattern=r"^resendcred:"))
     app.add_handler(CallbackQueryHandler(coworker_add_start, pattern=r"^coworker_add$"))
     app.add_handler(CallbackQueryHandler(coworker_back, pattern=r"^coworker_back$"))

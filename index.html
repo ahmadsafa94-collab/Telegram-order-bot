@@ -2186,6 +2186,7 @@ function drawAdminPending(){
         (i.can_reask?'<button class="tk-btn" style="margin-top:8px" onclick="openReask('+i.fid+')">🔁 Ask again'+(i.can_switch?' · new / renewal':'')+'</button>':'')+
         (i.asked_again?'<button class="tk-btn" style="margin-top:8px" onclick="cancelReask('+i.fid+')">↩️ Cancel re-ask</button>':'')+
         (i.can_edit||i.can_change?'<button class="tk-btn" style="margin-top:8px" onclick="openEdit('+i.fid+')">✏️ Edit details'+(i.can_change?' · 🔀 subscription':'')+'</button>':'')+
+        (i.can_utd_push?'<button class="tk-btn" style="margin-top:8px" onclick="utdPush('+i.fid+')">🤖 Send to @Utdreg_bot</button>':'')+
         '<button class="tk-btn" style="margin-top:8px" onclick="openNote('+i.order_id+')">📝 Note</button>'+
         '</div>').join('')).join('');
   // the admin's note only ever goes in through textContent
@@ -2277,6 +2278,24 @@ function cancelReask(fid){
       showToast(d.note||'Re-ask cancelled'); renderAdminPending();
     }catch(e){ showToast(e.message); }
   });
+}
+// 🤖 Send to @Utdreg_bot by hand (owner, 24 Nov 2026): new / updated / reopened there; busy or a result awaiting
+// approval says so (the latter offers Send anyway)
+let utdPushBusy=false;
+async function utdPush(fid,force){
+  if(utdPushBusy) return; utdPushBusy=true;
+  try{
+    const resp=await fetch(withAuth('/api/admin_utd_push'),{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({fulfilment_id:fid,force:!!force})});
+    const data=await resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
+    if(!data.ok){
+      if(data.needs_force) askConfirm((data.error||'')+' Send anyway?',()=>utdPush(fid,true));
+      else showToast(data.error||'Could not send it to @Utdreg_bot.');
+      return;
+    }
+    showToast(data.how==='new'?'Sent to @Utdreg_bot as a new order':data.how==='reopened'?'Sent to @Utdreg_bot: reopened':'Sent to @Utdreg_bot: updated');
+  }catch(e){ showToast('Network error — please try again.'); }
+  finally{ utdPushBusy=false; }
 }
 function closeReask(){ document.getElementById('reaskOverlay').classList.remove('on'); reaskFid=null; }
 async function sendReask(force){
