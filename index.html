@@ -2178,6 +2178,8 @@ function drawAdminPending(){
         '<div style="margin-top:6px">'+(i.admin?adminTag(i.admin):viaTag(i.via))+'</div>'+
         fieldsHtml(i)+
         (i.admin_note?'<div class="adm-note" data-fid="'+i.fid+'" style="font-size:12px;margin-top:8px;padding:7px 9px;border-radius:8px;background:rgba(234,179,8,.12);white-space:pre-wrap;word-break:break-word"></div>':'')+
+        // a plan's add-on code the customer already has (an order from before the merge, 24 Nov 2026)
+        ((i.addons_sent||[]).length?'<div class="adm-sent" data-fid="'+i.fid+'" style="font-size:12px;margin-top:8px;white-space:pre-wrap;word-break:break-word;color:var(--hint)"></div>':'')+
         '<div style="display:flex;gap:8px;margin-top:10px">'+
           (i.imd?'':'<button class="btn" style="margin:0;padding:10px;width:auto;flex:1.4" onclick="openDeliver('+i.fid+')">📤 Deliver</button>')+
           '<button class="tk-btn" style="flex:1;width:auto;white-space:nowrap" onclick="adminChat(\'deliver\','+i.fid+')">'+(i.imd?'🤖 Renew / deliver in chat':'💬 Open in chat')+'</button>'+
@@ -2191,6 +2193,7 @@ function drawAdminPending(){
         '</div>').join('')).join('');
   // the admin's note only ever goes in through textContent
   el.querySelectorAll('.adm-note[data-fid]').forEach(d=>{ const i=adminPending.find(x=>String(x.fid)===d.dataset.fid); d.textContent='📝 '+(i?i.admin_note:''); });
+  el.querySelectorAll('.adm-sent[data-fid]').forEach(d=>{ const i=adminPending.find(x=>String(x.fid)===d.dataset.fid); d.textContent=i?(i.addons_sent||[]).join('\n'):''; });
 }
 // 📝 Admin note on an order (owner, 24 Nov 2026): one per order, the admin only
 let noteOrder=null;

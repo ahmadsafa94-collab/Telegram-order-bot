@@ -522,6 +522,18 @@ def delivery_title(did, item_id: str) -> str:
     return unit_title(item_id, db_deliveries_addons([did]).get(did) if did else None)
 
 
+def addon_sent_lines(addons) -> list:
+    """What the customer already got for a plan's add-ons before its delivery (an order from before the merge: the
+    Telegram bot code sent at payment), so it stays visible while the plan is pending: one line each."""
+    out = []
+    for a in addons_list(addons):
+        if a.get("code") and a.get("sent"):
+            out.append(f"🤖 {addon_short_name(a['id'])}: already sent, code {a['code']} (@Up2down_bot → /Redeem {a['code']})")
+        elif a.get("sent") and a.get("earlier"):
+            out.append(f"🤖 {addon_short_name(a['id'])}: already sent:\n{a['earlier'][-1]}")
+    return out
+
+
 def db_set_unit_addons(fid: int, addons: list, conn=None):
     own = conn is None
     conn = conn or sqlite3.connect(DB_PATH)
@@ -6446,11 +6458,13 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=query.from_user.id, text=prompt)
         return
 
+    sent_before = addon_sent_lines(db_units_addons([fulfilment_id]).get(fulfilment_id))
     await query.edit_message_text(
         f"⏳ *{md_escape(name)}* (Order #{order_id})\n\n"
         "Your payment is confirmed and we have everything we need. Your account is being "
         "prepared and will be delivered here shortly — please bear with us.\n\n"
-        "If it's been more than 48 hours, contact support from the menu.",
+        "If it's been more than 48 hours, contact support from the menu."
+        + "".join("\n\n" + md_escape(l) for l in sent_before),
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=back,
     )
@@ -13100,6 +13114,7 @@ def db_admin_pending() -> list:
         out.append({
             "fid": fid, "order_id": oid, "item_id": iid, "name": title, "unit": unit_no,
             "addons": [a["id"] for a in addons.get(fid, [])],
+            "addons_sent": addon_sent_lines(addons.get(fid)),   # a code the customer already has (older orders)
             "user_id": uid, "customer": (alabel or "🧾 by admin") if by_admin else (f"@{uname}" if uname else str(uid)),
             "state": state, "date": (created or "")[:10],
             # 🧾 an order by the admin (23 Nov 2026): tagged like the Delivered tab; no customer to ask again
@@ -17479,6 +17494,8 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     note = db_get_admin_note(order_id)
     if note:
         text += f"\n\n📝 Admin note: {note}"
+    for line in addon_sent_lines(db_units_addons([fulfilment_id]).get(fulfilment_id)):
+        text += f"\n\n{line}"
     asked_again = _reask_waiting(fulfilment_id, state)
     if asked_again:
         prev_lines = "\n".join(f"{l}: {v}" for l, v in _reask_prev_fields(fulfilment_id)) or "(none)"
@@ -20541,13 +20558,22 @@ def _addon_merge_actions(conn) -> list:
                              f"WHERE order_id = ? AND item_id IN ({pmarks}) ORDER BY id",
                              (order_id, *sorted(UPTODATE_PLAN_ITEMS))).fetchall()
         mine = [p for p in plans if p[2] == user_id]
+        if item_id in UPTODATE_AI_ON_ACCOUNT and mine:
+            # an on-account add-on goes with the plan whose login it copied (for_account); else by its number
+            ident = _login_ident(_unit_info(info_json))
+            infos = {p[0]: _login_ident(_unit_info(conn.execute("SELECT info_json FROM fulfilment WHERE id = ?",
+                                                                  (p[0],)).fetchone()[0])) for p in mine}
+            hit = [p for p in mine if ident and ident & infos[p[0]]]
+            mine = hit + [p for p in mine if p not in hit] if hit else mine
+            if hit:
+                unit_no = 1
         dels = conn.execute("SELECT id, user_id, message FROM deliveries WHERE order_id = ? AND item_id = ? ORDER BY id",
                             (order_id, item_id)).fetchall()
         same_kind = conn.execute("SELECT id FROM fulfilment WHERE order_id = ? AND item_id = ? ORDER BY id",
                                  (order_id, item_id)).fetchall()
         if len(same_kind) > 1:   # several of this add-on: each its own deliveries by rank (one each)
             rank = [r[0] for r in same_kind].index(fid)
-            dels = [dels[rank]] if len(dels) == len(same_kind) else None
+            dels = [] if not dels else ([dels[rank]] if len(dels) == len(same_kind) else None)
         skip = None
         if not mine:
             skip = "no Uptodate plan of the same customer in the order (transferred apart?)"
@@ -20589,6 +20615,10 @@ def _addon_merge_actions(conn) -> list:
     return out
 
 
+def _login_ident(info: dict) -> set:
+    return {str(info.get(k) or "").strip().lower() for k in ("email", "username", "login_username")} - {""}
+
+
 def migrate_addon_units() -> int:
     """Plan + add-on as ONE subscription (owner, 24 Nov 2026), for the orders from before: each Uptodate AI add-on
     unit goes onto its plan's unit (the nth plan unit of the same order and customer). Logged first as a dry run, each
@@ -20621,6 +20651,8 @@ def migrate_addon_units() -> int:
             code = info.get("code") or (db_get_meta(f"bundle_code_sent:{fid}") or "")
             if code and code != "pool empty, admin told":
                 entry.update(code=code, sent=True)
+            elif code:
+                entry.update(sent=True, by_hand=True)   # the pool was empty then: the admin sends that code by hand
             elif dels:
                 entry["sent"] = True   # delivered without a code we know (by hand): don't send another one
             if dels:
@@ -21682,7 +21714,7 @@ async def _addon_delivery_text(context, fulfilment_id: int, order_id: int, user_
             continue
         tg = "Uptodate AI (Telegram Bot) - 1 Year"
         code = a.get("code")
-        if not code and not a.get("sent"):
+        if not code and not a.get("sent") and not a.get("by_hand"):
             serial = db_pop_serial(pool)
             if serial:
                 serial_id, code = serial
@@ -21691,10 +21723,15 @@ async def _addon_delivery_text(context, fulfilment_id: int, order_id: int, user_
                 db_set_unit_addons(fulfilment_id, addons)   # kept at once: a failed send doesn't take a second code
         if code:
             lines.append(f"🤖 {tg}:\n1️⃣ Click on @Up2down_bot\n2️⃣ Type /Redeem {code}")
+        elif a.get("by_hand"):
+            # the pool was empty (at payment, or at an earlier delivery): the admin sends it by hand, no new code
+            lines.append(f"🤖 {tg}: your code is sent to you separately.")
+            no_code.append(a)
         elif a.get("sent"):
             lines.append(f"🤖 {tg}: its code was sent to you earlier.")
         else:
             lines.append(f"🤖 {tg}: your code follows shortly.")
+            a["by_hand"], changed = True, True   # a re-send doesn't take a code: the admin sends this one
             no_code.append(a)
     if changed:
         db_set_unit_addons(fulfilment_id, addons)
@@ -21709,8 +21746,8 @@ async def _tell_admin_addon_pool_empty(context, order_id: int, user_id: int, add
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
             text=(f"⚠️ Order #{order_id} — the Uptodate AI (Telegram Bot) code of {addon_short_name(addon['id'])} wasn't "
-                  f"sent: the codes pool is empty ({SERIAL_POOL_LABELS.get(pool, pool)}). The login was delivered. Add "
-                  f"codes (➕ Add Serials) and send the customer "
+                  f"in the message: the codes pool was empty ({SERIAL_POOL_LABELS.get(pool, pool)}) when it was paid or "
+                  f"first delivered, so it's sent by hand (no code is taken for it). The login was delivered. Send the customer "
                   f"({_admin_order_who(order_id) if user_id == ADMIN_ORDER_USER_ID else f'ID {user_id}'}) one with: "
                   "Click @Up2down_bot, type /Redeem <code>."))
     except Exception:
@@ -23487,6 +23524,7 @@ async def utd_push_unit(fid: int, force: bool = False) -> dict:
             return {"ok": False, "status": 409, "error": (
                 "@Utdreg_bot hasn't heard the 🔁 ask-again yet; it's told within a minute. Try again after that.")}
         sent = bool(ob and (ob[1] or ob[2] or ob[0] == "reopen"))
+        adds = db_units_addons([fid]).get(fid)   # the plan's add-ons count in the digest (its title, 24 Nov 2026)
         try:
             info = json.loads(row[6]) if row[6] else {}
         except ValueError:
@@ -23498,13 +23536,14 @@ async def utd_push_unit(fid: int, force: bool = False) -> dict:
         status, body = await _automation_post("/api/order_pending", payload)
         if status == 200 and body.get("ok"):
             now_row = db_get_fulfilment(fid)
-            same = bool(now_row) and now_row[6] == row[6] and now_row[5] == "awaiting_delivery"
+            same = bool(now_row) and now_row[6] == row[6] and now_row[5] == "awaiting_delivery" \
+                and db_units_addons([fid]).get(fid) == adds
             conn = sqlite3.connect(DB_PATH)
             if same:
                 conn.execute("INSERT INTO automation_outbox (fulfilment_id, info_hash, sent_at, tries, error) VALUES (?, ?, ?, 0, NULL) "
                              "ON CONFLICT(fulfilment_id) DO UPDATE SET info_hash = excluded.info_hash, sent_at = excluded.sent_at, "
                              "closed_sent = NULL, tries = 0, error = NULL, alerted = 0",
-                             (fid, hashlib.sha256((row[6] or "").encode()).hexdigest(),
+                             (fid, _utd_digest(row[6], adds),
                               datetime.utcnow().isoformat(timespec="seconds")))
             else:
                 # re-asked / edited while it was on its way: sent, but what was written meanwhile (its hash or
@@ -23530,7 +23569,7 @@ async def utd_push_unit(fid: int, force: bool = False) -> dict:
         if status in (502, 503, 504):
             # the job sends it by itself only when it's new to it or changed since (and new enough for the job)
             retried = fid > int(db_get_meta("automation_push_from") or 0) and \
-                (not ob or ob[0] != hashlib.sha256((row[6] or "").encode()).hexdigest())
+                (not ob or ob[0] != _utd_digest(row[6], adds))
             return {"ok": False, "status": 502, "error": (
                 f"Couldn't reach @Utdreg_bot: {error}. Nothing was changed; " +
                 ("it's sent by itself once it answers." if retried else "tap 🤖 Send to @Utdreg_bot again later."))}
@@ -23800,7 +23839,7 @@ async def http_order_logins(request):
         except ValueError:
             info = {}
         items.append({
-            "item": unit_title(item_id, adds),
+            "item": unit_title(item_id, adds), "addons_sent": addon_sent_lines(adds),
             "username": info.get("login_username") or info.get("username") or info.get("email") or "",
             "password": info.get("login_password") or info.get("password") or "",
         })
