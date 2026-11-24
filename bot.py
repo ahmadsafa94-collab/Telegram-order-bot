@@ -2064,23 +2064,24 @@ def db_reconcile_restored_order(order_id: int) -> str:
 
 def _release_admin_credentials(conn, order_id: int, fulfilment_id: int = None):
     """🧾 An order by the admin being deleted: the email/username it took (used_credentials of user 0) are freed, so the
-    admin can enter the sale again with the same details (23 Nov 2026). A customer's stay, as before."""
+    admin can enter the sale again with the same details (23 Nov 2026). A customer's stay, as before. 👤 One the admin
+    made for a customer (24 Nov 2026) frees that customer's rows: always under each unit's own user_id."""
     src = conn.execute("SELECT source FROM orders WHERE id = ?", (order_id,)).fetchone()
     if not src or src[0] != "admin":
         return
-    q, args = "SELECT item_id, info_json FROM fulfilment WHERE order_id = ?", [order_id]
+    q, args = "SELECT item_id, info_json, user_id FROM fulfilment WHERE order_id = ?", [order_id]
     if fulfilment_id is not None:
         q, args = q + " AND id = ?", args + [fulfilment_id]
-    for item_id, info_json in conn.execute(q, args).fetchall():
+    for item_id, info_json, unit_user in conn.execute(q, args).fetchall():
         try:
             info = json.loads(info_json) if info_json else {}
         except ValueError:
             info = {}
         if not isinstance(info, dict) or info.get("account_type") != "new":
             continue
-        conn.execute("DELETE FROM used_credentials WHERE user_id = 0 AND item_id = ? AND "
+        conn.execute("DELETE FROM used_credentials WHERE user_id = ? AND item_id = ? AND "
                      "LOWER(COALESCE(email, '')) = LOWER(?) AND LOWER(COALESCE(username, '')) = LOWER(?)",
-                     (item_id, info.get("email") or "", info.get("username") or ""))
+                     (unit_user or 0, item_id, info.get("email") or "", info.get("username") or ""))
 
 
 def db_delete_order(order_id: int, snapshot: bool = True):
@@ -12973,14 +12974,15 @@ def db_admin_pending() -> list:
     out = []
     notes = db_admin_notes(r[1] for r in rows)
     for fid, oid, uid, uname, iid, unit_no, state, created in rows:
-        alabel, acw = _admin_order_info(oid) if uid == ADMIN_ORDER_USER_ID else (None, None)
-        by_admin = acw is not None
+        alabel, acw = _admin_order_info(oid)
+        # 👤 an order by the admin for a customer (24 Nov 2026) keeps its 🧾 tag but is theirs like any order
+        by_admin = acw is not None and uid == ADMIN_ORDER_USER_ID
         out.append({
             "fid": fid, "order_id": oid, "item_id": iid, "name": MENU.get(iid, (iid,))[0], "unit": unit_no,
             "user_id": uid, "customer": (alabel or "🧾 by admin") if by_admin else (f"@{uname}" if uname else str(uid)),
             "state": state, "date": (created or "")[:10],
             # 🧾 an order by the admin (23 Nov 2026): tagged like the Delivered tab; no customer to ask again
-            "admin": {"label": alabel or "", "coworker": acw or "Me"} if by_admin else None,
+            "admin": {"label": alabel or "", "coworker": acw or "Me", "customer": not by_admin} if acw is not None else None,
             "info": format_fulfilment_info(iid, info.get(fid)) if info.get(fid) else "",
             "fields": [{"label": l, "value": v} for l, v in fulfilment_info_fields(info.get(fid))],
             "imd": iid in IMD_TRIGGER_ITEMS, "template": delivery_template_kind(iid), "via": via.get(oid), "order_done": done.get(oid, 0),
@@ -13277,6 +13279,11 @@ async def http_admin_create_order(request):
             owner, owner_label, _ = _admin_order_customer(data["customer"])
         except ValueError as exc:
             return bad(str(exc))
+        sent_id = data.get("customer_id")
+        if sent_id is not None and (isinstance(sent_id, bool) or sent_id != owner):
+            # what the admin saw in the preview isn't who it resolves to now
+            return web.json_response({"ok": False, "error": f"The customer now resolves to {owner_label} (ID {owner}), "
+                                      "not the one shown. Check it again."}, status=409, headers=headers)
     elif data.get("customer") not in (None, ""):
         return bad("Type the customer's Telegram ID or @username.")
     item_id = data.get("item_id")
@@ -23157,8 +23164,8 @@ async def http_deliver_unit(request):
     # and the app-only remark (owner, 20 Nov 2026)
     # 🧾 an order by the admin registered for a coworker (column I) gets the coworker form too
     text = (coworker_credentials_text(row[3], username, password)
-            if _order_coworker_id(order_id) or (_admin_order_info(order_id)[1] or "Me") != "Me"
-            else uptodate_delivery_form(row[3], username, password))
+            if _order_coworker_id(order_id) or (row[2] == ADMIN_ORDER_USER_ID and (_admin_order_info(order_id)[1] or "Me") != "Me")
+            else uptodate_delivery_form(row[3], username, password))   # 👤 a customer's gets the normal form
     try:
         result = await _deliver_credentials(_HttpContext(request.app["application"], ADMIN_CHAT_ID), fid, text,
                                             access=access or None, only_if_undelivered=True,

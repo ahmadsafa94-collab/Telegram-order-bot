@@ -2240,8 +2240,10 @@ function openDeliver(fid){
   document.getElementById('delNotifyRow').style.display='none';
   document.getElementById('delAccessBox').style.display=''; document.getElementById('delAccess').value='';
   // 🧾 an order by the admin: it comes to your chat to forward; registered for a coworker → the coworker's form
-  document.getElementById('delSend').textContent=i.admin?'📤 Send to my chat (to forward)':'📤 Send to customer';
-  const tplOf=i.admin&&i.admin.coworker&&i.admin.coworker!=='Me'?Object.assign({},i,{via:{name:i.admin.coworker}}):i;
+  // 👤 an order by the admin for a customer goes to them with the normal form (24 Nov 2026)
+  const noCust=i.admin&&!i.admin.customer;
+  document.getElementById('delSend').textContent=noCust?'📤 Send to my chat (to forward)':'📤 Send to customer';
+  const tplOf=noCust&&i.admin.coworker&&i.admin.coworker!=='Me'?Object.assign({},i,{via:{name:i.admin.coworker}}):i;
   const box=document.getElementById('delText'); box.value=deliveryTemplate(tplOf); document.getElementById('delMsg').textContent='';
   document.getElementById('delOverlay').classList.add('on');
   setTimeout(()=>{ box.focus(); const k=box.value.indexOf('Username:'); const p=k>=0?k+'Username:'.length:box.value.length; try{ box.setSelectionRange(p,p); }catch(e){} box.scrollTop=0; },150);
@@ -2524,7 +2526,8 @@ function openEditDelivery(n){
   document.getElementById('delInfo').textContent=i.customer;
   document.getElementById('delLabel').textContent='Account details the customer received';
   document.getElementById('delAccessBox').style.display='none';
-  document.getElementById('delNotifyRow').style.display=i.admin?'none':'flex'; document.getElementById('delNotify').checked=!i.admin;
+  const noCust=i.admin&&!i.user_id;   // 👤 a customer-owned admin order can tell its customer
+  document.getElementById('delNotifyRow').style.display=noCust?'none':'flex'; document.getElementById('delNotify').checked=!noCust;
   document.getElementById('delSend').textContent='💾 Save changes';
   document.getElementById('delText').value=i.text||''; document.getElementById('delMsg').textContent='';
   document.getElementById('delOverlay').classList.add('on');
@@ -2668,19 +2671,29 @@ async function openAdminOrder(){
   document.getElementById('aoItem').onchange=()=>aoItemChanged(true);
   cw.onchange=()=>{ cwName.style.display=cw.value==='-1'?'':'none'; if(cw.value==='-1') cwName.focus(); };
   // 👤 the customer typed is resolved and shown before saving, like 🔁 Transfer (24 Nov 2026)
-  document.getElementById('aoCustomer').oninput=()=>{ clearTimeout(aoCustTimer); aoCustTimer=setTimeout(aoCheckCustomer,400); };
+  aoCust=null; ++aoCustSeq;
+  document.getElementById('aoCustomer').oninput=aoCustomerChanged;
   aoItemChanged(true);
 }
-let aoCustTimer=null, aoCustSeq=0;
+// like 🔁 Transfer: typing clears who it resolved to; Save waits for the check of what's typed now and sends that ID
+let aoCustTimer=null, aoCustSeq=0, aoCust=null;
+function aoCustomerChanged(){
+  aoCust=null; ++aoCustSeq; clearTimeout(aoCustTimer);
+  const v=document.getElementById('aoCustomer').value.trim();
+  document.getElementById('aoSave').disabled=!!v;
+  if(!v){ document.getElementById('aoCustMsg').textContent=''; return; }
+  aoCustTimer=setTimeout(aoCheckCustomer,400);
+}
 async function aoCheckCustomer(){
   const box=document.getElementById('aoCustMsg'), v=document.getElementById('aoCustomer').value.trim(), seq=++aoCustSeq;
-  if(!v){ box.textContent=''; return; }
+  if(!v){ box.textContent=''; document.getElementById('aoSave').disabled=false; return; }
   box.style.color='var(--hint)'; box.textContent='Checking…';
   try{
     const d=await adminPost('/api/admin_create_order',{action:'customer',customer:v});
     if(seq!==aoCustSeq) return;
     box.style.color=d.warning?'#d97706':'var(--hint)';
     box.textContent='→ '+d.label+' · ID '+d.user_id+(d.warning?' · ⚠️ '+d.warning:'')+' · gets the order and every message';
+    aoCust={text:v,user_id:d.user_id,label:d.label}; document.getElementById('aoSave').disabled=false;
   }catch(e){ if(seq===aoCustSeq){ box.style.color='#dc2626'; box.textContent=e.message; } }
 }
 function drawAdminOrderItems(q){
@@ -2720,14 +2733,18 @@ async function saveAdminOrder(){
   if(aoForm.earliest&&day<aoForm.earliest) return bad('The date can be at most 365 days back.');
   const cwId=+document.getElementById('aoCw').value, cwOther=document.getElementById('aoCwName').value.trim();
   if(cwId===-1&&!cwOther){ document.getElementById('aoCwName').focus(); return bad('Type the name it was registered for.'); }
+  const custTxt=document.getElementById('aoCustomer').value.trim();
+  if(custTxt&&(!aoCust||aoCust.text!==custTxt)) return bad('Wait for the customer check (or fix it).');
   const details=collectDetails(box)[0]||{};
   btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Saving…';
   try{
     const d=await adminPost('/api/admin_create_order',{item_id:item,price:price,details:details,
       coworker_id:cwId,coworker_name:cwId===-1?cwOther:'',label:document.getElementById('aoLabel').value.trim(),date:day,
-      customer:document.getElementById('aoCustomer').value.trim()});
+      customer:custTxt?String(aoCust.user_id):'',customer_id:custTxt?aoCust.user_id:null});
+    const unreached=d.customer&&d.customer.told===false;
     closeAdminOrder(); showToast('🧾 Saved · '+d.name+' · Order #'+d.order_id+(d.customer?' · for '+d.customer.label:'')+
-      (d.state==='delivered'?(d.customer?' · delivered to them':' · delivered to your chat'):' · in Pending'));
+      (unreached?" · ⚠️ couldn't message them":
+       d.state==='delivered'?(d.customer?' · delivered to them':' · delivered to your chat'):' · in Pending'));
     if(ADMIN_EDIT&&document.getElementById('pSubs').classList.contains('on')) loadAdminDelivered(true);
     if(ADMIN_EDIT&&document.getElementById('pPending').classList.contains('on')) renderAdminPending();
   }catch(e){ bad(e.message); }
