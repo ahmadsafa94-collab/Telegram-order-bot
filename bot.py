@@ -23161,8 +23161,9 @@ def _utd_push_problem(row, order) -> str:
 
 async def utd_push_unit(fid: int, force: bool = False) -> dict:
     """🤖 Send to @Utdreg_bot: never sent → a new pending order there; sent → an update (as ✏️ Edit details does, so
-    what it started from older details is let go: busy refuses, needs_force unless force); taken off its list (closed)
-    → reopen, back to 📥 Pending orders. {ok, how: new|updated|reopened, note} or
+    what it started from older details is let go: busy refuses, needs_force unless force); always with reopen, so one
+    taken off its list (closed, ✋ dismissed, done) comes back to 📥 Pending orders. The outbox digest is written only
+    when the unit didn't change during the send. {ok, how: new|updated|reopened, note} or
     {ok: False, error, status, busy?, needs_force?}. @Utdreg_bot down: the outbox is left as it was (the job retries)."""
     if not AUTOMATION_API_URL or not CATALOG_API_KEY:
         return {"ok": False, "status": 503, "error": "@Utdreg_bot isn't set up (AUTOMATION_API_URL)."}
@@ -23178,32 +23179,41 @@ async def utd_push_unit(fid: int, force: bool = False) -> dict:
         if ob and ob[3]:
             return {"ok": False, "status": 409, "error": (
                 "@Utdreg_bot hasn't heard the 🔁 ask-again yet; it's told within a minute. Try again after that.")}
-        closed = bool(ob and (ob[2] or ob[0] == "reopen"))
-        sent = bool(ob and (ob[1] or closed))
+        sent = bool(ob and (ob[1] or ob[2] or ob[0] == "reopen"))
         try:
             info = json.loads(row[6]) if row[6] else {}
         except ValueError:
             info = {}
         payload = _utd_order_payload(row[:7], info if isinstance(info, dict) else {})
-        payload["update"] = sent
-        if closed:
-            payload.update(reopen=True, edit=True, force=True)   # as automation_push_job's reopen
-        elif sent:
-            payload.update(edit=True, force=bool(force))
+        # always reopen: back to 📥 Pending orders there even when it was closed, ✋ dismissed or done (its guard on a
+        # running / awaiting-approval N/R still holds); as an edit when it was sent before
+        payload.update(update=sent, reopen=True, edit=sent, force=bool(force))
         status, body = await _automation_post("/api/order_pending", payload)
         if status == 200 and body.get("ok"):
+            now_row = db_get_fulfilment(fid)
+            same = bool(now_row) and now_row[6] == row[6] and now_row[5] == "awaiting_delivery"
             conn = sqlite3.connect(DB_PATH)
-            conn.execute("INSERT INTO automation_outbox (fulfilment_id, info_hash, sent_at, tries, error) VALUES (?, ?, ?, 0, NULL) "
-                         "ON CONFLICT(fulfilment_id) DO UPDATE SET info_hash = excluded.info_hash, sent_at = excluded.sent_at, "
-                         "closed_sent = NULL, tries = 0, error = NULL, alerted = 0",
-                         (fid, hashlib.sha256((row[6] or "").encode()).hexdigest(),
-                          datetime.utcnow().isoformat(timespec="seconds")))
+            if same:
+                conn.execute("INSERT INTO automation_outbox (fulfilment_id, info_hash, sent_at, tries, error) VALUES (?, ?, ?, 0, NULL) "
+                             "ON CONFLICT(fulfilment_id) DO UPDATE SET info_hash = excluded.info_hash, sent_at = excluded.sent_at, "
+                             "closed_sent = NULL, tries = 0, error = NULL, alerted = 0",
+                             (fid, hashlib.sha256((row[6] or "").encode()).hexdigest(),
+                              datetime.utcnow().isoformat(timespec="seconds")))
+            else:
+                # re-asked / edited while it was on its way: sent, but what was written meanwhile (its hash or
+                # marker) stays, so the job (or the ask-again) brings @Utdreg_bot up to date
+                conn.execute("INSERT INTO automation_outbox (fulfilment_id, info_hash, sent_at, tries, error) VALUES (?, NULL, ?, 0, NULL) "
+                             "ON CONFLICT(fulfilment_id) DO UPDATE SET sent_at = excluded.sent_at, closed_sent = NULL, "
+                             "tries = 0, error = NULL, alerted = 0",
+                             (fid, datetime.utcnow().isoformat(timespec="seconds")))
             conn.commit(); conn.close()
             how = "reopened" if body.get("reopened") else "new" if body.get("new") else "updated"
             note = {"new": "Sent to @Utdreg_bot as a new order", "updated": "Sent to @Utdreg_bot: updated",
                     "reopened": "Sent to @Utdreg_bot: reopened"}[how]
             if body.get("superseded"):
                 note += f" ({body['superseded']})"
+            if not same:
+                note += " (its details changed meanwhile; @Utdreg_bot gets the new ones by itself)"
             logger.info("Order #%s unit %s sent to @Utdreg_bot by hand (%s)", row[1], fid, how)
             return {"ok": True, "how": how, "note": note}
         error = str(body.get("error") or body.get("reason") or status)[:300]
@@ -23211,8 +23221,12 @@ async def utd_push_unit(fid: int, force: bool = False) -> dict:
             return {"ok": False, "status": 409, "busy": bool(body.get("busy")),
                     "needs_force": bool(body.get("needs_force")) and not force, "error": error}
         if status in (502, 503, 504):
+            # the job sends it by itself only when it's new to it or changed since (and new enough for the job)
+            retried = fid > int(db_get_meta("automation_push_from") or 0) and \
+                (not ob or ob[0] != hashlib.sha256((row[6] or "").encode()).hexdigest())
             return {"ok": False, "status": 502, "error": (
-                f"Couldn't reach @Utdreg_bot: {error}. Nothing was changed; it's sent by itself once it answers.")}
+                f"Couldn't reach @Utdreg_bot: {error}. Nothing was changed; " +
+                ("it's sent by itself once it answers." if retried else "tap 🤖 Send to @Utdreg_bot again later."))}
         return {"ok": False, "status": 502, "error": f"@Utdreg_bot didn't take it: {error}"}
 
 
