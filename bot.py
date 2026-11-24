@@ -11725,6 +11725,70 @@ async def http_payment_details(request):
     return web.json_response(result)
 
 
+def db_replace_unpaid_order_items(order_id: int, user_id: int, order_items: dict, total: float, payment_method: str):
+    """Gives an unpaid order other products (the support chatbot took a payment for them, 24 Nov 2026):
+    items, total and payment method, and its fulfilment units: units of products still in the order are
+    kept (with any details entered in the Mini App), up to the new quantity; the others are removed and
+    missing ones added. Only for an order that isn't paid, so no unit is delivered or running yet."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE orders SET items_json = ?, total = ?, payment_method = ? WHERE id = ? "
+        "AND status IN ('awaiting_payment', 'awaiting_receipt')",
+        (json.dumps(order_items), total, payment_method, order_id),
+    )
+    for fid, item_id, unit_no in conn.execute(
+        "SELECT id, item_id, unit_no FROM fulfilment WHERE order_id = ?", (order_id,)
+    ).fetchall():
+        if unit_no > order_items.get(item_id, 0):
+            conn.execute("DELETE FROM fulfilment WHERE id = ?", (fid,))
+    had_units = conn.execute("SELECT COUNT(*) FROM fulfilment WHERE order_id = ?", (order_id,)).fetchone()[0]
+    conn.commit()
+    conn.close()
+    if had_units:
+        db_add_fulfilment_items(order_id, user_id, order_items)   # the missing units (existing ones are kept)
+
+
+async def _reuse_unpaid_order(application, user_id: int, existing, order_items: dict, payment_method: str):
+    """The customer already has an unpaid order (e.g. an abandoned checkout) when the support chatbot
+    creates one for a payment it took. 409 with that order's id, so the receipt goes onto it instead of a
+    second order. If it holds other products than those paid for, it's changed to them first (same order
+    number, one order with everything paid, 24 Nov 2026), unless credits, a discount code or postpaid
+    credit are on it: then it's refused (no order_id) and the chatbot hands it to the owner."""
+    from aiohttp import web
+    order_id, items_json, credits, discount_code, on_credit = existing
+    try:
+        current = {str(k): int(v) for k, v in json.loads(items_json or "{}").items()}
+    except (ValueError, TypeError, AttributeError):
+        current = {}
+    if current == order_items:
+        return web.json_response(
+            {"error": "the customer already has an unpaid order", "order_id": order_id, "items": current}, status=409
+        )
+    if credits or discount_code or on_credit:
+        return web.json_response(
+            {"error": f"the customer has unpaid order #{order_id} with other products and credits or a discount "
+                      "on it; the owner has to sort it out", "existing_order_id": order_id, "items": current},
+            status=409,
+        )
+    total = _reply_bot_order_total(user_id, order_items)
+    db_replace_unpaid_order_items(order_id, user_id, order_items, total, payment_method)
+    logger.info("create_order: unpaid order #%s for %s changed from %s to %s (chat payment)",
+                order_id, user_id, current, order_items)
+    lines = [f"{qty}x {MENU[i][0]}" for i, qty in order_items.items()]
+    try:
+        await application.bot.send_message(
+            chat_id=user_id,
+            text=(f"🧾 Order #{order_id} was updated through our support chat to what you paid for:\n"
+                  + "\n".join(lines) + f"\n\nTotal: {CURRENCY}{total:.2f}\nPayment method: {payment_method}"),
+        )
+    except Exception:
+        logger.exception("create_order: couldn't notify customer %s about order #%s", user_id, order_id)
+    return web.json_response(
+        {"error": "the customer already has an unpaid order", "order_id": order_id, "items": order_items,
+         "previous_items": current, "updated": True, "total": total}, status=409,
+    )
+
+
 async def http_create_order(request):
     """Creates an order on a customer's behalf when the Mini App's submit
     ("I've Paid ✅") failed and no order was ever created, so the reply bot
@@ -11780,7 +11844,14 @@ async def http_create_order(request):
     if owner_confirmed:
         given = {}
         if info:
-            target = info.pop("item_id", "") or next((i for i in order_items if _register_kind(i) is not None), None)
+            takers = [i for i in order_items if _register_kind(i) not in (None, "none")]
+            target = info.pop("item_id", "")
+            if not target and len(takers) > 1:
+                return web.json_response(
+                    {"error": "several products in the order take account details: send them per product (infos)"},
+                    status=400,
+                )
+            target = target or next(iter(takers), None)
             if target:
                 given[target] = info
         for item_id, fields in infos.items():
@@ -11801,16 +11872,14 @@ async def http_create_order(request):
         )
     conn = sqlite3.connect(DB_PATH)
     existing = conn.execute(
-        "SELECT id FROM orders WHERE user_id = ? AND status IN ('awaiting_payment', 'awaiting_receipt') "
-        "ORDER BY id DESC LIMIT 1",
+        "SELECT id, items_json, COALESCE(credits_applied, 0), discount_code, COALESCE(on_credit, 0) FROM orders "
+        "WHERE user_id = ? AND status IN ('awaiting_payment', 'awaiting_receipt') ORDER BY id DESC LIMIT 1",
         (user_id,),
     ).fetchone()
     user_row = conn.execute("SELECT username FROM users WHERE user_id = ?", (user_id,)).fetchone()
     conn.close()
     if existing and not owner_confirmed:
-        return web.json_response(
-            {"error": "the customer already has an unpaid order", "order_id": existing[0]}, status=409
-        )
+        return await _reuse_unpaid_order(request.app["application"], user_id, existing, order_items, payment_method)
 
     total = _reply_bot_order_total(user_id, order_items)
     order_id = db_create_order(user_id, (user_row[0] if user_row else None) or str(user_id), order_items, total)
