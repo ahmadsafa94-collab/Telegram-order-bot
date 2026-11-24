@@ -11596,7 +11596,47 @@ def reply_bot_payment_method_codes() -> list:
             + CHAT_ONLY_PAYMENT_METHODS)
 
 
-CREATE_ORDER_MAX_UNITS = 5
+# One order holds everything a customer pays for at once (owner, 24 Nov 2026: "one order with all
+# products"), so a chat order can be up to 10 subscriptions.
+CREATE_ORDER_MAX_UNITS = 10
+
+
+def _reply_bot_sellable() -> set:
+    return set(all_toggleable_items()) | {
+        i for i in MANUAL_ACCESS_ITEMS if not ITEM_OVERRIDES.get(i, (None, None, None, False))[3]
+    }
+
+
+def _reply_bot_check_items(requested: dict):
+    """Checks the products of an order the support chatbot is taking ({item_id: quantity}) the same way for
+    /api/payment_details and /api/create_order. Returns (order_items, None) or (None, (error body, status))."""
+    sellable = _reply_bot_sellable()
+    order_items = {}
+    for item_id, qty in requested.items():
+        if item_id not in sellable or item_id not in MENU or qty < 1:
+            return None, ({"error": f"unknown product: {item_id}"}, 400)
+        if db_is_out_of_stock(item_id):
+            return None, ({"error": f"{MENU[item_id][0]} is out of stock"}, 409)
+        order_items[item_id] = order_items.get(item_id, 0) + qty
+    if not order_items or sum(order_items.values()) > CREATE_ORDER_MAX_UNITS:
+        return None, ({"error": f"order between 1 and {CREATE_ORDER_MAX_UNITS} subscriptions"}, 400)
+    problem = addon_problem(order_items)   # Uptodate AI add-ons only with a plan (16 Nov 2026)
+    if problem:
+        return None, ({"error": problem}, 400)
+    return order_items, None
+
+
+def _parse_items_param(text: str) -> dict:
+    """"id1,id2:2" (or "id2 x2") → {id1: 1, id2: 2}; raises ValueError on a bad quantity."""
+    items = {}
+    for part in (text or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.fullmatch(r"([\w.-]+)\s*(?::|\s[x×]|×|\*)\s*(\d+)", part)
+        item_id, qty = (m.group(1), int(m.group(2))) if m else (part, 1)
+        items[item_id] = items.get(item_id, 0) + qty
+    return items
 
 
 def _reply_bot_order_total(user_id: int, order_items: dict) -> float:
@@ -11619,20 +11659,29 @@ def _plain_for_chat(text: str) -> str:
 
 
 async def http_payment_details(request):
-    """The exact payment details and amount for one product and payment method, as this bot shows them at
+    """The exact payment details and amount for an order and payment method, as this bot shows them at
     checkout, so the support chatbot can take an order in its own chat: it sends these to the customer, then
     creates the order and submits the receipt through /api/create_order and /api/submit_receipt.
-    Query: user_id, item_id, method (a payment method code). X-Api-Key protected. `started` says whether the
-    customer has opened this bot, which an order (and its delivery here) needs."""
+    Query: user_id, method (a payment method code) and the products: item_id (repeatable) and/or
+    items=id1,id2:2 (several subscriptions paid at once, 24 Nov 2026: the amount is their total, priced like
+    the order). X-Api-Key protected. `started` says whether the customer has opened this bot, which an
+    order (and its delivery here) needs."""
     from aiohttp import web
     if not _reply_bot_authorized(request):
         return web.json_response({"error": "Unauthorized"}, status=401)
     try:
         user_id = int(request.query["user_id"])
-        item_id = request.query["item_id"].strip()
         method = request.query["method"].strip()
+        requested = {}
+        for item_id in request.query.getall("item_id", []):
+            if item_id.strip():
+                requested[item_id.strip()] = requested.get(item_id.strip(), 0) + 1
+        for item_id, qty in _parse_items_param(request.query.get("items", "")).items():
+            requested[item_id] = requested.get(item_id, 0) + qty
+        if not requested:
+            raise KeyError("item_id")
     except (KeyError, ValueError):
-        return web.json_response({"error": "user_id, item_id and method are needed"}, status=400)
+        return web.json_response({"error": "user_id, item_id (or items) and method are needed"}, status=400)
     codes = {c.lower(): c for c in reply_bot_payment_method_codes()}
     if method.lower() not in codes:
         return web.json_response(
@@ -11641,14 +11690,11 @@ async def http_payment_details(request):
     method = codes[method.lower()]
     if method in CHAT_PAYMENT_METHODS_OFF:
         return web.json_response({"error": f"{method} isn't offered right now"}, status=409)
-    sellable = set(all_toggleable_items()) | {
-        i for i in MANUAL_ACCESS_ITEMS if not ITEM_OVERRIDES.get(i, (None, None, None, False))[3]
-    }
-    if item_id not in sellable or item_id not in MENU:
-        return web.json_response({"error": f"unknown product: {item_id}"}, status=400)
-    if db_is_out_of_stock(item_id):
-        return web.json_response({"error": f"{MENU[item_id][0]} is out of stock"}, status=409)
-    total = _reply_bot_order_total(user_id, {item_id: 1})  # the same price the order will have
+    order_items, refusal = _reply_bot_check_items(requested)
+    if refusal:
+        return web.json_response(refusal[0], status=refusal[1])
+    item_id = next(iter(order_items))
+    total = _reply_bot_order_total(user_id, order_items)  # the same price the order will have
     if method == "Palestine":
         rate = await usd_ils_rate()
         if not rate:
@@ -11665,9 +11711,12 @@ async def http_payment_details(request):
         text = _mini_app_payment_recap(method, total)
     if not text:
         return web.json_response({"error": f"no payment details for {method}"}, status=409)
+    names = [(f"{q}x " if q > 1 else "") + MENU[i][0] for i, q in order_items.items()]
     result = {
-        "method": method, "item_id": item_id, "item": MENU[item_id][0], "amount": amount,
-        "instructions": _plain_for_chat(text), "started": db_user_exists(user_id),
+        "method": method, "item_id": item_id, "item": ", ".join(names), "amount": amount,
+        "items": [{"id": i, "name": MENU[i][0], "quantity": q,
+                   "price": round(_coworker_unit_price(i, user_id) * q, 2)} for i, q in order_items.items()],
+        "total": total, "instructions": _plain_for_chat(text), "started": db_user_exists(user_id),
     }
     if method == "India" and os.path.exists(INDIA_QR_PATH):
         # The same QR image the checkout sends after India's instructions, for the chatbot to send too.
@@ -11684,14 +11733,16 @@ async def http_create_order(request):
     details are collected here after payment is confirmed, and delivery
     stays with this bot.
 
-    JSON body: {user_id, items: {item_id: quantity}, payment_method}.
+    JSON body: {user_id, items: {item_id: quantity}, payment_method}. Everything a customer pays for at
+    once goes in one order (24 Nov 2026), up to CREATE_ORDER_MAX_UNITS subscriptions.
     If the customer already has an unpaid order, nothing is created and that
     order is returned (409 with order_id) so the receipt goes to it instead.
 
     With owner_confirmed: true (only sent when the owner told the reply bot
     the payment is confirmed), the order is created already paid, with
     payer_name, and the optional info {account_type, ...fields} saved on the
-    first unit, so delivery starts straight away (an iMD renewal runs on iMD)
+    first unit (or infos {item_id: {...}}, one per product, for several products),
+    so delivery starts straight away (an iMD renewal runs on iMD)
     instead of waiting for a receipt."""
     from aiohttp import web
     from telegram.ext import CallbackContext
@@ -11706,6 +11757,8 @@ async def http_create_order(request):
         owner_confirmed = body.get("owner_confirmed") is True
         payer_name = str(body.get("payer_name") or "").strip()[:100]
         info = {str(k): str(v).strip() for k, v in (body.get("info") or {}).items()}
+        infos = {str(i): {str(k): str(v).strip() for k, v in (fields or {}).items()}
+                 for i, fields in (body.get("infos") or {}).items()}
     except (ValueError, KeyError, TypeError, AttributeError):
         return web.json_response({"error": "invalid request body"}, status=400)
 
@@ -11716,31 +11769,31 @@ async def http_create_order(request):
         )
     payment_method = codes[payment_method.lower()]
 
-    sellable = set(all_toggleable_items()) | {
-        i for i in MANUAL_ACCESS_ITEMS if not ITEM_OVERRIDES.get(i, (None, None, None, False))[3]
-    }
-    order_items = {}
-    for item_id, qty in requested.items():
-        if item_id not in sellable or item_id not in MENU or qty < 1:
-            return web.json_response({"error": f"unknown product: {item_id}"}, status=400)
-        if db_is_out_of_stock(item_id):
-            return web.json_response({"error": f"{MENU[item_id][0]} is out of stock"}, status=409)
-        order_items[item_id] = qty
-    if not order_items or sum(order_items.values()) > CREATE_ORDER_MAX_UNITS:
-        return web.json_response(
-            {"error": f"order between 1 and {CREATE_ORDER_MAX_UNITS} subscriptions"}, status=400
-        )
-    problem = addon_problem(order_items)   # Uptodate AI add-ons only with a plan (16 Nov 2026)
-    if problem:
-        return web.json_response({"error": problem}, status=400)
+    order_items, refusal = _reply_bot_check_items(requested)
+    if refusal:
+        return web.json_response(refusal[0], status=refusal[1])
 
-    # Account details for the first unit that takes any, checked before anything is created.
-    first_unit = next((i for i in order_items if _register_kind(i) is not None), None)
-    clean_info = None
-    if owner_confirmed and info and first_unit:
-        clean_info, problem = _clean_register_info(_register_kind(first_unit), info)
-        if problem:
-            return web.json_response(problem, status=400)
+    # Account details, checked before anything is created: `info` for one product (its "item_id", else the
+    # first that takes details), `infos` {item_id: {...}} for several. Each goes on that product's first unit;
+    # units without details are collected here after payment as usual.
+    clean_infos = {}
+    if owner_confirmed:
+        given = {}
+        if info:
+            target = info.pop("item_id", "") or next((i for i in order_items if _register_kind(i) is not None), None)
+            if target:
+                given[target] = info
+        for item_id, fields in infos.items():
+            given[item_id] = fields
+        for item_id, fields in given.items():
+            if item_id not in order_items or _register_kind(item_id) is None:
+                return web.json_response({"error": f"account details for {item_id}, which isn't in the order or takes none"}, status=400)
+            if not fields:
+                continue
+            clean, problem = _clean_register_info(_register_kind(item_id), fields)
+            if problem:
+                return web.json_response(problem, status=400)
+            clean_infos[item_id] = clean
 
     if not db_user_exists(user_id):
         return web.json_response(
@@ -11775,15 +11828,15 @@ async def http_create_order(request):
         if payer_name:
             db_set_payer_name(order_id, payer_name)
         db_add_fulfilment_items(order_id, user_id, order_items)
-        if clean_info is not None:
+        for item_id, clean in clean_infos.items():
             conn = sqlite3.connect(DB_PATH)
             row = conn.execute(
                 "SELECT id FROM fulfilment WHERE order_id = ? AND item_id = ? AND state = 'needs_info' ORDER BY id LIMIT 1",
-                (order_id, first_unit),
+                (order_id, item_id),
             ).fetchone()
             conn.close()
             if row:
-                db_set_fulfilment_info(row[0], clean_info)
+                db_set_fulfilment_info(row[0], clean)
         try:
             await application.bot.send_message(
                 chat_id=user_id,
