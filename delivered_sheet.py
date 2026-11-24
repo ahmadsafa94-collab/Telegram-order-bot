@@ -242,8 +242,14 @@ def expiry_date(delivered: date, duration: str):
     return end - timedelta(days=1)
 
 
+_ADDON_PART_RE = re.compile(r"\s*\+\s*Uptodate (?:Expert )?AI\b.*$", re.I)
+
+
 def is_uptodate(item_id: str, name: str) -> bool:
-    """UpToDate accounts are renewed by us every 90 days (not UpToDate AI codes, which are delivered as codes)."""
+    """UpToDate accounts are renewed by us every 90 days (not UpToDate AI codes, which are delivered as codes). A plan
+    with its AI add-on ('… + Uptodate Expert AI (Official App) - 1 Year', one subscription since 24 Nov 2026) is the
+    plan's account: the add-on part of the title doesn't count."""
+    name = _ADDON_PART_RE.sub("", name or "")
     text = f"{item_id} {name}".lower()
     return ("uptodate" in text or item_id.startswith("up_")) and " ai" not in f" {name.lower()}" and "_ai" not in item_id
 

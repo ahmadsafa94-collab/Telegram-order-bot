@@ -431,49 +431,17 @@ UPTODATE_AI_ADDONS = {"uptodate_ai_expert_1y", "uptodate_ai_tg_1y", "uptodate_ai
 UPTODATE_AI_ON_ACCOUNT = {"uptodate_ai_expert_1y", "uptodate_ai_both_1y"}
 
 
-def _addon_details_from_plans(matched: list) -> list:
-    """[(fulfilment_id, item_id, entry)] with each Uptodate AI add-on given the details of the Uptodate account it was
-    ordered with (owner, 16 Nov 2026: one form per account). The Mini App says which (with_plan/with_unit); without
-    that, the add-ons of each type take the plan units in order."""
-    plans = [(iid, e) for _, iid, e in matched if iid in UPTODATE_PLAN_ITEMS]
-    if not plans:
-        return matched
-    by_unit, seen = {}, {}
-    for iid, e in plans:
-        seen[iid] = seen.get(iid, 0) + 1
-        by_unit[(iid, seen[iid])] = e
-    nth, out = {}, []
-    for fid, iid, e in matched:
-        if iid in UPTODATE_AI_ON_ACCOUNT:
-            k = nth[iid] = nth.get(iid, 0) + 1
-            src = by_unit.get((e.get("with_plan"), e.get("with_unit"))) or plans[min(k, len(plans)) - 1][1]
-            details = {key: v for key, v in src.items() if key not in ("id", "with_plan", "with_unit")}
-            e = {**details, "id": iid, "for_account": MENU.get(src.get("id"), (src.get("id"),))[0]}
-        out.append((fid, iid, e))
+def _addon_links(entries) -> list:
+    """[(add-on, plan item, plan unit no)] from the Mini App's items (with_plan/with_unit on an add-on entry): which
+    Uptodate account each add-on was set up with. Entries without them go in order (_fold_addons)."""
+    out = []
+    for e in entries or []:
+        if isinstance(e, dict) and e.get("id") in UPTODATE_AI_ADDONS and e.get("with_plan") in UPTODATE_PLAN_ITEMS:
+            try:
+                out.append((e["id"], e["with_plan"], int(e.get("with_unit") or 1)))
+            except (TypeError, ValueError):
+                pass
     return out
-
-
-def _copy_plan_info_for_addon(order_id: int, fulfilment_id: int) -> bool:
-    """Gives an Uptodate AI add-on with no details yet the details of an Uptodate account in the same order (its
-    unit number picks the plan unit, the last one when there are fewer). False when no account has details yet."""
-    row = db_get_fulfilment(fulfilment_id)
-    if not row or row[6]:
-        return bool(row and row[6])
-    marks = ",".join("?" * len(UPTODATE_PLAN_ITEMS))
-    conn = sqlite3.connect(DB_PATH)
-    plans = conn.execute(f"SELECT item_id, info_json FROM fulfilment WHERE order_id = ? AND item_id IN ({marks}) "
-                         f"AND info_json IS NOT NULL AND info_json != '' ORDER BY id", (order_id, *UPTODATE_PLAN_ITEMS)).fetchall()
-    conn.close()
-    if not plans:
-        return False
-    plan_item, info_json = plans[min(row[4] or 1, len(plans)) - 1]
-    try:
-        info = json.loads(info_json)
-    except ValueError:
-        return False
-    info["for_account"] = MENU.get(plan_item, (plan_item,))[0]
-    db_set_fulfilment_info(fulfilment_id, info)
-    return True
 
 
 def addon_problem(order_items: dict):
@@ -488,6 +456,122 @@ def addon_problem(order_items: dict):
             return (f"At most {plans} of each Uptodate AI add-on: one per Uptodate plan in the order "
                     f"({MENU[i][0]}: {q}).")
     return None
+
+def addons_list(raw) -> list:
+    """A unit's add-ons ([{id, code?, sent?}]) from fulfilment.addons_json / deliveries.addons (a JSON list of dicts
+    or of ids). Bad or empty → []."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw.strip() else []
+        except ValueError:
+            raw = []
+    out = []
+    for a in raw if isinstance(raw, list) else []:
+        a = {"id": a} if isinstance(a, str) else a
+        if isinstance(a, dict) and a.get("id"):
+            out.append(a)
+    return out
+
+
+def addon_short_name(addon: str) -> str:
+    """'Uptodate Expert AI (Official App) - 1 Year' (the menu name without ' add-on')."""
+    return re.sub(r" add-on$", "", MENU.get(addon, (addon,))[0])
+
+
+def unit_title(item_id: str, addons=None) -> str:
+    """The subscription's title: the plan's name + each Uptodate AI add-on it carries (owner, 24 Nov 2026: a plan
+    and its add-on are ONE subscription), e.g. 'Uptodate Online 1 Year - Official App + Uptodate Expert AI (Official
+    App) - 1 Year'. Without add-ons, the menu name as before."""
+    name = MENU.get(item_id, (item_id,))[0] if item_id else ""
+    for a in addons_list(addons):
+        name += f" + {addon_short_name(a['id'])}"
+    return name
+
+
+def db_units_addons(fids) -> dict:
+    """{fulfilment_id: [add-on dicts]} for the units that carry add-ons."""
+    ids = sorted({int(f) for f in fids if f})
+    if not ids:
+        return {}
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT id, addons_json FROM fulfilment WHERE id IN (%s) AND addons_json IS NOT NULL"
+                        % ",".join("?" * len(ids)), ids).fetchall()
+    conn.close()
+    return {fid: addons_list(raw) for fid, raw in rows if addons_list(raw)}
+
+
+def db_deliveries_addons(dids) -> dict:
+    """{delivery_id: [add-on dicts]} for the deliveries of a plan with add-ons."""
+    ids = sorted({int(d) for d in dids if d})
+    if not ids:
+        return {}
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT id, addons FROM deliveries WHERE id IN (%s) AND addons IS NOT NULL"
+                        % ",".join("?" * len(ids)), ids).fetchall()
+    conn.close()
+    return {did: addons_list(raw) for did, raw in rows if addons_list(raw)}
+
+
+def fid_title(fid, item_id: str) -> str:
+    """unit_title for a fulfilment unit by id."""
+    return unit_title(item_id, db_units_addons([fid]).get(fid) if fid else None)
+
+
+def delivery_title(did, item_id: str) -> str:
+    """unit_title for a delivery by id."""
+    return unit_title(item_id, db_deliveries_addons([did]).get(did) if did else None)
+
+
+def db_set_unit_addons(fid: int, addons: list, conn=None):
+    own = conn is None
+    conn = conn or sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE fulfilment SET addons_json = ? WHERE id = ?", (json.dumps(addons) if addons else None, fid))
+    if own:
+        conn.commit()
+        conn.close()
+
+
+def _fold_addons(conn, order_id: int, items: dict, links=None):
+    """Puts the order's Uptodate AI add-ons on its plan units (fulfilment.addons_json) instead of units of their own
+    (owner, 24 Nov 2026). links: [(addon, plan item, plan unit no)] from the Mini App (with_plan/with_unit); the
+    rest go in order to the plan units that don't have that add-on yet. Re-run on an edited order: kept as far as
+    the quantities allow (an add-on already sent stays), the rest re-assigned."""
+    plans = conn.execute("SELECT id, item_id, unit_no, addons_json FROM fulfilment WHERE order_id = ? ORDER BY id",
+                         (order_id,)).fetchall()
+    plans = [p for p in plans if p[1] in UPTODATE_PLAN_ITEMS]
+    if not plans:
+        return
+    cur = {fid: addons_list(raw) for fid, _, _, raw in plans}
+    standalone = dict(conn.execute("SELECT item_id, COUNT(*) FROM fulfilment WHERE order_id = ? GROUP BY item_id",
+                                   (order_id,)).fetchall())   # an older add-on unit of its own (not migrated)
+    want = {a: max(0, int(items.get(a, 0)) - standalone.get(a, 0)) for a in UPTODATE_AI_ADDONS}
+    for a in UPTODATE_AI_ADDONS:   # too many on the units (the order was edited): drop from the last, unsent first
+        have = [fid for fid, *_ in plans if any(x["id"] == a for x in cur[fid])]
+        extra = len(have) - want[a]
+        for fid in sorted(have, key=lambda f: (any(x["id"] == a and x.get("sent") for x in cur[f]), -f)):
+            if extra <= 0:
+                break
+            if any(x["id"] == a and x.get("sent") for x in cur[fid]):
+                continue
+            cur[fid] = [x for x in cur[fid] if x["id"] != a]
+            extra -= 1
+    by_unit = {(iid, no): fid for fid, iid, no, _ in plans}
+    def count(a):
+        return sum(1 for f in cur for x in cur[f] if x["id"] == a)
+    for addon, plan, no in links or []:
+        fid = by_unit.get((plan, no))
+        if addon in want and fid and count(addon) < want[addon] and not any(x["id"] == addon for x in cur[fid]):
+            cur[fid].append({"id": addon})
+    for a in sorted(UPTODATE_AI_ADDONS):
+        for fid, *_ in plans:
+            if count(a) >= want[a]:
+                break
+            if not any(x["id"] == a for x in cur[fid]):
+                cur[fid].append({"id": a})
+    for fid, _, _, raw in plans:
+        if cur[fid] != addons_list(raw):
+            db_set_unit_addons(fid, cur[fid], conn)
+
 
 # Items that need no customer-entered details at all AND can't be
 # auto-delivered (unlike Uptodate AI's serial pool) — access has to be
@@ -1370,6 +1454,12 @@ def db_init():
     # 🔁 Ask for details again (22 Nov 2026): {type: new|renew|null, note, at, prev: the details asked again}.
     if "reask_json" not in [r[1] for r in conn.execute("PRAGMA table_info(fulfilment)").fetchall()]:
         conn.execute("ALTER TABLE fulfilment ADD COLUMN reask_json TEXT")
+    # Plan + add-on as ONE subscription (owner, 24 Nov 2026): the Uptodate AI add-ons ride on their plan's unit
+    # ([{id, code?, sent?}]) and its delivery (the add-on ids, for the title), not as units of their own.
+    if "addons_json" not in [r[1] for r in conn.execute("PRAGMA table_info(fulfilment)").fetchall()]:
+        conn.execute("ALTER TABLE fulfilment ADD COLUMN addons_json TEXT")
+    if "addons" not in [r[1] for r in conn.execute("PRAGMA table_info(deliveries)").fetchall()]:
+        conn.execute("ALTER TABLE deliveries ADD COLUMN addons TEXT")
 
     conn.execute(
         """
@@ -1507,6 +1597,10 @@ def db_init():
     utd_automation_init()
     load_bundled_imd_catalog()
     backfill_imd_years()
+    try:
+        migrate_addon_units()
+    except Exception:
+        logger.exception("Add-on merge migration failed; the orders are as they were")
     db_heal_delivered_pending()
     auto_sites.init(DB_PATH)
     renewals.init(DB_PATH)
@@ -1514,7 +1608,7 @@ def db_init():
 
 def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, message_id: int = None,
                     access: str = None, sheet_row: bool = True, sheet_below: str = "",
-                    delivered_at: datetime = None, coworker_name: str = None) -> int:
+                    delivered_at: datetime = None, coworker_name: str = None, addons=None) -> int:
     """Records one delivered subscription. An order with several products
     produces several rows here, so 'My Subscriptions' can list them
     separately instead of lumping a whole order into one entry.
@@ -1526,21 +1620,23 @@ def db_add_delivery(order_id: int, user_id: int, item_id: str, message: str, mes
     when = delivered_at or datetime.utcnow()
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute(
-        "INSERT INTO deliveries (order_id, user_id, item_id, message, message_id, delivered_at, access) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (order_id, user_id, item_id, message, message_id, when.isoformat(), access),
+        "INSERT INTO deliveries (order_id, user_id, item_id, message, message_id, delivered_at, access, addons) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (order_id, user_id, item_id, message, message_id, when.isoformat(), access,
+         json.dumps([a["id"] for a in addons_list(addons)]) if addons_list(addons) else None),
     )
     delivery_id = cur.lastrowid
     conn.commit()
     conn.close()
     if sheet_row:   # a renewal @Utdreg_bot already wrote into its existing row doesn't get a second one
         _queue_sheet_row(order_id, user_id, item_id, message, access, below=sheet_below,
-                         delivered_utc=delivered_at, coworker_name=coworker_name)
+                         delivered_utc=delivered_at, coworker_name=coworker_name, addons=addons)
     return delivery_id
 
 
 def _sheet_row_for(order_id: int, user_id: int, item_id: str, message: str, access: str = None,
-                   delivered_utc: datetime = None, serials: list = None, coworker_name: str = None) -> tuple:
+                   delivered_utc: datetime = None, serials: list = None, coworker_name: str = None,
+                   addons=None) -> tuple:
     """(tab, row) for the owner's delivered-subscriptions sheet. iMD goes on the iMD tab with the serial(s) used in H;
     a code delivered from the serials pool also has its serial in H. coworker_name (column I) beats the order's
     coworker; an order by the admin (no Telegram customer) has its customer name/note in L and nothing in K."""
@@ -1557,7 +1653,7 @@ def _sheet_row_for(order_id: int, user_id: int, item_id: str, message: str, acce
         coworker_name = row[3] or "Me"
     coworker = db_get_coworker(row[0]) if row and row[0] else None
     coworker_col = coworker_name or (coworker[1] if coworker else "Me")
-    name = MENU.get(item_id, (item_id,))[0] if item_id else ""
+    name = unit_title(item_id, addons)   # a plan + its add-on: one row, titled with both (24 Nov 2026)
     imd = item_id in IMD_TRIGGER_ITEMS
     h_value = access or (", ".join(serials) if serials and (imd or item_id in UPTODATE_AI_TRIGGER_ITEMS
                                                                  or item_id == "uptodate_ai_bundle_3m") else "")
@@ -1568,13 +1664,13 @@ def _sheet_row_for(order_id: int, user_id: int, item_id: str, message: str, acce
 
 
 def _queue_sheet_row(order_id: int, user_id: int, item_id: str, message: str, access: str = None, below: str = "",
-                     delivered_utc: datetime = None, coworker_name: str = None):
+                     delivered_utc: datetime = None, coworker_name: str = None, addons=None):
     """A row for the owner's delivered-subscriptions sheet (sent to Google by sheet_outbox_job). Never lets a
     delivery fail. `below`: a username whose UpToDate row the new one goes right under (a paid renewal for another
     year, owner 20 Nov 2026); at the bottom when that username isn't in the sheet."""
     try:
         tab, sheet_row = _sheet_row_for(order_id, user_id, item_id, message, access, delivered_utc,
-                                        coworker_name=coworker_name)
+                                        coworker_name=coworker_name, addons=addons)
         if below and tab == dsheet.MAIN_TAB:
             username, _, number = below.partition("|")
             dsheet.enqueue_row_below(DB_PATH, tab, sheet_row, username, number)
@@ -1840,12 +1936,17 @@ def queue_receipt_request(context: ContextTypes.DEFAULT_TYPE, order_id: int):
     context.user_data["awaiting_receipt_for_order"] = order_id
 
 
-def db_add_fulfilment_items(order_id: int, user_id: int, items: dict):
+def db_add_fulfilment_items(order_id: int, user_id: int, items: dict, links=None):
     """Records every purchased unit of a paid order so the fulfilment queue
     lives in the database rather than in memory — a redeploy would
     otherwise wipe it and silently strand half-finished orders."""
     conn = sqlite3.connect(DB_PATH)
+    has_plan = any(i in UPTODATE_PLAN_ITEMS and int(q or 0) > 0 for i, q in items.items()) or conn.execute(
+        "SELECT 1 FROM fulfilment WHERE order_id = ? AND item_id IN (%s) LIMIT 1" % ",".join("?" * len(UPTODATE_PLAN_ITEMS)),
+        (order_id, *sorted(UPTODATE_PLAN_ITEMS))).fetchone() is not None
     for item_id, qty in items.items():
+        if has_plan and item_id in UPTODATE_AI_ADDONS:
+            continue   # rides on its plan's unit (_fold_addons below), not a unit of its own (24 Nov 2026)
         for unit_no in range(1, int(qty) + 1):
             try:
                 conn.execute(
@@ -1855,6 +1956,8 @@ def db_add_fulfilment_items(order_id: int, user_id: int, items: dict):
                 )
             except sqlite3.IntegrityError:
                 pass  # already recorded
+    if has_plan:
+        _fold_addons(conn, order_id, items, links)
     conn.commit()
     conn.close()
 
@@ -2115,6 +2218,7 @@ def db_remove_pending_unit(fulfilment_id: int):
     if not row:
         return None
     _, order_id, user_id, item_id, unit_no, state, info_json = row
+    addons = [a["id"] for a in db_units_addons([fulfilment_id]).get(fulfilment_id, [])]   # they go with it (24 Nov 2026)
     db_snapshot_order(order_id)
     conn = sqlite3.connect(DB_PATH)
     _release_admin_credentials(conn, order_id, fulfilment_id)
@@ -2131,13 +2235,15 @@ def db_remove_pending_unit(fulfilment_id: int):
             items = json.loads(order[0])
         except (TypeError, ValueError):
             items = {}
-        if items.get(item_id):
+        gone = [i for i in [item_id] + addons if items.get(i)]
+        if gone:
             price = lambda i: (_coworker_unit_price_by_id(i, order[2]) if order[2] else MENU.get(i, (i, 0))[1])
             worth = sum(price(i) * q for i, q in items.items())
-            share = price(item_id) / worth if worth > 0 else 0
-            items[item_id] -= 1
-            if items[item_id] <= 0:
-                del items[item_id]
+            share = sum(price(i) for i in gone) / worth if worth > 0 else 0
+            for i in gone:
+                items[i] -= 1
+                if items[i] <= 0:
+                    del items[i]
             conn = sqlite3.connect(DB_PATH)
             conn.execute("UPDATE orders SET items_json = ?, total = ? WHERE id = ?",
                          (json.dumps(items), round(float(order[1] or 0) * (1 - share), 2), order_id))
@@ -5077,8 +5183,9 @@ def subscriptions_keyboard(user_id: int):
     if not rows:
         return None
     buttons = []
+    addons = db_deliveries_addons(r[0] for r in rows)
     for delivery_id, order_id, item_id, message, delivered_at in rows:
-        name = MENU.get(item_id, (None,))[0] if item_id else None
+        name = unit_title(item_id, addons.get(delivery_id)) if item_id in MENU else None
         if not name and not order_id and item_id:   # added from the Excel tab under the sheet's own name
             name = item_id
         if not name:
@@ -5108,8 +5215,9 @@ def pending_keyboard(user_id: int):
     if not rows:
         return None
     unpaid_buttons, undelivered_buttons = [], []
+    addons = db_units_addons(r[0] for r in rows)
     for fid, order_id, item_id, unit_no, state, order_status in rows:
-        name = MENU.get(item_id, (item_id,))[0]
+        name = unit_title(item_id, addons.get(fid))
         suffix = f" #{unit_no}" if unit_no > 1 else ""
         btn = InlineKeyboardButton(f"#{order_id} — {name}{suffix}"[:60], callback_data=f"pend:{fid}")
         if order_status in UNPAID_ORDER_STATUSES:
@@ -5689,7 +5797,7 @@ async def show_ticket_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buttons = []
     for delivery_id, item_id, delivered_at in rows:
-        name = MENU.get(item_id, (item_id,))[0] if item_id else f"Delivery #{delivery_id}"
+        name = delivery_title(delivery_id, item_id) if item_id else f"Delivery #{delivery_id}"
         label = name + (f" ({delivered_at[:10]})" if delivered_at else "")
         buttons.append([InlineKeyboardButton(label[:60], callback_data=f"ticketsub:{delivery_id}")])
 
@@ -5735,7 +5843,7 @@ async def uptodate_renewal_menu(update: Update, context: ContextTypes.DEFAULT_TY
 
     buttons = []
     for delivery_id, item_id, delivered_at in rows:
-        name = MENU.get(item_id, (item_id,))[0]
+        name = delivery_title(delivery_id, item_id)
         label = name + (f" ({delivered_at[:10]})" if delivered_at else "")
         buttons.append([InlineKeyboardButton(label[:60], callback_data=f"uptodate_renew_pick:{delivery_id}")])
 
@@ -5762,7 +5870,7 @@ async def uptodate_renewal_pick(update: Update, context: ContextTypes.DEFAULT_TY
 async def _start_uptodate_renewal_ticket(context, query, delivery_id: int, item_id: str):
     """Shared by both the single-subscription and multi-choice paths:
     creates the renewal ticket and starts message collection."""
-    label = MENU.get(item_id, (item_id or "Uptodate",))[0]
+    label = delivery_title(delivery_id, item_id) if item_id else "Uptodate"
     ticket_id = db_create_ticket(
         query.from_user.id, query.from_user.username, "uptodate_renewal",
         subscription_item_id=item_id, subscription_label=label,
@@ -5801,7 +5909,7 @@ async def ticket_subscription_selected(update: Update, context: ContextTypes.DEF
     row = conn.execute("SELECT item_id FROM deliveries WHERE id = ?", (delivery_id,)).fetchone()
     conn.close()
     item_id = row[0] if row else None
-    name = MENU.get(item_id, (item_id or "this subscription",))[0]
+    name = delivery_title(delivery_id, item_id) if item_id else "this subscription"
 
     context.user_data["ticket_sub_item_id"] = item_id
     context.user_data["ticket_sub_label"] = name
@@ -6290,7 +6398,7 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id != query.from_user.id:
         await query.edit_message_text("That order belongs to another account.", reply_markup=back)
         return
-    name = MENU.get(item_id, (item_id,))[0]
+    name = fid_title(row[0], item_id)
 
     order = db_get_order(order_id)
     status = order[5] if order else None
@@ -8035,7 +8143,8 @@ async def send_delivery_promo(context: ContextTypes.DEFAULT_TYPE, user_id: int):
         logger.exception("Failed to send delivery promo message to user %s", user_id)
 
 
-async def post_subscription_to_channel(context: ContextTypes.DEFAULT_TYPE, order_id: int, item_id: str, delivery_message: str):
+async def post_subscription_to_channel(context: ContextTypes.DEFAULT_TYPE, order_id: int, item_id: str, delivery_message: str,
+                                      title: str = None):
     """Posts a delivered subscription to the private Subscriptions channel:
     the product, its login, the date, and the customer. Isolated with its
     own error handling — a failure here must never affect the actual
@@ -8053,7 +8162,7 @@ async def post_subscription_to_channel(context: ContextTypes.DEFAULT_TYPE, order
         return
     _, user_id, username_tg, items_json, total, status, created_at = order
 
-    name = MENU.get(item_id, (item_id or "Subscription",))[0]
+    name = title or MENU.get(item_id, (item_id or "Subscription",))[0]
     who = (_admin_order_who(order_id) if user_id == ADMIN_ORDER_USER_ID
            else f"@{username_tg}" if username_tg else str(user_id))
     date_str = datetime.now().strftime("%Y-%m-%d")
@@ -11251,12 +11360,12 @@ async def http_customer_orders(request):
                 items = json.loads(items_json) or {}
             except (TypeError, ValueError):
                 items = {}
-            states = dict(
-                conn.execute(
-                    "SELECT item_id, GROUP_CONCAT(state) FROM fulfilment WHERE order_id = ? GROUP BY item_id",
-                    (order_id,),
-                ).fetchall()
-            )
+            states = {}
+            for f_item, f_state, f_addons in conn.execute(
+                    "SELECT item_id, state, addons_json FROM fulfilment WHERE order_id = ? ORDER BY id", (order_id,)):
+                # an Uptodate AI add-on rides on its plan's unit and takes its state (24 Nov 2026)
+                for k in [f_item] + [a["id"] for a in addons_list(f_addons)]:
+                    states[k] = (states[k] + "," if k in states else "") + f_state
             result.append({
                 "order_id": order_id,
                 "created_at": created_at,
@@ -12829,20 +12938,20 @@ def db_admin_delivered(query: str = "", offset: int = 0, limit: int = ADMIN_PAGE
         "(SELECT u.username FROM users u WHERE u.user_id = f.user_id) END, o.created_at, o.source, o.admin_label, "
         "o.admin_coworker FROM fulfilment f JOIN orders o ON o.id = f.order_id WHERE f.state = 'delivered' "
         "ORDER BY f.id").fetchall()   # a unit transferred without its order (🔁, 23 Nov 2026) shows its own customer
-    dels = conn.execute("SELECT id, order_id, item_id, message, delivered_at FROM deliveries ORDER BY id").fetchall()
+    dels = conn.execute("SELECT id, order_id, item_id, message, delivered_at, addons FROM deliveries ORDER BY id").fetchall()
     conn.close()
     by_key = {}
-    for did, oid, iid, msg, dat in dels:
-        by_key.setdefault((oid, iid), []).append((did, msg, dat))
+    for did, oid, iid, msg, dat, adds in dels:
+        by_key.setdefault((oid, iid), []).append((did, msg, dat, adds))
     seen, items = {}, []
     for fid, oid, iid, uid, uname, created, source, alabel, acw in ful:   # oldest first: the nth unit gets the nth delivery
         n = seen.get((oid, iid), 0)
         seen[(oid, iid)] = n + 1
         lst = by_key.get((oid, iid), [])
-        did, msg, dat = lst[n] if n < len(lst) else (None, "", created)
+        did, msg, dat, adds = lst[n] if n < len(lst) else (None, "", created, None)
         by_admin = source == ADMIN_ORDER_SOURCE
         items.append({
-            "fid": fid, "order_id": oid, "item_id": iid, "name": MENU.get(iid, (iid,))[0],
+            "fid": fid, "order_id": oid, "item_id": iid, "name": unit_title(iid, adds),
             "user_id": uid, "customer": (alabel or "🧾 by admin") if by_admin and uid == ADMIN_ORDER_USER_ID
             else (f"@{uname}" if uname else str(uid)),
             "date": (dat or created or "")[:10], "text": (msg or "")[:2000], "delivery_id": did,
@@ -12982,12 +13091,15 @@ def db_admin_pending() -> list:
     conn.close()
     out = []
     notes = db_admin_notes(r[1] for r in rows)
+    addons = db_units_addons(r[0] for r in rows)
     for fid, oid, uid, uname, iid, unit_no, state, created in rows:
         alabel, acw = _admin_order_info(oid)
+        title = unit_title(iid, addons.get(fid))   # a plan + its AI add-on: one card (24 Nov 2026)
         # 👤 an order by the admin for a customer (24 Nov 2026) keeps its 🧾 tag but is theirs like any order
         by_admin = acw is not None and uid == ADMIN_ORDER_USER_ID
         out.append({
-            "fid": fid, "order_id": oid, "item_id": iid, "name": MENU.get(iid, (iid,))[0], "unit": unit_no,
+            "fid": fid, "order_id": oid, "item_id": iid, "name": title, "unit": unit_no,
+            "addons": [a["id"] for a in addons.get(fid, [])],
             "user_id": uid, "customer": (alabel or "🧾 by admin") if by_admin else (f"@{uname}" if uname else str(uid)),
             "state": state, "date": (created or "")[:10],
             # 🧾 an order by the admin (23 Nov 2026): tagged like the Delivered tab; no customer to ask again
@@ -12995,8 +13107,8 @@ def db_admin_pending() -> list:
             "info": format_fulfilment_info(iid, info.get(fid)) if info.get(fid) else "",
             "fields": [{"label": l, "value": v} for l, v in fulfilment_info_fields(info.get(fid))],
             "imd": iid in IMD_TRIGGER_ITEMS, "template": delivery_template_kind(iid), "via": via.get(oid), "order_done": done.get(oid, 0),
-            "title": delivery_title_duration(MENU.get(iid, (iid,))[0])[0],
-            "duration": delivery_title_duration(MENU.get(iid, (iid,))[0])[1],
+            "title": delivery_title_duration(title)[0],
+            "duration": delivery_title_duration(title)[1],
             # 🔁 Ask again (22 Nov 2026)
             "can_reask": _reask_offered(iid) and not by_admin, "can_switch": _reask_can_switch(iid),
             "account_type": _unit_account_type(info.get(fid)), "asked_again": _reask_waiting(fid, state),
@@ -13195,11 +13307,11 @@ def _admin_order_products(coworker_id=None, extra: bool = False) -> list:
              "details": _register_kind(iid) in ("imd", "generic") and not (extra and iid in UPTODATE_AI_ON_ACCOUNT),
              "addon": iid in UPTODATE_AI_ADDONS}
         if extra:
-            p.update(oos=iid in out_of_stock, instant=iid in UPTODATE_AI_TRIGGER_ITEMS or iid in UPTODATE_AI_BUNDLE_ITEMS
-                     or iid in IMD_TRIGGER_ITEMS)
+            p.update(oos=iid in out_of_stock, instant=(iid in UPTODATE_AI_TRIGGER_ITEMS or iid in UPTODATE_AI_BUNDLE_ITEMS
+                                                       or iid in IMD_TRIGGER_ITEMS) and iid not in UPTODATE_AI_ADDONS)
         products.append(p)
     # 🔗 an Uptodate plan with an AI add-on, as one choice (owner, 24 Nov 2026: "The AI add-on should be added to every
-    # one of the UpToDates to be chosen"): the plan unit + an add-on unit, priced plan + add-on. Like the cart, only
+    # one of the UpToDates to be chosen"): one plan unit carrying the add-on (one subscription), priced plan + add-on. Like the cart, only
     # today's plans (UPTODATE_PLAN_ITEMS) take an add-on, one of each per plan (addon_problem).
     by_id = {p["id"]: p for p in products}
     for plan in sorted(UPTODATE_PLAN_ITEMS):
@@ -13355,10 +13467,8 @@ async def http_admin_create_order(request):
         db_record_used_credentials(owner, item_id, info.get("email"), info.get("username"))
     db_add_fulfilment_items(order_id, owner, items)
     conn = sqlite3.connect(DB_PATH)
-    # the plan's unit gets the details; an add-on takes them from it when the queue reaches it
+    # the plan's unit gets the details; its add-on rides on it (one subscription, 24 Nov 2026)
     fid = conn.execute("SELECT id FROM fulfilment WHERE order_id = ? AND item_id = ? ORDER BY id", (order_id, item_id)).fetchone()[0]
-    addon_fid = conn.execute("SELECT id FROM fulfilment WHERE order_id = ? AND item_id = ?", (order_id, combo[1])).fetchone()[0] \
-        if combo else None
     conn.close()
     db_set_fulfilment_info(fid, info)
     db_update_status(order_id, "paid")          # paid_at set above stays (COALESCE)
@@ -13368,7 +13478,7 @@ async def http_admin_create_order(request):
     told = None
     if owner:
         # one message first; the normal path then asks for what's missing or delivers
-        products = ", ".join(MENU[i][0] for i in items)
+        products = fid_title(fid, item_id)
         conn = sqlite3.connect(DB_PATH)
         waiting = conn.execute("SELECT item_id FROM fulfilment WHERE order_id = ? AND COALESCE(info_json, '') IN ('', '{}')",
                                (order_id,)).fetchall()
@@ -13392,11 +13502,11 @@ async def http_admin_create_order(request):
         except Exception:
             logger.exception("DAILY_SALES for %s after admin order #%s failed", local_day, order_id)
     state = (db_get_fulfilment(fid) or (None,) * 6)[5]
-    name = MENU[item_id][0] + (f" + {MENU[combo[1]][0]}" if combo else "")
+    name = fid_title(fid, item_id)
     return web.json_response({"ok": True, "order_id": order_id, "fulfilment_id": fid, "state": state,
                               "name": name, "coworker": coworker_name,
-                              **({"customer": {"user_id": owner, "label": owner_label, "told": told}} if owner else {}),
-                              **({"addon_fulfilment_id": addon_fid} if addon_fid else {})}, headers=headers)
+                              **({"customer": {"user_id": owner, "label": owner_label, "told": told}} if owner else {})},
+                             headers=headers)
 
 
 async def http_admin_order_note(request):
@@ -13901,7 +14011,7 @@ def transfer_plan(delivery_id: int, customer) -> dict:
         raise TransferRefused(f"{label} is logged in as the coworker account “{cw[1]}”. Its subscriptions are its "
                               "orders, so it wouldn't show there. Transfer it to the customer's own Telegram account.")
     plan = {"delivery_id": delivery_id, "order_id": order_id, "item_id": item_id, "message": message or "",
-            "name": MENU.get(item_id, (item_id,))[0], "from_user": from_user, "from_label": _customer_label(from_user),
+            "name": delivery_title(delivery_id, item_id), "from_user": from_user, "from_label": _customer_label(from_user),
             "to_user": to_user, "to_label": label, "warning": warning, "fid": None, "moves_order": False,
             "kind": "import" if sheet_ref else "order", "sheet_ref": sheet_ref}
     conn = sqlite3.connect(DB_PATH)
@@ -14753,7 +14863,7 @@ def db_admin_customer(user_id: int):
     out = dict(summary, seen=({"first": seen[0][:10], "last": seen[1][:10]} if seen else None),
                credits_usd=summary["credits"] * CREDIT_VALUE_USD, delivered=[], pending=[])
     for fid, order_id, item_id, unit_no, info_json in delivered:
-        out["delivered"].append({"order_id": order_id, "name": MENU.get(item_id, (item_id,))[0], "unit": unit_no,
+        out["delivered"].append({"order_id": order_id, "name": fid_title(fid, item_id), "unit": unit_no,
                                  "info": format_fulfilment_info(item_id, info_json)[:1500]})
     for fid, order_id, item_id, unit_no, state, order_status in pending:
         if order_status in UNPAID_ORDER_STATUSES:
@@ -14761,7 +14871,7 @@ def db_admin_customer(user_id: int):
         else:
             label = "details ready to deliver" if state == "awaiting_delivery" else "waiting on customer"
         row = db_get_fulfilment(fid)
-        out["pending"].append({"order_id": order_id, "name": MENU.get(item_id, (item_id,))[0], "unit": unit_no,
+        out["pending"].append({"order_id": order_id, "name": fid_title(fid, item_id), "unit": unit_no,
                                "label": label, "info": format_fulfilment_info(item_id, row[6] if row else None)[:1500]})
     return out
 
@@ -15100,7 +15210,7 @@ async def http_my_orders(request):
                 deliveries_by_unit[fid] = msgs[n]
     orders = []
     for fid, order_id, item_id, unit_no, state, created_at in rows:
-        name = MENU.get(item_id, (item_id, 0))[0]
+        name = fid_title(fid, item_id)
         if query:
             haystack = f"{order_id} {name} {deliveries_by_unit.get(fid) or ''}".lower()
             if query not in haystack:
@@ -15165,7 +15275,7 @@ def _delivery_only_detail(delivery_id: int, user_id: int, coworker_id):
             return None
     elif owner_id != user_id:
         return None
-    name = MENU.get(item_id, (item_id, 0))[0]
+    name = delivery_title(delivery_id, item_id)
     return {
         "fulfilment_id": 0,
         "order_id": order_id,
@@ -15214,7 +15324,7 @@ async def http_my_order_detail(request):
         return web.json_response({"error": "Not found"}, status=404, headers=_imd_search_cors_headers())
 
     fid, order_id, item_id, unit_no, state, info_json, created_at, order_status = row
-    name = MENU.get(item_id, (item_id, 0))[0]
+    name = fid_title(fid, item_id)
     price = _coworker_unit_price_by_id(item_id, coworker_id) if item_id in MENU else 0
 
     credentials = None
@@ -15600,7 +15710,7 @@ async def delivered_subscriptions_menu(update: Update, context: ContextTypes.DEF
 
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT d.item_id, d.delivered_at, d.user_id, u.username "
+        "SELECT d.item_id, d.delivered_at, d.user_id, u.username, d.addons "
         "FROM deliveries d "
         "LEFT JOIN users u ON u.user_id = d.user_id "
         "WHERE d.sheet_ref IS NULL "   # not the subscriptions from before the bot, added from the Excel tab
@@ -15614,8 +15724,8 @@ async def delivered_subscriptions_menu(update: Update, context: ContextTypes.DEF
         return
 
     lines = [f"📦 Delivered Subscriptions ({len(rows)} most recent)\n"]
-    for item_id, delivered_at, uid, username in rows:
-        name = MENU.get(item_id, (item_id,))[0]
+    for item_id, delivered_at, uid, username, adds in rows:
+        name = unit_title(item_id, adds)
         who  = f"@{username}" if username else str(uid)
         date = delivered_at[:10] if delivered_at else "?"
         lines.append(f"✅ {name}\n   → {who}  ·  {date}")
@@ -16713,7 +16823,7 @@ async def coworker_pending_list(update: Update, context: ContextTypes.DEFAULT_TY
 
     buttons = []
     for fid, order_id, user_id, username, item_id, unit_no, state, created_at in rows:
-        name = MENU.get(item_id, (item_id,))[0]
+        name = fid_title(fid, item_id)
         suffix = f" #{unit_no}" if unit_no > 1 else ""
         flag = "📝" if state == "awaiting_delivery" else "⌛"
         who = f"@{username}" if username else str(user_id)
@@ -16940,7 +17050,7 @@ async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     buttons = []
     for fid, order_id, user_id, username, item_id, unit_no, state, created_at in rows:
-        name = MENU.get(item_id, (item_id,))[0]
+        name = fid_title(fid, item_id)
         suffix = f" #{unit_no}" if unit_no > 1 else ""
         flag = "📝" if state == "awaiting_delivery" else "⌛"
         who = (_admin_order_who(order_id) if user_id == ADMIN_ORDER_USER_ID
@@ -17347,7 +17457,7 @@ async def admin_pending_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     _, order_id, user_id, item_id, unit_no, state, info_json = row
-    name = MENU.get(item_id, (item_id,))[0]
+    name = fid_title(row[0], item_id)
     order = db_get_order(order_id)
     username = order[2] if order else None
     created_at, paid_at, delivered_at = db_get_order_lifecycle(order_id)
@@ -17789,7 +17899,7 @@ async def reask_unit(application, fulfilment_id: int, ask_type: str = "any", not
     ask_type = ask_type if ask_type in ("new", "renew") else None
     if ask_type and not _reask_can_switch(item_id):
         return {"ok": False, "error": "This item can't be switched between a new account and a renewal."}
-    name = MENU.get(item_id, (item_id,))[0]
+    name = fid_title(row[0], item_id)
     note = (note or "").strip() or None
     if note and len(note) > REASK_NOTE_MAX:
         return {"ok": False, "error": f"The note is {len(note)} characters; it can be at most {REASK_NOTE_MAX}."}
@@ -17975,7 +18085,7 @@ async def _save_unit_edit(application, row, info: dict, by: str, force: bool = F
         try:
             # heard: the job mustn't send them again; not heard: the job sends them as an edit (edit: true, force)
             conn.execute("UPDATE automation_outbox SET info_hash = ? WHERE fulfilment_id = ?",
-                         (hashlib.sha256(stored.encode()).hexdigest() if told else
+                         (_utd_digest(stored, db_units_addons([fid]).get(fid)) if told else
                           ("edit-admin" if by == "admin" else "edit"), fid))
             conn.commit()
         except sqlite3.OperationalError:
@@ -18034,7 +18144,7 @@ async def edit_unit_details(application, fulfilment_id: int, actor: str, account
     saved = await _save_unit_edit(application, row, info, actor, force)
     if not saved.get("ok"):
         return saved
-    name = MENU.get(item_id, (item_id,))[0]
+    name = fid_title(row[0], item_id)
     lines = "\n".join(changed)
     who = EDIT_BY_WORDS.get(actor, actor)
     if actor != "admin" and ADMIN_CHAT_ID:
@@ -18076,7 +18186,7 @@ async def http_unit_details(request):
     info = _unit_info(row[6])
     problem = _edit_unit_problem(row)
     out = {
-        "ok": True, "fulfilment_id": fid, "order_id": row[1], "name": MENU.get(row[3], (row[3],))[0],
+        "ok": True, "fulfilment_id": fid, "order_id": row[1], "name": fid_title(fid, row[3]),
         "editable": problem is None, "problem": problem or "", "account_type": _unit_account_type(row[6]),
         "fields": {k: str(v) for k, v in info.items() if k in REGISTER_FIELDS[("generic", "new")] + REGISTER_FIELDS[("generic", "renew")]},
     }
@@ -18182,6 +18292,8 @@ def _change_item_problem(row, new_item=None):
         return "That's already its subscription."
     if new_item.startswith("book_"):
         return "A book can't be chosen here."
+    if new_item in UPTODATE_AI_ADDONS:
+        return "An Uptodate AI add-on goes on an Uptodate plan: pick the plan + the add-on (🔗)."
     conn = sqlite3.connect(DB_PATH)
     later = conn.execute("SELECT 1 FROM fulfilment WHERE order_id = ? AND item_id = ? AND state = 'delivered' AND id > ?",
                          (order_id, new_item, fid)).fetchone()
@@ -18191,10 +18303,12 @@ def _change_item_problem(row, new_item=None):
         return (f"Order #{order_id} already has a delivered {MENU[new_item][0]} added after this item, so this one "
                 "can't become it. Delete this item and add it as a new order, or pick another subscription.")
     items = _order_items(order_id)
-    if items.get(item_id):
-        items[item_id] -= 1
-        if items[item_id] <= 0:
-            del items[item_id]
+    gone = [item_id] + ([a["id"] for a in db_units_addons([fid]).get(fid, [])] if new_item not in UPTODATE_PLAN_ITEMS else [])
+    for i in gone:   # the unit's add-ons go with it when it stops being a plan (24 Nov 2026)
+        if items.get(i):
+            items[i] -= 1
+            if items[i] <= 0:
+                del items[i]
     items[new_item] = items.get(new_item, 0) + 1
     return addon_problem(items)
 
@@ -18219,11 +18333,13 @@ def db_change_unit_item(fid: int, old_item: str, new_item: str, info, total=None
     now = datetime.utcnow().isoformat(timespec="seconds")
     conn = sqlite3.connect(DB_PATH)
     try:
-        row = conn.execute("SELECT order_id, user_id, unit_no, info_json, reask_json FROM fulfilment WHERE id = ? "
-                           "AND item_id = ? AND state != 'delivered'", (fid, old_item)).fetchone()
+        row = conn.execute("SELECT order_id, user_id, unit_no, info_json, reask_json, addons_json FROM fulfilment "
+                           "WHERE id = ? AND item_id = ? AND state != 'delivered'", (fid, old_item)).fetchone()
         if not row:
             return None
-        order_id, user_id, old_no, old_info_json, reask_json = row
+        order_id, user_id, old_no, old_info_json, reask_json, addons_json = row
+        # an Uptodate AI add-on rides on a plan: changing to something else drops it (and its item, 24 Nov 2026)
+        dropped = [a["id"] for a in addons_list(addons_json)] if new_item not in UPTODATE_PLAN_ITEMS else []
         prev = _unit_info(old_info_json)
         try:
             old_reask = json.loads(reask_json) if reask_json else {}
@@ -18259,6 +18375,14 @@ def db_change_unit_item(fid: int, old_item: str, new_item: str, info, total=None
                 del items[old_item]
                 costs.pop(old_item, None)
         items[new_item] = items.get(new_item, 0) + 1
+        for a in dropped:
+            if items.get(a):
+                items[a] -= 1
+                if items[a] <= 0:
+                    del items[a]
+                    costs.pop(a, None)
+        if dropped:
+            conn.execute("UPDATE fulfilment SET addons_json = NULL WHERE id = ?", (fid,))
         known = db_get_item_costs()
         if new_item in known and new_item not in costs:
             costs[new_item] = known[new_item]     # its cost today (the old item's stays frozen while it's still in it)
@@ -18285,7 +18409,7 @@ def db_change_unit_item(fid: int, old_item: str, new_item: str, info, total=None
         except sqlite3.OperationalError:
             pass   # no outbox yet (utd_automation_init not run)
         conn.commit()
-        return {"order_id": order_id, "prev": prev, "unit_no": new_no}
+        return {"order_id": order_id, "prev": prev, "unit_no": new_no, "dropped": dropped}
     except Exception:
         conn.rollback()
         raise
@@ -18304,18 +18428,19 @@ def db_fill_unit_info(fid: int, info) -> bool:
     return cur.rowcount > 0
 
 
-def db_add_addon_unit(order_id: int, user_id: int, addon: str, info, total=None):
-    """🔗 An AI add-on unit added to an order (a plan + add-on choice, 24 Nov 2026), in one transaction: numbered after
-    the order's highest unit of it, items_json +1, its cost today in costs_json, the total when given. The new id."""
+def db_attach_addon(fid: int, addon: str, total=None) -> bool:
+    """🔗 An AI add-on put on a pending plan unit (a plan + add-on choice; owner, 24 Nov 2026: one subscription), in
+    one transaction: the unit's addons_json gets it, items_json +1, its cost today in costs_json, the total when
+    given. False when the unit is delivered or already has it."""
     conn = sqlite3.connect(DB_PATH)
     try:
-        no = conn.execute("SELECT COALESCE(MAX(unit_no), 0) FROM fulfilment WHERE order_id = ? AND item_id = ?",
-                          (order_id, addon)).fetchone()[0] + 1
-        cur = conn.execute("INSERT INTO fulfilment (order_id, user_id, item_id, unit_no, state, info_json, created_at) "
-                           "VALUES (?, ?, ?, ?, 'needs_info', ?, ?)", (order_id, user_id, addon, no,
-                                                                      json.dumps(info) if info else None,
-                                                                      datetime.utcnow().isoformat()))
-        new_fid = cur.lastrowid
+        row = conn.execute("SELECT order_id, addons_json FROM fulfilment WHERE id = ? AND state != 'delivered'",
+                           (fid,)).fetchone()
+        if not row or any(a["id"] == addon for a in addons_list(row[1])):
+            return False
+        order_id = row[0]
+        conn.execute("UPDATE fulfilment SET addons_json = ? WHERE id = ?",
+                     (json.dumps(addons_list(row[1]) + [{"id": addon}]), fid))
         order = conn.execute("SELECT items_json, costs_json, total FROM orders WHERE id = ?", (order_id,)).fetchone()
         try:
             items = json.loads(order[0]) if order and order[0] else {}
@@ -18330,7 +18455,7 @@ def db_add_addon_unit(order_id: int, user_id: int, addon: str, info, total=None)
                      (json.dumps(items), json.dumps(costs), round(float(total), 2) if total is not None else order[2],
                       order_id))
         conn.commit()
-        return new_fid
+        return True
     except Exception:
         conn.rollback()
         raise
@@ -18369,7 +18494,7 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
     """🔀 Change subscription of a pending unit (the admin's ✏️ Edit details). mode: details (the admin enters them;
     a product without details takes none) | ask (the customer is asked, 🔄 Resend Credentials). total: the order's new
     total, None keeps it. {ok, note} or {ok: False, error, status, busy?, needs_force?}.
-    new_item may be a 🔗 combo ('combo:<plan>+<add-on>'): the unit becomes the plan and an add-on unit is added (only the
+    new_item may be a 🔗 combo ('combo:<plan>+<add-on>'): the unit becomes the plan carrying the add-on (only the
     add-on when it already is that plan). The same product on a unit without details: ✍️ the admin adds them (fill)."""
     combo = parse_combo(new_item)
     if combo:
@@ -18427,25 +18552,17 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
             return {"ok": False, "status": 400, "error": err}
     if fill and not takes_details:
         return {"ok": False, "status": 400, "error": "This product takes no account details."}
-    if addon:
-        # one of each add-on per Uptodate account: not already on this plan's account (by its login)
-        acct = info or (_unit_info(info_json) if same else None) or {}
-        ident = {str(acct.get(k) or "").strip().lower() for k in ("email", "username", "login_username")} - {""}
-        if ident:
-            conn = sqlite3.connect(DB_PATH)
-            others = conn.execute("SELECT info_json FROM fulfilment WHERE order_id = ? AND item_id = ?",
-                                  (order_id, addon)).fetchall()
-            conn.close()
-            for (oj,) in others:
-                o = _unit_info(oj)
-                if ident & ({str(o.get(k) or "").strip().lower() for k in ("email", "username", "login_username")} - {""}):
-                    return {"ok": False, "status": 409,
-                            "error": f"This Uptodate account already has {MENU[addon][0]} in order #{order_id}."}
+    cur_addons = db_units_addons([fid]).get(fid, [])
+    if addon and old_item in UPTODATE_PLAN_ITEMS and any(a["id"] == addon for a in cur_addons):
+        # one of each add-on per Uptodate account: it rides on this unit already (24 Nov 2026)
+        return {"ok": False, "status": 409,
+                "error": f"This Uptodate account already has {MENU[addon][0]} in order #{order_id}."}
     warn = None if same else _change_item_needs_force(row)
     if warn and not force:
         return {"ok": False, "status": 409, "needs_force": True, "error": warn}
-    old_name = MENU.get(old_item, (old_item,))[0]
-    new_name = MENU[new_item][0] + (f" + {re.sub(r' add-on$', '', MENU[addon][0])}" if addon else "")
+    old_name = unit_title(old_item, cur_addons)
+    kept = cur_addons if new_item in UPTODATE_PLAN_ITEMS else []
+    new_name = unit_title(new_item, kept + ([{"id": addon}] if addon else []))
 
     # @Utdreg_bot first, while it still has the unit
     utd_note, outbox, told, utd_kind = "", None, None, None
@@ -18478,7 +18595,7 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
         if utd_kind == "closed" and told:
             outbox = "closed"
         elif utd_kind == "edit":
-            outbox = ("hash", hashlib.sha256(json.dumps(info).encode()).hexdigest() if told else "edit-admin")
+            outbox = ("hash", _utd_digest(json.dumps(info), db_units_addons([fid]).get(fid)) if told else "edit-admin")
     elif new_item in UTD_AUTOMATION_ITEMS and (old_item not in UTD_AUTOMATION_ITEMS or not _utd_unit_sent(fid)) \
             and _utd_closed_already(fid):
         outbox = "reopen"   # taken off @Utdreg_bot's list before: it goes back on it as a new pending order
@@ -18520,15 +18637,10 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
         db_record_used_credentials(user_id, new_item, info.get("email"), info.get("username"))
     if fill and new_item in UTD_AUTOMATION_ITEMS and _utd_closed_already(fid):
         _utd_mark_reopen(fid)   # @Utdreg_bot took it off its list before: it goes back on it with these details
-    addon_fid = None
+    addon_ok = None
     if addon:
-        plan_info = info if info else (_unit_info(info_json) if same else None)
-        if addon in UPTODATE_AI_ON_ACCOUNT:
-            addon_info = dict(plan_info, for_account=MENU[new_item][0]) if plan_info else None
-        else:
-            addon_info = {"account_type": "new"}       # the Telegram bot code: nothing to fill in
         try:
-            addon_fid = db_add_addon_unit(order_id, user_id, addon, addon_info, total)
+            addon_ok = db_attach_addon(fid, addon, total)   # rides on the plan's unit: one subscription
         except Exception:
             logger.exception("change_unit_item: couldn't add %s to order #%s", addon, order_id)
             if total is not None:      # the typed total still applies
@@ -18579,9 +18691,6 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
         try:
             if not (same and not fill):
                 await process_next_in_queue(ctx, user_id, order_id, only_fid=fid)
-            # an order by the admin: the add-on goes on regardless (its code, or the deliver-by-hand notice)
-            if addon_fid and (by_admin or (db_get_fulfilment(addon_fid) or (None,) * 7)[6]):
-                await process_next_in_queue(ctx, user_id, order_id, only_fid=addon_fid)
             if fill and new_item not in IMD_TRIGGER_ITEMS:
                 # the order's queue carries on as after a customer's own submission (add-ons take these details,
                 # the next unit is asked); an iMD run advances it itself
@@ -18627,7 +18736,10 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
     lines.append(f"Next: {nxt}")
     if customer_told:
         lines.insert(1, "The customer was told they don't need to send them.")
-    if addon and not addon_fid:
+    if isinstance(swapped, dict) and swapped.get("dropped"):
+        lines.append("➖ " + ", ".join(addon_short_name(a) for a in swapped["dropped"])
+                     + " came off the order (an AI add-on goes with an Uptodate plan).")
+    if addon and not addon_ok:
         lines.append(f"⚠️ {MENU[addon][0]} couldn't be added to the order: add it again.")
     note_text = "\n".join(lines)
     if ADMIN_CHAT_ID:
@@ -19769,15 +19881,11 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
         return
     fulfilment_id, item_id = nxt
 
-    item_name = MENU.get(item_id, (item_id, 0))[0]
+    item_name = fid_title(fulfilment_id, item_id)
 
+    # the old 3-month bundle's Telegram code at payment; a 1-year add-on comes with its plan's login (24 Nov 2026)
     if item_id in UPTODATE_AI_BUNDLE_ITEMS:
         await send_uptodate_ai_bundle_code(context, order_id, user_id, fulfilment_id)
-
-    # An Uptodate AI add-on goes on the Uptodate account it was ordered with: take that account's details instead
-    # of asking for them again (owner, 16 Nov 2026).
-    if item_id in UPTODATE_AI_ON_ACCOUNT:
-        _copy_plan_info_for_addon(order_id, fulfilment_id)
 
     # Before asking the customer anything, check if credentials were already
     # collected (Mini App Step 2 or any pre-payment collection). If info_json
@@ -20409,6 +20517,136 @@ def db_imd_unit_for_order(order_id: int):
     ).fetchone()
     conn.close()
     return (row[0], row[1]) if row else (None, None)
+
+
+def _addon_merge_actions(conn) -> list:
+    """What migrate_addon_units does: [(kind, order_id, addon unit row, plan unit row, addon deliveries, plan delivery
+    or None, why-skipped or None)]. kind: pending (the add-on not delivered yet: #689), sent (its code was delivered,
+    the plan not yet), both (both delivered)."""
+    marks = ",".join("?" * len(UPTODATE_AI_ADDONS))
+    addons = conn.execute(f"SELECT id, order_id, user_id, item_id, unit_no, state, info_json FROM fulfilment "
+                          f"WHERE item_id IN ({marks}) ORDER BY order_id, id", sorted(UPTODATE_AI_ADDONS)).fetchall()
+    pmarks = ",".join("?" * len(UPTODATE_PLAN_ITEMS))
+    out, taken = [], {}
+    for a in addons:
+        fid, order_id, user_id, item_id, unit_no, state, info_json = a
+        plans = conn.execute(f"SELECT id, order_id, user_id, item_id, unit_no, state, addons_json FROM fulfilment "
+                             f"WHERE order_id = ? AND item_id IN ({pmarks}) ORDER BY id",
+                             (order_id, *sorted(UPTODATE_PLAN_ITEMS))).fetchall()
+        mine = [p for p in plans if p[2] == user_id]
+        dels = conn.execute("SELECT id, user_id, message FROM deliveries WHERE order_id = ? AND item_id = ? ORDER BY id",
+                            (order_id, item_id)).fetchall()
+        same_kind = conn.execute("SELECT id FROM fulfilment WHERE order_id = ? AND item_id = ? ORDER BY id",
+                                 (order_id, item_id)).fetchall()
+        if len(same_kind) > 1:   # several of this add-on: each its own deliveries by rank (one each)
+            rank = [r[0] for r in same_kind].index(fid)
+            dels = [dels[rank]] if len(dels) == len(same_kind) else None
+        skip = None
+        if not mine:
+            skip = "no Uptodate plan of the same customer in the order (transferred apart?)"
+        elif dels is None:
+            skip = "its deliveries can't be told apart"
+        elif any(d[1] != user_id for d in dels):
+            skip = "its delivery was transferred to another customer"
+        target = None
+        if not skip:
+            # the nth plan unit (its unit number), else the first one that hasn't this add-on yet
+            have = lambda p: any(x["id"] == item_id for x in addons_list(p[6])) or (p[0], item_id) in taken
+            order = mine[min(unit_no or 1, len(mine)) - 1:] + mine
+            target = next((p for p in order if not have(p)), None)
+            if not target:
+                skip = "every plan unit of the order already has this add-on"
+        kind = "pending" if state != "delivered" else ("sent" if not target or target[5] != "delivered" else "both")
+        pdel = None
+        if target and not skip and target[5] == "delivered":
+            if state != "delivered":
+                skip = "its plan was delivered already and the add-on is still to deliver: left as its own card"
+            else:
+                pd = conn.execute("SELECT id, user_id FROM deliveries WHERE order_id = ? AND item_id = ? ORDER BY id",
+                                  (order_id, target[3])).fetchall()
+                delivered_plans = [p[0] for p in plans if p[3] == target[3] and p[5] == "delivered"]
+                rank = delivered_plans.index(target[0])
+                pdel = pd[rank] if rank < len(pd) else None
+                if not pdel:
+                    skip = "the plan's delivery record is missing"
+                elif pdel[1] != user_id:
+                    skip = "the plan's delivery was transferred to another customer"
+        if not skip and dels:
+            moved = conn.execute("SELECT 1 FROM delivery_transfers WHERE delivery_id IN (%s) LIMIT 1" % ",".join(
+                "?" * (len(dels) + (1 if pdel else 0))), [d[0] for d in dels] + ([pdel[0]] if pdel else [])).fetchone()
+            if moved:
+                skip = "transferred between customers"
+        if not skip:
+            taken[(target[0], item_id)] = True
+        out.append((kind, order_id, a, target, dels or [], pdel, skip))
+    return out
+
+
+def migrate_addon_units() -> int:
+    """Plan + add-on as ONE subscription (owner, 24 Nov 2026), for the orders from before: each Uptodate AI add-on
+    unit goes onto its plan's unit (the nth plan unit of the same order and customer). Logged first as a dry run, each
+    order snapshotted (db_snapshot_order) before it changes. Pending add-on (#689): folded in (a 3-month bundle-style
+    code already sent is kept as sent), its code delivery row (if any) merged away. Code delivered, plan pending:
+    marked sent (no second code), the code goes again in the plan's one message. Both delivered: the add-on's message
+    is appended to the plan's delivery, which takes its title. A pair transferred apart is left as it is. The delivered
+    Google sheet is not touched. Idempotent. Returns how many add-on units were merged."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        actions = _addon_merge_actions(conn)
+    finally:
+        conn.close()
+    if not actions:
+        return 0
+    for kind, order_id, a, target, dels, pdel, skip in actions:   # the dry run
+        logger.info("Add-on merge (dry run): order #%s unit %s (%s, %s) %s", order_id, a[0], a[3], a[5],
+                    f"skipped: {skip}" if skip else f"→ plan unit {target[0]} ({target[3]}, {target[5]}): {kind}")
+    merged = 0
+    for oid in sorted({x[1] for x in actions if not x[6]}):
+        db_snapshot_order(oid)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        for kind, order_id, a, target, dels, pdel, skip in actions:
+            if skip:
+                continue
+            fid, _, user_id, item_id, _, state, info_json = a
+            entry = {"id": item_id}
+            info = _unit_info(info_json)
+            code = info.get("code") or (db_get_meta(f"bundle_code_sent:{fid}") or "")
+            if code and code != "pool empty, admin told":
+                entry.update(code=code, sent=True)
+            elif dels:
+                entry["sent"] = True   # delivered without a code we know (by hand): don't send another one
+            if dels:
+                entry["earlier"] = [d[2] for d in dels][-3:]   # what the customer got for it before
+            cur = conn.execute("SELECT addons_json FROM fulfilment WHERE id = ?", (target[0],)).fetchone()
+            addons = addons_list(cur[0] if cur else None)
+            if any(x["id"] == item_id for x in addons):
+                continue
+            addons.append(entry)
+            conn.execute("UPDATE fulfilment SET addons_json = ? WHERE id = ?", (json.dumps(addons), target[0]))
+            if kind == "both" and pdel:
+                msg = conn.execute("SELECT message, addons FROM deliveries WHERE id = ?", (pdel[0],)).fetchone()
+                extra = "\n\n".join(d[2] for d in dels if d[2] and d[2] not in (msg[0] or ""))
+                ids = [x["id"] for x in addons_list(msg[1])] + [item_id]
+                conn.execute("UPDATE deliveries SET message = ?, addons = ? WHERE id = ?",
+                             (((msg[0] or "") + ("\n\n" + extra if extra else "")), json.dumps(ids), pdel[0]))
+            for d in dels:
+                conn.execute("DELETE FROM deliveries WHERE id = ?", (d[0],))
+            conn.execute("DELETE FROM fulfilment WHERE id = ?", (fid,))
+            try:
+                conn.execute("DELETE FROM automation_outbox WHERE fulfilment_id = ?", (fid,))
+            except sqlite3.OperationalError:
+                pass
+            merged += 1
+            logger.info("Add-on merge: order #%s %s (unit %s) is now part of plan unit %s (%s)", order_id, item_id, fid,
+                        target[0], kind)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return merged
 
 
 def db_heal_delivered_pending() -> int:
@@ -21260,7 +21498,7 @@ async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     _, order_id, user_id, item_id, unit_no, state, info_json = row
-    name = MENU.get(item_id, (item_id,))[0]
+    name = fid_title(fulfilment_id, item_id)
     delivered = state == "delivered"
     # An old 📤 button (or a second tap) on a unit that is already delivered: say so first, so the customer
     # doesn't get the account twice by accident. Sending another one stays possible on purpose.
@@ -21371,9 +21609,17 @@ async def _deliver_credentials(context, fulfilment_id: int, credentials_text: st
             return None
 
         _, order_id, user_id, item_id, unit_no, state, info_json = row
-        name = MENU.get(item_id, (item_id,))[0]
+        addons = db_units_addons([fulfilment_id]).get(fulfilment_id, [])
+        name = unit_title(item_id, addons)
         if only_if_undelivered and state == "delivered":
             raise UnitAlreadyDelivered(fulfilment_id)
+        # the plan's Uptodate AI add-on comes in the same message (owner, 24 Nov 2026): the Telegram bot code, or
+        # the Expert AI note
+        no_code = []
+        if addons:
+            addon_text, no_code = await _addon_delivery_text(context, fulfilment_id, order_id, user_id, addons)
+            if addon_text and addon_text not in credentials_text:
+                credentials_text = credentials_text.rstrip() + "\n\n" + addon_text
 
         # an order by the admin: to the admin's chat, to forward (its message id isn't the customer's)
         sent_message = await _send_to_customer(
@@ -21386,10 +21632,12 @@ async def _deliver_credentials(context, fulfilment_id: int, credentials_text: st
         db_save_delivery(order_id, credentials_text)
         delivery_id = db_add_delivery(order_id, user_id, item_id, credentials_text,
                                       None if user_id == ADMIN_ORDER_USER_ID else sent_message.message_id, access=access,
-                                      sheet_row=sheet_row, sheet_below=sheet_below)
-        await post_subscription_to_channel(context, order_id, item_id, credentials_text)
+                                      sheet_row=sheet_row, sheet_below=sheet_below, addons=addons)
+        await post_subscription_to_channel(context, order_id, item_id, credentials_text, title=name)
         if item_id in IMD_TRIGGER_ITEMS:
             db_use_held_serials(order_id)
+        for a in no_code:   # the pool was empty: delivered anyway, the admin sends the code (24 Nov 2026)
+            await _tell_admin_addon_pool_empty(context, order_id, user_id, a)
     if on_delivered:
         await on_delivered(name, order_id, delivery_id)
 
@@ -21407,6 +21655,59 @@ async def _deliver_credentials(context, fulfilment_id: int, credentials_text: st
         customer_data.pop(key, None)
     await process_next_in_queue(context, user_id, order_id)
     return name, order_id, delivery_id
+
+
+ADDON_EXPERT_NOTE = "🤖 {name}: included with this account (use Expert AI in the UpToDate app)."
+
+
+async def _addon_delivery_text(context, fulfilment_id: int, order_id: int, user_id: int, addons: list):
+    """(text appended to the plan's delivery, [add-ons whose code pool was empty]). A Telegram bot add-on takes one
+    code from its pool (kept on the unit, so a retry after a failed send reuses it); an add-on whose code was sent
+    before (an older order) gets the same code again, or a line saying it was sent. Expert AI: a note line."""
+    lines, no_code, changed = [], [], False
+    for a in addons:
+        aid, label = a["id"], addon_short_name(a["id"])
+        pool = UPTODATE_AI_CODE_POOL.get(aid)
+        if aid in UPTODATE_AI_ON_ACCOUNT:
+            expert = "Uptodate Expert AI (Official App) - 1 Year" if aid == "uptodate_ai_both_1y" else label
+            lines.append(ADDON_EXPERT_NOTE.format(name=expert))
+        if not pool:
+            continue
+        tg = "Uptodate AI (Telegram Bot) - 1 Year"
+        code = a.get("code")
+        if not code and not a.get("sent"):
+            serial = db_pop_serial(pool)
+            if serial:
+                serial_id, code = serial
+                db_finalize_serial(serial_id, order_id, success=True)
+                a["code"], changed = code, True
+                db_set_unit_addons(fulfilment_id, addons)   # kept at once: a failed send doesn't take a second code
+        if code:
+            lines.append(f"🤖 {tg}:\n1️⃣ Click on @Up2down_bot\n2️⃣ Type /Redeem {code}")
+        elif a.get("sent"):
+            lines.append(f"🤖 {tg}: its code was sent to you earlier.")
+        else:
+            lines.append(f"🤖 {tg}: your code follows shortly.")
+            no_code.append(a)
+    if changed:
+        db_set_unit_addons(fulfilment_id, addons)
+    return "\n\n".join(lines), no_code
+
+
+async def _tell_admin_addon_pool_empty(context, order_id: int, user_id: int, addon: dict):
+    pool = UPTODATE_AI_CODE_POOL.get(addon["id"])
+    if not ADMIN_CHAT_ID or not pool:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=(f"⚠️ Order #{order_id} — the Uptodate AI (Telegram Bot) code of {addon_short_name(addon['id'])} wasn't "
+                  f"sent: the codes pool is empty ({SERIAL_POOL_LABELS.get(pool, pool)}). The login was delivered. Add "
+                  f"codes (➕ Add Serials) and send the customer "
+                  f"({_admin_order_who(order_id) if user_id == ADMIN_ORDER_USER_ID else f'ID {user_id}'}) one with: "
+                  "Click @Up2down_bot, type /Redeem <code>."))
+    except Exception:
+        logger.exception("Failed to tell the admin the add-on code pool is empty (order #%s)", order_id)
 
 
 async def edit_delivery_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -21429,7 +21730,7 @@ async def edit_delivery_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     clear_admin_flow_state(context.user_data)
     context.user_data["awaiting_edit_delivery"] = delivery_id
 
-    name = MENU.get(item_id, (item_id,))[0]
+    name = delivery_title(delivery_id, item_id)
     await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID,
         text=(
@@ -21695,7 +21996,7 @@ async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts.append("\n✅ DELIVERED")
     if delivered:
         for fid, order_id, item_id, unit_no, info_json in delivered:
-            name = MENU.get(item_id, (item_id,))[0]
+            name = fid_title(fid, item_id)
             suffix = f" #{unit_no}" if unit_no > 1 else ""
             parts.append(f"\n• {name}{suffix} — Order #{order_id}")
             parts.append(format_fulfilment_info(item_id, info_json))
@@ -21705,7 +22006,7 @@ async def customer_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts.append("\n⏳ PENDING")
     if pending:
         for fid, order_id, item_id, unit_no, state, order_status in pending:
-            name = MENU.get(item_id, (item_id,))[0]
+            name = fid_title(fid, item_id)
             suffix = f" #{unit_no}" if unit_no > 1 else ""
             if order_status in UNPAID_ORDER_STATUSES:
                 label = "❌ not paid yet"
@@ -21880,7 +22181,7 @@ def _build_order_lookup_view(order_id: int):
             [InlineKeyboardButton("✅ Approve Payment & Deliver", callback_data=f"admin_confirm:{oid}")]
         )
     for delivery_id, item_id, message in delivery_rows:
-        name = MENU.get(item_id, (item_id or "item",))[0]
+        name = delivery_title(delivery_id, item_id) if item_id else "item"
         buttons.append(
             [InlineKeyboardButton(f"✏️ Edit {name}", callback_data=f"editdeliv:{delivery_id}")]
         )
@@ -22101,7 +22402,7 @@ async def handle_mini_app_action(update, context, data: dict):
             return
         lines = []
         for delivery_id, item_id, delivered_at in delivered:
-            name = MENU.get(item_id, (item_id,))[0]
+            name = delivery_title(delivery_id, item_id)
             date = delivered_at[:10] if delivered_at else ""
             lines.append(f"✅ {name}" + (f" — {date}" if date else ""))
         await update.message.reply_text(
@@ -22198,7 +22499,7 @@ async def handle_mini_app_action(update, context, data: dict):
 
         unpaid_lines, undelivered_lines = [], []
         for fid, oid, item_id, unit_no, state, order_status in pending:
-            name = MENU.get(item_id, (item_id,))[0]
+            name = fid_title(fid, item_id)
             if order_status in UNPAID_ORDER_STATUSES:
                 unpaid_lines.append(f"❌ Not paid yet: {name} (Order #{oid})")
             else:
@@ -22247,7 +22548,7 @@ async def handle_mini_app_action(update, context, data: dict):
             await update.message.reply_text("Could not find that order. Please contact support.")
             return
         _, order_id, _, item_id, unit_no, state, info_json = row
-        item_name = MENU.get(item_id, (item_id,))[0]
+        item_name = fid_title(row[0], item_id)
         ticket_id = db_create_ticket(
             user_id, update.effective_user.username, category="order",
             subscription_item_id=item_id,
@@ -22407,7 +22708,7 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
 
     # Create a fulfilment row for each unit and pre-populate it with the
     # registration details the customer already filled in the Mini App.
-    db_add_fulfilment_items(order_id, user_id, order_items)
+    db_add_fulfilment_items(order_id, user_id, order_items, _addon_links(items_raw))
 
     # Store credentials from the Mini App directly into fulfilment rows.
     # Matched by (order_id, item_id, unit_no) rather than by list position —
@@ -22425,8 +22726,8 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
     matched = []  # (fulfilment_id, item_id, detail_entry)
     for entry in items_raw:
         iid = entry.get("id")
-        if not iid or iid not in order_items:
-            continue
+        if not iid or iid not in order_items or iid in UPTODATE_AI_ADDONS:
+            continue   # an add-on rides on its plan's unit: the plan's form is its details (24 Nov 2026)
         unit_counters[iid] = unit_counters.get(iid, 0) + 1
         unit_no = unit_counters[iid]
         row = conn.execute(
@@ -22443,7 +22744,6 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
             )
     conn.close()
 
-    matched = _addon_details_from_plans(matched)
     for fid, iid, detail_entry in matched:
         info = {k: v for k, v in detail_entry.items() if k not in ("id", "account_type", "with_plan", "with_unit")}
         info["account_type"] = detail_entry.get("account_type", "new")
@@ -22456,7 +22756,7 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
                 continue    # fulfilment starts right away below and tells the admin then
             # Notify admin immediately with the stored credentials so they
             # can register as soon as the payment is confirmed.
-            item_name = MENU.get(iid, (iid,))[0]
+            item_name = fid_title(fid, iid)
 
             if iid in MANUAL_ACCESS_ITEMS:
                 # No credential fields to show — just a clean "grant access"
@@ -22917,10 +23217,17 @@ def _utd_order_payload(row, info: dict) -> dict:
         info["original_email"] = real
         info["email"] = _utd_unique_alias(utd_alias_email(real, info.get("username") or "", order_id), fid, order_id)
     return {"fulfilment_id": fid, "order_id": order_id, "user_id": user_id, "item_id": item_id,
-            "item_name": MENU.get(item_id, (item_id,))[0], "kind": kind, "info": info,
+            "item_name": fid_title(fid, item_id), "kind": kind, "info": info,
             "username": db_get_username(user_id) or "",
             # 🧾 an order by the admin (user 0): @Utdreg_bot shows this instead of a @username (23 Nov 2026)
             **({"customer_label": _admin_order_customer_label(order_id)} if user_id == ADMIN_ORDER_USER_ID else {})}
+
+
+def _utd_digest(info_json: str, addons_json=None) -> str:
+    """The outbox hash of a unit's details: a plan's add-ons count too (its title changes, 24 Nov 2026); a unit without
+    add-ons hashes as before."""
+    ids = [a["id"] for a in addons_list(addons_json)]
+    return hashlib.sha256(((info_json or "") + ("|addons:" + ",".join(ids) if ids else "")).encode()).hexdigest()
 
 
 def _utd_units_to_push() -> list:
@@ -22929,15 +23236,15 @@ def _utd_units_to_push() -> list:
     marks = ",".join("?" * len(UTD_AUTOMATION_ITEMS))
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        f"SELECT f.id, f.order_id, f.user_id, f.item_id, f.unit_no, f.state, f.info_json, a.info_hash, a.tries, a.alerted "
-        f"FROM fulfilment f JOIN orders o ON o.id = f.order_id LEFT JOIN automation_outbox a ON a.fulfilment_id = f.id "
+        f"SELECT f.id, f.order_id, f.user_id, f.item_id, f.unit_no, f.state, f.info_json, a.info_hash, a.tries, a.alerted, "
+        f"f.addons_json FROM fulfilment f JOIN orders o ON o.id = f.order_id LEFT JOIN automation_outbox a ON a.fulfilment_id = f.id "
         f"WHERE f.id > ? AND f.item_id IN ({marks}) AND f.state = 'awaiting_delivery' AND o.status IN ('paid', 'delivered') "
         f"AND COALESCE(f.info_json, '') NOT IN ('', '{{}}') AND a.reask_pending IS NULL ORDER BY f.id",
         (start, *sorted(UTD_AUTOMATION_ITEMS))).fetchall()
     conn.close()
     out = []
     for r in rows:
-        digest = hashlib.sha256((r[6] or "").encode()).hexdigest()
+        digest = _utd_digest(r[6], r[10])
         if digest != r[7]:
             out.append((r, digest))
     return out
@@ -23337,25 +23644,25 @@ async def http_order_logins(request):
     if not order or (order[1] != user_id and not mine):
         conn.close()
         return web.json_response({"error": f"order #{order_id} isn't this customer's"}, status=404)
-    units = conn.execute("SELECT item_id, info_json FROM fulfilment WHERE order_id = ? AND user_id = ? ORDER BY id",
-                         (order_id, user_id)).fetchall()
-    deliveries = conn.execute("SELECT item_id, message FROM deliveries WHERE order_id = ? AND user_id = ? ORDER BY id",
-                              (order_id, user_id)).fetchall()
+    units = conn.execute("SELECT item_id, info_json, addons_json FROM fulfilment WHERE order_id = ? AND user_id = ? "
+                         "ORDER BY id", (order_id, user_id)).fetchall()
+    deliveries = conn.execute("SELECT item_id, message, addons FROM deliveries WHERE order_id = ? AND user_id = ? "
+                              "ORDER BY id", (order_id, user_id)).fetchall()
     conn.close()
     items = []
-    for item_id, info_json in units:
+    for item_id, info_json, adds in units:
         try:
             info = json.loads(info_json) if info_json else {}
         except ValueError:
             info = {}
         items.append({
-            "item": MENU.get(item_id, (item_id,))[0],
+            "item": unit_title(item_id, adds),
             "username": info.get("login_username") or info.get("username") or info.get("email") or "",
             "password": info.get("login_password") or info.get("password") or "",
         })
     return web.json_response({
         "order_id": order_id, "status": order[5], "items": items,
-        "deliveries": [{"item": MENU.get(i, (i,))[0] if i else "", "message": m} for i, m in deliveries],
+        "deliveries": [{"item": unit_title(i, a) if i else "", "message": m} for i, m, a in deliveries],
     })
 
 

@@ -1239,9 +1239,9 @@ const NO_DETAILS_NEEDED = new Set(['uptodate_ai_2m', 'uptodate_ai_tg_1y', 'medic
   'uptodate_ai_expert_1y', 'uptodate_ai_both_1y']);
 // Uptodate AI add-ons (16 Nov 2026) take no form of their own: they go on the Uptodate account they were added with.
 const UP_ADDON_NOTE = {
-  uptodate_ai_expert_1y: '✅ No details needed: it goes on your Uptodate account above.',
-  uptodate_ai_both_1y: '✅ No details needed: it goes on your Uptodate account above, and the Telegram bot code is sent automatically after payment.',
-  uptodate_ai_tg_1y: '✅ No details needed: the Telegram bot code is sent automatically after payment.',
+  uptodate_ai_expert_1y: '✅ No details needed: it goes on your Uptodate account above and comes with its login, as one subscription.',
+  uptodate_ai_both_1y: '✅ No details needed: it goes on your Uptodate account above; its login and the Telegram bot code come in one message.',
+  uptodate_ai_tg_1y: '✅ No details needed: the Telegram bot code comes with your Uptodate account\'s login, in one message.',
 };
 // Subset of NO_DETAILS_NEEDED that isn't auto-delivered — access has to be
 // granted by hand on another system, so the checkout copy shouldn't say
@@ -4605,8 +4605,8 @@ const OTHER_COUNTRIES=[
 // ── Submit order ──────────────────────────────────────────────────────
 function collectDetails(root){
   const out=[];
-  // Which Uptodate account (plan item, its unit 1..n) each AI add-on was set up with, so the bot gives the add-on
-  // that account's details (16 Nov 2026).
+  // Which Uptodate account (plan item, its unit 1..n) each AI add-on was set up with (every add-on, the Telegram bot
+  // one too): the bot puts the add-on on that account's subscription, one card and one delivery (24 Nov 2026).
   const withPlan={}, unitOf={};
   (typeof upSaved!=='undefined'?upSaved:[]).forEach(s=>{
     unitOf[s.plan]=(unitOf[s.plan]||0)+1;
