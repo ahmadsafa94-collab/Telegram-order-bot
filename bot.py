@@ -18360,6 +18360,22 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
         info, err = _admin_order_details(new_item, details, user_id=user_id)
         if err:
             return {"ok": False, "status": 400, "error": err}
+    if fill and not takes_details:
+        return {"ok": False, "status": 400, "error": "This product takes no account details."}
+    if addon:
+        # one of each add-on per Uptodate account: not already on this plan's account (by its login)
+        acct = info or (_unit_info(info_json) if same else None) or {}
+        ident = {str(acct.get(k) or "").strip().lower() for k in ("email", "username", "login_username")} - {""}
+        if ident:
+            conn = sqlite3.connect(DB_PATH)
+            others = conn.execute("SELECT info_json FROM fulfilment WHERE order_id = ? AND item_id = ?",
+                                  (order_id, addon)).fetchall()
+            conn.close()
+            for (oj,) in others:
+                o = _unit_info(oj)
+                if ident & ({str(o.get(k) or "").strip().lower() for k in ("email", "username", "login_username")} - {""}):
+                    return {"ok": False, "status": 409,
+                            "error": f"This Uptodate account already has {MENU[addon][0]} in order #{order_id}."}
     warn = None if same else _change_item_needs_force(row)
     if warn and not force:
         return {"ok": False, "status": 409, "needs_force": True, "error": warn}
@@ -18426,6 +18442,9 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
             # @Utdreg_bot already heard of a change that didn't happen: the unit goes to it again as it is
             _utd_mark_reopen(fid)
         if swapped is None:
+            now = db_get_fulfilment(fid)
+            if fill and now and now[5] != "delivered" and _unit_info(now[6]):
+                return {"ok": False, "status": 409, "error": "The details were sent meanwhile; reopen it."}
             return {"ok": False, "status": 409, "error": "This item was already delivered."}
         return {"ok": False, "status": 500, "error": "The subscription couldn't be changed; nothing was changed. "
                                                      "Try again."}
@@ -18434,6 +18453,8 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
         db_del_meta(f"bundle_code_sent:{fid}")
     if fill and info and info.get("account_type") == "new" and (info.get("email") or info.get("username")):
         db_record_used_credentials(user_id, new_item, info.get("email"), info.get("username"))
+    if fill and new_item in UTD_AUTOMATION_ITEMS and _utd_closed_already(fid):
+        _utd_mark_reopen(fid)   # @Utdreg_bot took it off its list before: it goes back on it with these details
     addon_fid = None
     if addon:
         plan_info = info if info else (_unit_info(info_json) if same else None)
@@ -18445,6 +18466,10 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
             addon_fid = db_add_addon_unit(order_id, user_id, addon, addon_info, total)
         except Exception:
             logger.exception("change_unit_item: couldn't add %s to order #%s", addon, order_id)
+            if total is not None:      # the typed total still applies
+                conn = sqlite3.connect(DB_PATH)
+                conn.execute("UPDATE orders SET total = ? WHERE id = ?", (round(float(total), 2), order_id))
+                conn.commit(); conn.close()
     if utd_kind == "reask" and told is False:
         _set_reask_pending(fid, {"kind": ask_type, "applied": True})
 
@@ -18468,6 +18493,16 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
                                            (order_id,)).fetchall()]
         conn.close()
 
+    if fill and not by_admin and user_id and state == "needs_info":
+        # they were asked for these details: once, no credentials, before what the queue says next
+        try:
+            await application.bot.send_message(chat_id=user_id, text=(
+                f"✅ No need to send the details for {MENU[new_item][0]} (Order #{order_id}) — we've added them."))
+        except Exception:
+            logger.exception("change_unit_item: couldn't tell user %s", user_id)
+        customer_told = True
+    else:
+        customer_told = False
     ctx = _HttpContext(application, ADMIN_CHAT_ID)
     reached = None
     if asking:
@@ -18479,8 +18514,13 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
         try:
             if not (same and not fill):
                 await process_next_in_queue(ctx, user_id, order_id, only_fid=fid)
-            if addon_fid and (db_get_fulfilment(addon_fid) or (None,) * 7)[6]:
+            # an order by the admin: the add-on goes on regardless (its code, or the deliver-by-hand notice)
+            if addon_fid and (by_admin or (db_get_fulfilment(addon_fid) or (None,) * 7)[6]):
                 await process_next_in_queue(ctx, user_id, order_id, only_fid=addon_fid)
+            if fill and new_item not in IMD_TRIGGER_ITEMS:
+                # the order's queue carries on as after a customer's own submission (add-ons take these details,
+                # the next unit is asked); an iMD run advances it itself
+                await process_next_in_queue(ctx, user_id, order_id)
         except Exception:
             logger.exception("change_unit_item: the next step of order #%s unit %s failed", order_id, fid)
         after = db_get_fulfilment(fid)
@@ -18502,16 +18542,6 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
         except Exception:
             logger.exception("DAILY_SALES for %s after changing order #%s failed", day, order_id)
 
-    if fill and not by_admin and user_id and state == "needs_info":
-        # they were asked for these details: once, no credentials
-        try:
-            await application.bot.send_message(chat_id=user_id, text=(
-                f"✅ No need to send the details for {MENU[new_item][0]} (Order #{order_id}) — we've added them."))
-        except Exception:
-            logger.exception("change_unit_item: couldn't tell user %s", user_id)
-        customer_told = True
-    else:
-        customer_told = False
     if notify and not by_admin and user_id and not (fill and not addon):
         try:
             await application.bot.send_message(chat_id=user_id, text=(
@@ -18530,16 +18560,16 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
     if warn:
         lines.append(f"⚠️ {warn}")
     lines.append(f"Next: {nxt}")
+    if customer_told:
+        lines.insert(1, "The customer was told they don't need to send them.")
+    if addon and not addon_fid:
+        lines.append(f"⚠️ {MENU[addon][0]} couldn't be added to the order: add it again.")
     note_text = "\n".join(lines)
     if ADMIN_CHAT_ID:
         try:
             await application.bot.send_message(chat_id=ADMIN_CHAT_ID, text=note_text)
         except Exception:
             logger.exception("change_unit_item: couldn't tell the admin about order #%s", order_id)
-    if customer_told:
-        lines.insert(1, "The customer was told they don't need to send them.")
-    if addon and not addon_fid:
-        lines.append(f"⚠️ {MENU[addon][0]} couldn't be added to the order: add it again.")
     logger.info("Order #%s unit %s: subscription changed %s → %s%s by the admin (%s)", order_id, fid, old_item, new_item,
                 f" + {addon}" if addon else "", "filled" if fill else "asked" if asking else "details" if info else "no details")
     return {"ok": True, "note": note_text, "order_id": order_id, "item_id": new_item, "name": new_name,

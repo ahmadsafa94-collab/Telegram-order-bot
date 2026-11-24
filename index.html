@@ -2349,7 +2349,7 @@ function drawEditChangeItems(q){
 function editItemChanged(){
   const sel=document.getElementById('chItem'); if(!sel||!editD) return;
   // the same product on an item with no details yet: ✍️ the admin adds them (owner, 24 Nov 2026)
-  chItem=sel.value===editD.item_id&&editD.has_details!==false?'':sel.value;
+  chItem=sel.value===editD.item_id&&(editD.has_details!==false||!(chProduct(editD.item_id)||{}).details)?'':sel.value;
   const body=document.getElementById('editChangeBody'), btn=document.getElementById('editSend');
   const msg=document.getElementById('editMsg'); msg.textContent='';
   if(!chItem){
