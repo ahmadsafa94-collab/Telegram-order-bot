@@ -891,6 +891,9 @@ body.cat-picked #catSec{min-height:calc(100vh - 60px)}   /* tiles stay put on sh
     <div class="sheet-title" id="editTitle">✏️ Edit details</div>
     <div style="padding:0 15px 15px">
       <div class="t-meta" id="editSub" style="margin:6px 0 10px"></div>
+      <!-- 🔀 Change subscription: the admin only (24 Nov 2026) -->
+      <div id="editChange" style="display:none"></div>
+      <div id="editChangeBody" style="display:none"></div>
       <div id="editTypes"></div>
       <div id="editFields" style="margin-top:10px"></div>
       <div id="editMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div>
@@ -2161,7 +2164,7 @@ function drawAdminPending(){
         prevHtml(i)+
         (i.can_reask?'<button class="tk-btn" style="margin-top:8px" onclick="openReask('+i.fid+')">🔁 Ask again'+(i.can_switch?' · new / renewal':'')+'</button>':'')+
         (i.asked_again?'<button class="tk-btn" style="margin-top:8px" onclick="cancelReask('+i.fid+')">↩️ Cancel re-ask</button>':'')+
-        (i.can_edit?'<button class="tk-btn" style="margin-top:8px" onclick="openEdit('+i.fid+')">✏️ Edit details</button>':'')+
+        (i.can_edit||i.can_change?'<button class="tk-btn" style="margin-top:8px" onclick="openEdit('+i.fid+')">✏️ Edit details'+(i.can_change?' · 🔀 subscription':'')+'</button>':'')+
         '</div>').join('')).join('');
 }
 function deleteAdminOrder(orderId){
@@ -2247,27 +2250,138 @@ async function sendReask(force){
 const EDIT_FIELDS={new:[['first_name','First name'],['last_name','Last name'],['email','Email','email'],['username','Username'],['password','Password']],
   renew:[['login_username','Username or email used to log in'],['login_password','Password used to log in']]};
 const EDIT_CARRY={username:'login_username',login_username:'username',password:'login_password',login_password:'password'};
-let editFid=null, editType='new', editVals={};
+let editFid=null, editType='new', editVals={}, editD=null, chItem='', chMode='details', chAsk='any';
 async function openEdit(fid){
-  editFid=fid; editVals={};
+  editFid=fid; editVals={}; editD=null; chItem=''; chMode='details'; chAsk='any';
   const msg=document.getElementById('editMsg');
   document.getElementById('editTitle').textContent='✏️ Edit details';
   document.getElementById('editSub').textContent='Loading…';
   document.getElementById('editTypes').innerHTML=''; document.getElementById('editFields').innerHTML='';
-  document.getElementById('editSend').style.display='none'; msg.textContent='';
+  ['editChange','editChangeBody'].forEach(id=>{ const b=document.getElementById(id); b.innerHTML=''; b.style.display='none'; });
+  document.getElementById('editSend').style.display='none'; document.getElementById('editSend').textContent='💾 Save changes'; msg.textContent='';
   document.getElementById('editOverlay').classList.add('on');
   try{
     const resp=await fetch(withAuth('/api/unit_details')+'&fid='+encodeURIComponent(fid));
     const d=await resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
     if(editFid!==fid) return;
     if(!d.ok) throw new Error(d.error||('HTTP '+resp.status));
+    editD=d;
     document.getElementById('editTitle').textContent='✏️ '+d.name+' · Order #'+d.order_id;
+    editType=d.account_type==='renew'?'renew':'new'; editVals=Object.assign({},d.fields||{});
+    if(d.can_change){ drawEditChange(); return; }
     if(!d.editable){ document.getElementById('editSub').textContent=d.problem||'These details can\'t be edited now.'; return; }
     document.getElementById('editSub').textContent='Subscription: '+d.name+' (it can\'t be changed). Change the account details, or switch between a new account and a renewal.';
-    editType=d.account_type==='renew'?'renew':'new'; editVals=Object.assign({},d.fields||{});
     document.getElementById('editSend').style.display='';
     drawEdit();
   }catch(e){ if(editFid===fid){ document.getElementById('editSub').textContent=''; msg.style.color='#dc2626'; msg.textContent='Could not load the details: '+(e.message||e); } }
+}
+// 🔀 Change subscription (owner, 24 Nov 2026): the admin picks another product for this pending item. Every value from
+// the customer or a product name goes in through textContent / .value, never into the HTML.
+function drawEditChange(){
+  const box=document.getElementById('editChange'); box.style.display='';
+  document.getElementById('editSub').textContent='Change the account details, or pick another subscription for this item.';
+  box.innerHTML='<div style="font-size:12px;color:var(--hint);margin:4px 0 3px">🔀 Subscription</div>'+
+    '<input id="chSearch" class="cw-input" type="text" autocomplete="off" placeholder="🔎 Search subscriptions" aria-label="Search subscriptions" style="margin-bottom:6px">'+
+    '<select id="chItem" class="cw-input" aria-label="Subscription" style="margin-bottom:8px"></select>';
+  document.getElementById('chSearch').oninput=e=>drawEditChangeItems(e.target.value);
+  document.getElementById('chItem').onchange=editItemChanged;
+  drawEditChangeItems(''); document.getElementById('chItem').value=editD.item_id; editItemChanged();
+}
+function drawEditChangeItems(q){
+  const sel=document.getElementById('chItem'), keep=sel.value; q=(q||'').trim().toLowerCase();
+  sel.innerHTML='';
+  const list=(editD.products||[]).filter(p=>p.id===editD.item_id||!q||p.name.toLowerCase().includes(q)||p.id.toLowerCase()===q);
+  list.forEach(p=>{ const o=document.createElement('option'); o.value=p.id;
+    o.textContent=p.name+' · $'+p.price+(p.id===editD.item_id?' (now)':'')+(p.oos?' · out of stock':''); sel.appendChild(o); });
+  if(list.some(p=>p.id===keep)) sel.value=keep; else { sel.value=editD.item_id; editItemChanged(); }
+}
+function editItemChanged(){
+  const sel=document.getElementById('chItem'); if(!sel||!editD) return;
+  chItem=sel.value===editD.item_id?'':sel.value;
+  const body=document.getElementById('editChangeBody'), btn=document.getElementById('editSend');
+  const msg=document.getElementById('editMsg'); msg.textContent='';
+  if(!chItem){
+    body.innerHTML=''; body.style.display='none';
+    if(editD.editable){ btn.textContent='💾 Save changes'; btn.style.display=''; drawEdit(); }
+    else { btn.style.display='none'; document.getElementById('editTypes').innerHTML=''; document.getElementById('editFields').innerHTML='';
+      if(editD.problem){ msg.style.color='var(--hint)'; msg.textContent=editD.problem; } }
+    return;
+  }
+  editKeep();
+  document.getElementById('editTypes').innerHTML=''; document.getElementById('editFields').innerHTML='';
+  chMode='details'; chAsk='any'; body.style.display=''; btn.textContent='🔀 Change subscription'; btn.style.display='';
+  drawChangeBody();
+}
+function chProduct(id){ return (editD.products||[]).find(p=>p.id===id); }
+function drawChangeBody(){
+  const p=chProduct(chItem), body=document.getElementById('editChangeBody'); if(!p) return;
+  const lbl=t=>'<div style="font-size:12px;color:var(--hint);margin:8px 0 3px">'+t+'</div>';
+  const opt=(v,l,cur,fn)=>'<button class="tk-btn" style="margin-top:6px;'+(cur===v?'outline:2px solid var(--accent,#3b82f6)':'')+'" onclick="'+fn+'(\''+v+'\')">'+(cur===v?'● ':'○ ')+l+'</button>';
+  const generic=p.details&&!IMD.has(p.id);
+  body.innerHTML=
+    (p.details?lbl('Account details')+opt('details','✍️ Enter the details',chMode,'setChMode')+
+      opt('ask',editD.by_admin?'📝 No details (deliver it by hand)':'📨 Ask the customer',chMode,'setChMode'):'')+
+    '<div id="chWarn" style="font-size:12px;margin:8px 0 0"></div>'+
+    '<div id="chDetails" style="margin-top:8px"></div>'+
+    (chMode==='ask'&&!editD.by_admin?(generic?lbl('Set it up as')+opt('new','🆕 New account',chAsk,'setChAsk')+opt('renew','🔄 Renewal',chAsk,'setChAsk')+opt('any','↩️ Let the customer choose',chAsk,'setChAsk'):'')+
+      lbl('Note to include (optional)')+'<textarea id="chNote" class="cw-input" rows="2" maxlength="1000" aria-label="Note"></textarea>':'')+
+    lbl('Money')+'<div id="chMoney" class="t-meta" style="margin:0 0 6px"></div>'+
+    '<div style="display:flex;gap:8px;align-items:center"><input id="chTotal" class="cw-input" type="number" inputmode="decimal" min="0" max="10000" step="0.01" aria-label="Order total" style="margin:0;flex:1">'+
+    '<button class="tk-btn" id="chDiff" style="width:auto;white-space:nowrap" onclick="chApplyDiff()">± apply difference</button></div>'+
+    '<div class="t-meta" style="margin:4px 0 0">Order total: kept unless you change it. Nothing is refunded or credited.</div>'+
+    (editD.by_admin?'':'<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin:10px 0 0"><input type="checkbox" id="chNotify" checked> Tell the customer about the change</label>');
+  const old=chProduct(editD.item_id)||{price:0}, T=Number(editD.total||0);
+  document.getElementById('chMoney').textContent='Paid $'+T+' · '+(old.name||editD.name)+' $'+old.price+' → '+p.name+' $'+p.price;
+  document.getElementById('chTotal').value=T;
+  const warn=[];
+  if(p.oos) warn.push('⚠️ Out of stock right now.');
+  if(p.instant) warn.push('⚡ Delivered automatically right after you save ('+(IMD.has(p.id)?'the iMD registration runs':'a code from the pool')+').');
+  if(p.addon) warn.push('ℹ️ An Uptodate AI add-on goes on the Uptodate account in the same order.');
+  const w=document.getElementById('chWarn'); w.textContent=warn.join(' '); w.style.color=p.oos||p.instant?'#d97706':'var(--hint)';
+  const box=document.getElementById('chDetails'); box.innerHTML='';
+  if(p.details&&chMode==='ask') return;
+  // the cart's own detail block (same fields and checks), without its × remove button, prefilled where names match
+  const block=p.details?makeDetailBlock(p.id,escHtml(p.name),p.price,'ed'):makeNoDetailsBlock(p.id,escHtml(p.name),p.price,'ed');
+  const rm=block.querySelector('.rm'); if(rm) rm.style.display='none';
+  box.appendChild(block);
+  const have=Object.assign({},editD.all_fields||{});
+  if(p.details&&have.account_type==='renew'){ const b=block.querySelectorAll('.tbtn')[1]; if(b) setType(b,'renew',p.id,'ed'); }
+  block.querySelectorAll('input').forEach(inp=>{ const v=have[inp.name]; if(v!=null&&v!=='') inp.value=String(v); });
+}
+function setChMode(m){ chMode=m; drawChangeBody(); }
+function setChAsk(t){ const n=document.getElementById('chNote'), keep=n?n.value:''; chAsk=t; drawChangeBody(); const n2=document.getElementById('chNote'); if(n2) n2.value=keep; }
+function chApplyDiff(){
+  const p=chProduct(chItem), old=chProduct(editD.item_id); if(!p||!old) return;
+  const v=Math.max(0,Math.round((Number(editD.total||0)-old.price+p.price)*100)/100);
+  document.getElementById('chTotal').value=v;
+}
+async function saveChange(force){
+  const fid=editFid, p=chProduct(chItem); if(!fid||!p) return;
+  const msg=document.getElementById('editMsg'), btn=document.getElementById('editSend');
+  const bad=t=>{ msg.style.color='#dc2626'; msg.textContent=t; };
+  const box=document.getElementById('chDetails');
+  const asking=p.details&&chMode==='ask';
+  if(!asking&&p.details&&!validateDetails(box)) return bad('Fix the highlighted account details.');
+  const details=asking?null:(collectDetails(box)[0]||{});
+  const tTxt=document.getElementById('chTotal').value.trim(), T=Number(editD.total||0);
+  let total=null;
+  if(tTxt!==''&&Number(tTxt)!==T){ total=Number(tTxt); if(!isFinite(total)||total<0||total>10000) return bad('Type the order total in USD (0 to 10000).'); }
+  const n=document.getElementById('chNote'), cb=document.getElementById('chNotify');
+  btn.disabled=true; msg.style.color='var(--hint)'; msg.textContent='Saving…';
+  try{
+    const resp=await fetch(withAuth('/api/admin_change_unit_item'),{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({fulfilment_id:fid,item_id:p.id,mode:asking?'ask':'details',details,ask_type:chAsk,
+        note:n?n.value.trim():'',total,notify:cb?cb.checked:false,force:!!force})});
+    const data=await resp.json().catch(()=>({ok:false,error:'Unexpected response from server.'}));
+    if(!data.ok){
+      bad(data.error||'Could not change the subscription.');
+      if(data.needs_force) askConfirm((data.error||'')+' Change anyway?',()=>saveChange(true));
+      return;
+    }
+    closeEdit(); showToast('🔀 Now '+data.name);
+    if(typeof adminPending!=='undefined'&&adminPending.some(x=>x.fid===fid)) renderAdminPending();
+  }catch(e){ bad('Network error — please try again.'); }
+  finally{ btn.disabled=false; }
 }
 function editKeep(){
   (EDIT_FIELDS[editType]||[]).forEach(([k])=>{ const el=document.getElementById('ef-'+k); if(el) editVals[k]=el.value; });
@@ -2286,8 +2400,12 @@ function drawEdit(){
   // the customer's values only ever go in through .value, never into the HTML
   (EDIT_FIELDS[editType]||[]).forEach(([k])=>{ const el=document.getElementById('ef-'+k); if(el) el.value=editVals[k]||''; });
 }
-function closeEdit(){ document.getElementById('editOverlay').classList.remove('on'); editFid=null; }
+function closeEdit(){
+  document.getElementById('editOverlay').classList.remove('on'); editFid=null; editD=null; chItem='';
+  const b=document.getElementById('editChangeBody'); if(b) b.innerHTML='';   // no customer details left in the page
+}
 async function saveEdit(force){
+  if(chItem) return saveChange(force);
   const fid=editFid; if(!fid) return;
   editKeep();
   const fields={}; (EDIT_FIELDS[editType]||[]).forEach(([k])=>{ fields[k]=(editVals[k]||'').trim(); });
