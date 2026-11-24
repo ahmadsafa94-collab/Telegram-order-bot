@@ -9431,6 +9431,13 @@ def db_get_meta(key: str):
     return row[0] if row else None
 
 
+def db_del_meta(key: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM app_meta WHERE key = ?", (key,))
+    conn.commit()
+    conn.close()
+
+
 def db_set_meta(key: str, value: str):
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
@@ -17948,6 +17955,14 @@ def _change_item_problem(row, new_item=None):
         return "That's already its subscription."
     if new_item.startswith("book_"):
         return "A book can't be chosen here."
+    conn = sqlite3.connect(DB_PATH)
+    later = conn.execute("SELECT 1 FROM fulfilment WHERE order_id = ? AND item_id = ? AND state = 'delivered' AND id > ?",
+                         (order_id, new_item, fid)).fetchone()
+    conn.close()
+    if later:
+        # deliveries pair with units by rank: this one would take over the delivered one's message
+        return (f"Order #{order_id} already has a delivered {MENU[new_item][0]} added after this item, so this one "
+                "can't become it. Delete this item and add it as a new order, or pick another subscription.")
     items = _order_items(order_id)
     if items.get(item_id):
         items[item_id] -= 1
@@ -17989,7 +18004,8 @@ def db_change_unit_item(fid: int, old_item: str, new_item: str, info, total=None
             old_reask = {}
         edits = [e for e in ((old_reask or {}).get("edits") or []) if isinstance(e, dict)]
         edits.append({"at": now, "by": "admin", "prev": prev, "prev_item": old_item})
-        new_no = conn.execute("SELECT COUNT(*) FROM fulfilment WHERE order_id = ? AND item_id = ?",
+        # after the highest number taken (a removed unit can leave a gap, so not COUNT + 1)
+        new_no = conn.execute("SELECT COALESCE(MAX(unit_no), 0) FROM fulfilment WHERE order_id = ? AND item_id = ?",
                               (order_id, new_item)).fetchone()[0] + 1
         cur = conn.execute("UPDATE fulfilment SET item_id = ?, unit_no = ?, info_json = ?, state = 'needs_info', "
                            "reask_json = ? WHERE id = ? AND item_id = ? AND state != 'delivered'",
@@ -18048,6 +18064,19 @@ def db_change_unit_item(fid: int, old_item: str, new_item: str, info, total=None
         raise
     finally:
         conn.close()
+
+
+def _utd_mark_reopen(fid):
+    """The unit goes to @Utdreg_bot again by itself (automation_push_job, with reopen) as it is now."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("INSERT INTO automation_outbox (fulfilment_id, info_hash, sent_at, tries) VALUES (?, 'reopen', NULL, 0) "
+                     "ON CONFLICT(fulfilment_id) DO UPDATE SET info_hash = 'reopen', sent_at = NULL, closed_sent = NULL, "
+                     "tries = 0, error = NULL, alerted = 0, reask_pending = NULL", (fid,))
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    conn.close()
 
 
 def _utd_closed_already(fid) -> bool:
@@ -18140,11 +18169,24 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
     elif new_item in UTD_AUTOMATION_ITEMS:
         utd_note = "it goes to @Utdreg_bot's 📥 Pending orders" + ("" if info else " once its details are sent")
 
-    async with unit_lock(fid):
-        db_snapshot_order(order_id)
-        swapped = db_change_unit_item(fid, old_item, new_item, info, total, outbox)
-    if swapped is None:
-        return {"ok": False, "status": 409, "error": "This item was already delivered."}
+    try:
+        async with unit_lock(fid):
+            db_snapshot_order(order_id)
+            swapped = db_change_unit_item(fid, old_item, new_item, info, total, outbox)
+    except Exception:
+        logger.exception("change_unit_item: the swap of order #%s unit %s failed", order_id, fid)
+        swapped = False
+    if not swapped:
+        if told is not None:
+            # @Utdreg_bot already heard of a change that didn't happen: the unit goes to it again as it is
+            _utd_mark_reopen(fid)
+        if swapped is None:
+            return {"ok": False, "status": 409, "error": "This item was already delivered."}
+        return {"ok": False, "status": 500, "error": "The subscription couldn't be changed; nothing was changed. "
+                                                     "Try again."}
+    if UPTODATE_AI_CODE_POOL.get(old_item) != UPTODATE_AI_CODE_POOL.get(new_item):
+        # a bundle's Telegram code from another pool (or none): the new product's own code is sent
+        db_del_meta(f"bundle_code_sent:{fid}")
     if utd_kind == "reask" and told is False:
         _set_reask_pending(fid, {"kind": ask_type, "applied": True})
 
@@ -22623,8 +22665,9 @@ async def automation_push_job(context: ContextTypes.DEFAULT_TYPE):
             # a result waiting for approval is dropped only when the admin made the edit (or chose 💾 Save anyway)
             payload.update(edit=True, force=r[7] == "edit-admin")
         elif r[7] == "reopen":
-            # 🔀 changed back to an UpToDate plan after @Utdreg_bot took it off its list (24 Nov 2026): back on it
-            payload["reopen"] = True
+            # 🔀 changed back to an UpToDate plan after @Utdreg_bot took it off its list (24 Nov 2026): back on it; as an
+            # edit (forced) so an N/R it started before (it may never have heard the close) is let go
+            payload.update(reopen=True, edit=True, force=True)
         status, body = await _automation_post("/api/order_pending", payload)
         conn = sqlite3.connect(DB_PATH)
         if status == 200 and body.get("ok"):

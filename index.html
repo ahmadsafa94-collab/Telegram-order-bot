@@ -2360,12 +2360,31 @@ function editItemChanged(){
   }
   editKeep();
   document.getElementById('editTypes').innerHTML=''; document.getElementById('editFields').innerHTML='';
-  chMode='details'; chAsk='any'; body.style.display=''; btn.textContent='🔀 Change subscription'; btn.style.display='';
+  chMode='details'; chAsk='any'; chKeep=null; body.innerHTML=''; body.dataset.item=''; body.style.display=''; btn.textContent='🔀 Change subscription'; btn.style.display='';
   drawChangeBody();
 }
 function chProduct(id){ return (editD.products||[]).find(p=>p.id===id); }
+function chSnap(){
+  // what the admin typed so far for the product drawn now (total, note, notify, details, New/Renewal)
+  const body=document.getElementById('editChangeBody');
+  const t=document.getElementById('chTotal'), n=document.getElementById('chNote'), cb=document.getElementById('chNotify');
+  const blk=document.querySelector('#chDetails .dblock'), vals={};
+  if(blk) blk.querySelectorAll('input').forEach(inp=>{ vals[inp.name]=inp.value; });
+  return {item:body.dataset.item||'',total:t?t.value:null,note:n?n.value:null,notify:cb?cb.checked:null,vals,
+          type:blk?blk.dataset.type||'new':null};
+}
+let chKeep=null;
 function drawChangeBody(){
   const p=chProduct(chItem), body=document.getElementById('editChangeBody'); if(!p) return;
+  // kept across a redraw of the same product (🔀 mode / set-it-up-as toggles), dropped when another one is picked
+  const snap=chSnap();
+  if(snap.item===chItem&&snap.total!==null){
+    const prev=chKeep&&chKeep.item===chItem?chKeep:{vals:{}};
+    chKeep={item:chItem,total:snap.total,note:snap.note!==null?snap.note:(prev.note!=null?prev.note:null),
+      notify:snap.notify!==null?snap.notify:(prev.notify!=null?prev.notify:null),
+      vals:Object.assign({},prev.vals||{},snap.vals),type:snap.type||prev.type||null};
+  }
+  body.dataset.item=chItem;
   const lbl=t=>'<div style="font-size:12px;color:var(--hint);margin:8px 0 3px">'+t+'</div>';
   const opt=(v,l,cur,fn)=>'<button class="tk-btn" style="margin-top:6px;'+(cur===v?'outline:2px solid var(--accent,#3b82f6)':'')+'" onclick="'+fn+'(\''+v+'\')">'+(cur===v?'● ':'○ ')+l+'</button>';
   const generic=p.details&&!IMD.has(p.id);
@@ -2384,6 +2403,10 @@ function drawChangeBody(){
   const old=chProduct(editD.item_id)||{price:0}, T=Number(editD.total||0);
   document.getElementById('chMoney').textContent='Paid $'+T+' · '+(old.name||editD.name)+' $'+old.price+' → '+p.name+' $'+p.price;
   document.getElementById('chTotal').value=T;
+  const K=chKeep&&chKeep.item===chItem?chKeep:null;
+  if(K){ if(K.total!==null) document.getElementById('chTotal').value=K.total;
+    const n2=document.getElementById('chNote'); if(n2&&K.note!==null) n2.value=K.note;
+    const c2=document.getElementById('chNotify'); if(c2&&K.notify!==null) c2.checked=K.notify; }
   const warn=[];
   if(p.oos) warn.push('⚠️ Out of stock right now.');
   if(p.instant) warn.push('⚡ Delivered automatically right after you save ('+(IMD.has(p.id)?'the iMD registration runs':'a code from the pool')+').');
@@ -2396,11 +2419,13 @@ function drawChangeBody(){
   const rm=block.querySelector('.rm'); if(rm) rm.style.display='none';
   box.appendChild(block);
   const have=Object.assign({},editD.all_fields||{});
-  if(p.details&&have.account_type==='renew'){ const b=block.querySelectorAll('.tbtn')[1]; if(b) setType(b,'renew',p.id,'ed'); }
-  block.querySelectorAll('input').forEach(inp=>{ const v=have[inp.name]; if(v!=null&&v!=='') inp.value=String(v); });
+  const wantType=K&&K.type?K.type:(have.account_type==='renew'?'renew':'new');
+  if(p.details&&wantType==='renew'){ const b=block.querySelectorAll('.tbtn')[1]; if(b) setType(b,'renew',p.id,'ed'); }
+  block.querySelectorAll('input').forEach(inp=>{ const v=K&&K.vals&&inp.name in K.vals?K.vals[inp.name]:have[inp.name];
+    if(v!=null&&v!=='') inp.value=String(v); });
 }
 function setChMode(m){ chMode=m; drawChangeBody(); }
-function setChAsk(t){ const n=document.getElementById('chNote'), keep=n?n.value:''; chAsk=t; drawChangeBody(); const n2=document.getElementById('chNote'); if(n2) n2.value=keep; }
+function setChAsk(t){ chAsk=t; drawChangeBody(); }
 function chApplyDiff(){
   const p=chProduct(chItem), old=chProduct(editD.item_id); if(!p||!old) return;
   const v=Math.max(0,Math.round((Number(editD.total||0)-old.price+p.price)*100)/100);
