@@ -2348,7 +2348,8 @@ function drawEditChangeItems(q){
 }
 function editItemChanged(){
   const sel=document.getElementById('chItem'); if(!sel||!editD) return;
-  chItem=sel.value===editD.item_id?'':sel.value;
+  // the same product on an item with no details yet: ✍️ the admin adds them (owner, 24 Nov 2026)
+  chItem=sel.value===editD.item_id&&editD.has_details!==false?'':sel.value;
   const body=document.getElementById('editChangeBody'), btn=document.getElementById('editSend');
   const msg=document.getElementById('editMsg'); msg.textContent='';
   if(!chItem){
@@ -2360,10 +2361,14 @@ function editItemChanged(){
   }
   editKeep();
   document.getElementById('editTypes').innerHTML=''; document.getElementById('editFields').innerHTML='';
-  chMode='details'; chAsk='any'; chKeep=null; body.innerHTML=''; body.dataset.item=''; body.style.display=''; btn.textContent='🔀 Change subscription'; btn.style.display='';
+  chMode='details'; chAsk='any'; chKeep=null; body.innerHTML=''; body.dataset.item=''; body.style.display='';
+  btn.textContent=chItem===editD.item_id?'💾 Save details':'🔀 Change subscription'; btn.style.display='';
   drawChangeBody();
 }
 function chProduct(id){ return (editD.products||[]).find(p=>p.id===id); }
+// ✍️ only the details of this item (same product) · 🔗 a plan + AI add-on whose plan this item already is (only the add-on is added)
+const chFill=()=>chItem===editD.item_id;
+const chAddOnly=p=>!!(p&&p.combo&&p.combo.plan===editD.item_id&&editD.has_details!==false);
 function chSnap(){
   // what the admin typed so far for the product drawn now (total, note, notify, details, New/Renewal)
   const body=document.getElementById('editChangeBody');
@@ -2387,22 +2392,29 @@ function drawChangeBody(){
   body.dataset.item=chItem;
   const lbl=t=>'<div style="font-size:12px;color:var(--hint);margin:8px 0 3px">'+t+'</div>';
   const opt=(v,l,cur,fn)=>'<button class="tk-btn" style="margin-top:6px;'+(cur===v?'outline:2px solid var(--accent,#3b82f6)':'')+'" onclick="'+fn+'(\''+v+'\')">'+(cur===v?'● ':'○ ')+l+'</button>';
-  const generic=p.details&&!IMD.has(p.id);
+  const fill=chFill(), addOnly=chAddOnly(p), bid=p.combo?p.combo.plan:p.id;
+  const needs=p.details&&!addOnly;
+  if(fill||addOnly) chMode='details';
+  const generic=needs&&!IMD.has(bid);
   body.innerHTML=
-    (p.details?lbl('Account details')+opt('details','✍️ Enter the details',chMode,'setChMode')+
+    (fill?'<div class="t-meta" style="margin:0 0 4px">No details were sent for this item yet: enter them and it goes on like any order.</div>':'')+
+    (addOnly?'<div class="t-meta" id="chAddOnly" style="margin:0 0 4px"></div>':'')+
+    (needs&&!fill?lbl('Account details')+opt('details','✍️ Enter the details',chMode,'setChMode')+
       opt('ask',editD.by_admin?'📝 No details (deliver it by hand)':'📨 Ask the customer',chMode,'setChMode'):'')+
     '<div id="chWarn" style="font-size:12px;margin:8px 0 0"></div>'+
     '<div id="chDetails" style="margin-top:8px"></div>'+
     (chMode==='ask'&&!editD.by_admin?(generic?lbl('Set it up as')+opt('new','🆕 New account',chAsk,'setChAsk')+opt('renew','🔄 Renewal',chAsk,'setChAsk')+opt('any','↩️ Let the customer choose',chAsk,'setChAsk'):'')+
       lbl('Note to include (optional)')+'<textarea id="chNote" class="cw-input" rows="2" maxlength="1000" aria-label="Note"></textarea>':'')+
+    (fill?'<div id="chMoneyBox" style="display:none">':'<div id="chMoneyBox">')+
     lbl('Money')+'<div id="chMoney" class="t-meta" style="margin:0 0 6px"></div>'+
     '<div style="display:flex;gap:8px;align-items:center"><input id="chTotal" class="cw-input" type="number" inputmode="decimal" min="0" max="10000" step="0.01" aria-label="Order total" style="margin:0;flex:1">'+
     '<button class="tk-btn" id="chDiff" style="width:auto;white-space:nowrap" onclick="chApplyDiff()">± apply difference</button></div>'+
-    '<div class="t-meta" style="margin:4px 0 0">Order total: kept unless you change it. Nothing is refunded or credited.</div>'+
-    (editD.by_admin?'':'<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin:10px 0 0"><input type="checkbox" id="chNotify" checked> Tell the customer about the change</label>');
+    '<div class="t-meta" style="margin:4px 0 0">Order total: kept unless you change it. Nothing is refunded or credited.</div></div>'+
+    (editD.by_admin||fill?'':'<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin:10px 0 0"><input type="checkbox" id="chNotify" checked> Tell the customer about the change</label>');
   const old=chProduct(editD.item_id)||{price:0}, T=Number(editD.total||0);
   document.getElementById('chMoney').textContent='Paid $'+T+' · '+(old.name||editD.name)+' $'+old.price+' → '+p.name+' $'+p.price;
   document.getElementById('chTotal').value=T;
+  if(addOnly) document.getElementById('chAddOnly').textContent='Adds '+p.name.slice((old.name||'').length+3)+' to this plan; the plan keeps its details.';
   const K=chKeep&&chKeep.item===chItem?chKeep:null;
   if(K){ if(K.total!==null) document.getElementById('chTotal').value=K.total;
     const n2=document.getElementById('chNote'); if(n2&&K.note!==null) n2.value=K.note;
@@ -2413,14 +2425,15 @@ function drawChangeBody(){
   if(p.addon) warn.push('ℹ️ An Uptodate AI add-on goes on the Uptodate account in the same order.');
   const w=document.getElementById('chWarn'); w.textContent=warn.join(' '); w.style.color=p.oos||p.instant?'#d97706':'var(--hint)';
   const box=document.getElementById('chDetails'); box.innerHTML='';
-  if(p.details&&chMode==='ask') return;
-  // the cart's own detail block (same fields and checks), without its × remove button, prefilled where names match
-  const block=p.details?makeDetailBlock(p.id,escHtml(p.name),p.price,'ed'):makeNoDetailsBlock(p.id,escHtml(p.name),p.price,'ed');
+  if((p.details&&chMode==='ask')||addOnly) return;
+  // the cart's own detail block (same fields and checks), without its × remove button, prefilled where names match;
+  // a 🔗 plan + add-on takes the plan's fields
+  const block=p.details?makeDetailBlock(bid,escHtml(p.name),p.price,'ed'):makeNoDetailsBlock(bid,escHtml(p.name),p.price,'ed');
   const rm=block.querySelector('.rm'); if(rm) rm.style.display='none';
   box.appendChild(block);
   const have=Object.assign({},editD.all_fields||{});
   const wantType=K&&K.type?K.type:(have.account_type==='renew'?'renew':'new');
-  if(p.details&&wantType==='renew'){ const b=block.querySelectorAll('.tbtn')[1]; if(b) setType(b,'renew',p.id,'ed'); }
+  if(p.details&&wantType==='renew'){ const b=block.querySelectorAll('.tbtn')[1]; if(b) setType(b,'renew',bid,'ed'); }
   block.querySelectorAll('input').forEach(inp=>{ const v=K&&K.vals&&inp.name in K.vals?K.vals[inp.name]:have[inp.name];
     if(v!=null&&v!=='') inp.value=String(v); });
 }
@@ -2436,9 +2449,9 @@ async function saveChange(force){
   const msg=document.getElementById('editMsg'), btn=document.getElementById('editSend');
   const bad=t=>{ msg.style.color='#dc2626'; msg.textContent=t; };
   const box=document.getElementById('chDetails');
-  const asking=p.details&&chMode==='ask';
-  if(!asking&&p.details&&!validateDetails(box)) return bad('Fix the highlighted account details.');
-  const details=asking?null:(collectDetails(box)[0]||{});
+  const asking=p.details&&chMode==='ask'&&!chFill(), addOnly=chAddOnly(p), chFillWas=chFill();
+  if(!asking&&!addOnly&&p.details&&!validateDetails(box)) return bad('Fix the highlighted account details.');
+  const details=asking||addOnly?null:(collectDetails(box)[0]||{});
   const tTxt=document.getElementById('chTotal').value.trim(), T=Number(editD.total||0);
   let total=null;
   if(tTxt!==''&&Number(tTxt)!==T){ total=Number(tTxt); if(!isFinite(total)||total<0||total>10000) return bad('Type the order total in USD (0 to 10000).'); }
@@ -2454,7 +2467,7 @@ async function saveChange(force){
       if(data.needs_force) askConfirm((data.error||'')+' Change anyway?',()=>saveChange(true));
       return;
     }
-    closeEdit(); showToast('🔀 Now '+data.name);
+    closeEdit(); showToast(chFillWas?'✍️ Details saved':'🔀 Now '+data.name);
     if(typeof adminPending!=='undefined'&&adminPending.some(x=>x.fid===fid)) renderAdminPending();
   }catch(e){ bad('Network error — please try again.'); }
   finally{ btn.disabled=false; }
@@ -2668,7 +2681,9 @@ function aoItemChanged(newPrice){
   if(!p) return;
   if(newPrice) document.getElementById('aoPrice').value=p.price;
   // the cart's own detail block (same fields, New / Renewal toggle), without its × remove button
-  const block=p.details?makeDetailBlock(p.id,escHtml(p.name),p.price,'ao'):makeNoDetailsBlock(p.id,escHtml(p.name),p.price,'ao');
+  // a 🔗 plan + AI add-on (24 Nov 2026) takes the plan's fields; the add-on gets them from it
+  const bid=p.combo?p.combo.plan:p.id;
+  const block=p.details?makeDetailBlock(bid,escHtml(p.name),p.price,'ao'):makeNoDetailsBlock(bid,escHtml(p.name),p.price,'ao');
   const rm=block.querySelector('.rm'); if(rm) rm.style.display='none';
   if(p.addon){ const n=document.createElement('div'); n.style.cssText='font-size:12px;color:#dc2626;padding:0 2px 8px'; n.textContent='An Uptodate AI add-on comes with an Uptodate plan: it can\'t be ordered alone.'; block.appendChild(n); }
   box.appendChild(block);

@@ -13186,8 +13186,39 @@ def _admin_order_products(coworker_id=None, extra: bool = False) -> list:
             p.update(oos=iid in out_of_stock, instant=iid in UPTODATE_AI_TRIGGER_ITEMS or iid in UPTODATE_AI_BUNDLE_ITEMS
                      or iid in IMD_TRIGGER_ITEMS)
         products.append(p)
+    # 🔗 an Uptodate plan with an AI add-on, as one choice (owner, 24 Nov 2026: "The AI add-on should be added to every
+    # one of the UpToDates to be chosen"): the plan unit + an add-on unit, priced plan + add-on. Like the cart, only
+    # today's plans (UPTODATE_PLAN_ITEMS) take an add-on, one of each per plan (addon_problem).
+    by_id = {p["id"]: p for p in products}
+    for plan in sorted(UPTODATE_PLAN_ITEMS):
+        for addon in sorted(UPTODATE_AI_ADDONS):
+            if plan not in by_id or addon not in by_id:
+                continue
+            a, b = by_id[plan], by_id[addon]
+            c = {"id": combo_id(plan, addon), "name": f"{a['name']} + {re.sub(r' add-on$', '', b['name'])}",
+                 "price": round(a["price"] + b["price"], 2), "details": True, "addon": False,
+                 "combo": {"plan": plan, "addon": addon}}
+            if extra:
+                c.update(oos=a.get("oos") or b.get("oos"), instant=False)
+            products.append(c)
     products.sort(key=lambda x: x["name"].lower())
     return products
+
+
+COMBO_PREFIX = "combo:"
+
+
+def combo_id(plan: str, addon: str) -> str:
+    return f"{COMBO_PREFIX}{plan}+{addon}"
+
+
+def parse_combo(item_id):
+    """(plan, add-on) of a 🔗 combo choice 'combo:<plan>+<add-on>', else None."""
+    if not isinstance(item_id, str) or not item_id.startswith(COMBO_PREFIX):
+        return None
+    plan, _, addon = item_id[len(COMBO_PREFIX):].partition("+")
+    return (plan, addon) if plan in UPTODATE_PLAN_ITEMS and addon in UPTODATE_AI_ADDONS and plan in MENU and addon in MENU \
+        else None
 
 
 async def http_admin_create_order(request):
@@ -13219,9 +13250,13 @@ async def http_admin_create_order(request):
                                   "earliest": earliest},
                                  headers=headers)
     item_id = data.get("item_id")
+    combo = parse_combo(item_id)                # 🔗 a plan + an AI add-on: two items in the order (24 Nov 2026)
+    if combo:
+        item_id = combo[0]
     if not isinstance(item_id, str) or item_id not in MENU:
         return bad("Pick the subscription.")
-    problem = addon_problem({item_id: 1})       # an Uptodate AI add-on alone is refused, as in the cart
+    items = {item_id: 1, **({combo[1]: 1} if combo else {})}
+    problem = addon_problem(items)              # an Uptodate AI add-on alone is refused, as in the cart
     if problem:
         return bad(problem)
     price = data.get("price")
@@ -13260,7 +13295,6 @@ async def http_admin_create_order(request):
     if problem:
         return bad(problem)
 
-    items = {item_id: 1}
     order_id = db_create_order(ADMIN_ORDER_USER_ID, None, items, round(float(price), 2))
     stamp = when.isoformat()
     conn = sqlite3.connect(DB_PATH)
@@ -13274,7 +13308,10 @@ async def http_admin_create_order(request):
         db_record_used_credentials(ADMIN_ORDER_USER_ID, item_id, info.get("email"), info.get("username"))
     db_add_fulfilment_items(order_id, ADMIN_ORDER_USER_ID, items)
     conn = sqlite3.connect(DB_PATH)
-    fid = conn.execute("SELECT id FROM fulfilment WHERE order_id = ?", (order_id,)).fetchone()[0]
+    # the plan's unit gets the details; an add-on takes them from it when the queue reaches it
+    fid = conn.execute("SELECT id FROM fulfilment WHERE order_id = ? AND item_id = ? ORDER BY id", (order_id, item_id)).fetchone()[0]
+    addon_fid = conn.execute("SELECT id FROM fulfilment WHERE order_id = ? AND item_id = ?", (order_id, combo[1])).fetchone()[0] \
+        if combo else None
     conn.close()
     db_set_fulfilment_info(fid, info)
     db_update_status(order_id, "paid")          # paid_at set above stays (COALESCE)
@@ -13291,8 +13328,10 @@ async def http_admin_create_order(request):
         except Exception:
             logger.exception("DAILY_SALES for %s after admin order #%s failed", local_day, order_id)
     state = (db_get_fulfilment(fid) or (None,) * 6)[5]
+    name = MENU[item_id][0] + (f" + {MENU[combo[1]][0]}" if combo else "")
     return web.json_response({"ok": True, "order_id": order_id, "fulfilment_id": fid, "state": state,
-                              "name": MENU[item_id][0], "coworker": coworker_name}, headers=headers)
+                              "name": name, "coworker": coworker_name,
+                              **({"addon_fulfilment_id": addon_fid} if addon_fid else {})}, headers=headers)
 
 
 async def http_admin_order_note(request):
@@ -17980,6 +18019,7 @@ async def http_unit_details(request):
         # 🔀 Change subscription (24 Nov 2026): only ever in the admin's answer
         change_problem = _change_item_problem(row)
         out.update(can_change=change_problem is None, change_problem=change_problem or "", item_id=row[3],
+                   has_details=bool(info),   # none yet: ✍️ the admin can add them (24 Nov 2026)
                    admin_note=db_get_admin_note(row[1]),
                    by_admin=row[2] == ADMIN_ORDER_USER_ID,
                    all_fields={k: str(v) for k, v in info.items() if isinstance(v, (str, int, float))})
@@ -18188,6 +18228,51 @@ def db_change_unit_item(fid: int, old_item: str, new_item: str, info, total=None
         conn.close()
 
 
+def db_fill_unit_info(fid: int, info) -> bool:
+    """✍️ The admin adds the details of a pending unit that has none (owner, 24 Nov 2026): stored, back to needs_info
+    so the normal path picks it up. False when it was delivered or got details meanwhile."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("UPDATE fulfilment SET info_json = ?, state = 'needs_info' WHERE id = ? AND state != 'delivered' "
+                       "AND COALESCE(info_json, '') IN ('', '{}', 'null')", (json.dumps(info) if info else None, fid))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def db_add_addon_unit(order_id: int, user_id: int, addon: str, info, total=None):
+    """🔗 An AI add-on unit added to an order (a plan + add-on choice, 24 Nov 2026), in one transaction: numbered after
+    the order's highest unit of it, items_json +1, its cost today in costs_json, the total when given. The new id."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        no = conn.execute("SELECT COALESCE(MAX(unit_no), 0) FROM fulfilment WHERE order_id = ? AND item_id = ?",
+                          (order_id, addon)).fetchone()[0] + 1
+        cur = conn.execute("INSERT INTO fulfilment (order_id, user_id, item_id, unit_no, state, info_json, created_at) "
+                           "VALUES (?, ?, ?, ?, 'needs_info', ?, ?)", (order_id, user_id, addon, no,
+                                                                      json.dumps(info) if info else None,
+                                                                      datetime.utcnow().isoformat()))
+        new_fid = cur.lastrowid
+        order = conn.execute("SELECT items_json, costs_json, total FROM orders WHERE id = ?", (order_id,)).fetchone()
+        try:
+            items = json.loads(order[0]) if order and order[0] else {}
+            costs = json.loads(order[1]) if order and order[1] else {}
+        except ValueError:
+            items, costs = {}, {}
+        items[addon] = items.get(addon, 0) + 1
+        known = db_get_item_costs()
+        if addon in known and addon not in costs:
+            costs[addon] = known[addon]
+        conn.execute("UPDATE orders SET items_json = ?, costs_json = ?, total = ? WHERE id = ?",
+                     (json.dumps(items), json.dumps(costs), round(float(total), 2) if total is not None else order[2],
+                      order_id))
+        conn.commit()
+        return new_fid
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def _utd_mark_reopen(fid):
     """The unit goes to @Utdreg_bot again by itself (automation_push_job, with reopen) as it is now."""
     conn = sqlite3.connect(DB_PATH)
@@ -18218,12 +18303,35 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
                            force: bool = False) -> dict:
     """🔀 Change subscription of a pending unit (the admin's ✏️ Edit details). mode: details (the admin enters them;
     a product without details takes none) | ask (the customer is asked, 🔄 Resend Credentials). total: the order's new
-    total, None keeps it. {ok, note} or {ok: False, error, status, busy?, needs_force?}."""
+    total, None keeps it. {ok, note} or {ok: False, error, status, busy?, needs_force?}.
+    new_item may be a 🔗 combo ('combo:<plan>+<add-on>'): the unit becomes the plan and an add-on unit is added (only the
+    add-on when it already is that plan). The same product on a unit without details: ✍️ the admin adds them (fill)."""
+    combo = parse_combo(new_item)
+    if combo:
+        new_item, addon = combo
+    else:
+        addon = None
     row = db_get_fulfilment(fulfilment_id)
-    problem = _change_item_problem(row, new_item)
+    same = bool(row) and new_item == row[3]
+    has_info = bool(row) and bool(_unit_info(row[6]))
+    fill = same and not has_info
+    problem = _change_item_problem(row, None if (fill or (same and addon)) else new_item)
+    if not problem and (fill or addon):
+        items = _order_items(row[1])
+        if not same and items.get(row[3]):
+            items[row[3]] -= 1
+            if items[row[3]] <= 0:
+                del items[row[3]]
+        if not same:
+            items[new_item] = items.get(new_item, 0) + 1
+        if addon:
+            items[addon] = items.get(addon, 0) + 1
+        problem = addon_problem(items)
     if problem:
         return {"ok": False, "status": 409 if not row or problem != "Pick the subscription." else 400, "error": problem}
     fid, order_id, user_id, old_item, unit_no, state, info_json = row
+    if fill and mode == "ask":
+        return {"ok": False, "status": 400, "error": "Enter the details (the customer is already being asked for them)."}
     by_admin = user_id == ADMIN_ORDER_USER_ID
     if total is not None:
         if isinstance(total, str):
@@ -18242,7 +18350,9 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
     if len(note) > REASK_NOTE_MAX:
         return {"ok": False, "status": 400, "error": f"The note is {len(note)} characters; it can be at most {REASK_NOTE_MAX}."}
     info, asking = None, False
-    if not takes_details:
+    if same and addon and has_info:
+        info = None                     # only the add-on is added; the plan keeps its details
+    elif not takes_details:
         info = None if new_item in UPTODATE_AI_ON_ACCOUNT else {"account_type": "new"}   # the add-on: its plan's details
     elif mode == "ask":
         asking = not by_admin           # an order by the admin has no customer: no details, the admin delivers it
@@ -18250,14 +18360,18 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
         info, err = _admin_order_details(new_item, details, user_id=user_id)
         if err:
             return {"ok": False, "status": 400, "error": err}
-    warn = _change_item_needs_force(row)
+    warn = None if same else _change_item_needs_force(row)
     if warn and not force:
         return {"ok": False, "status": 409, "needs_force": True, "error": warn}
-    old_name, new_name = MENU.get(old_item, (old_item,))[0], MENU[new_item][0]
+    old_name = MENU.get(old_item, (old_item,))[0]
+    new_name = MENU[new_item][0] + (f" + {re.sub(r' add-on$', '', MENU[addon][0])}" if addon else "")
 
     # @Utdreg_bot first, while it still has the unit
     utd_note, outbox, told, utd_kind = "", None, None, None
-    if old_item in UTD_AUTOMATION_ITEMS and _utd_unit_sent(fid) and AUTOMATION_API_URL and CATALOG_API_KEY:
+    if same:
+        if new_item in UTD_AUTOMATION_ITEMS and fill:
+            utd_note = "it goes to @Utdreg_bot's 📥 Pending orders"
+    elif old_item in UTD_AUTOMATION_ITEMS and _utd_unit_sent(fid) and AUTOMATION_API_URL and CATALOG_API_KEY:
         if new_item in UTD_AUTOMATION_ITEMS and asking:
             utd_kind = "reask"
             payload = {"fulfilment_id": fid, "order_id": order_id, "reask": True, "kind": ask_type, "force": bool(force)}
@@ -18294,7 +18408,16 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
     try:
         async with unit_lock(fid):
             db_snapshot_order(order_id)
-            swapped = db_change_unit_item(fid, old_item, new_item, info, total, outbox)
+            if fill:
+                swapped = db_fill_unit_info(fid, info) or None
+                if swapped and total is not None and not addon:
+                    conn = sqlite3.connect(DB_PATH)
+                    conn.execute("UPDATE orders SET total = ? WHERE id = ?", (round(float(total), 2), order_id))
+                    conn.commit(); conn.close()
+            elif same:
+                swapped = True          # only an add-on is added below
+            else:
+                swapped = db_change_unit_item(fid, old_item, new_item, info, None if addon else total, outbox)
     except Exception:
         logger.exception("change_unit_item: the swap of order #%s unit %s failed", order_id, fid)
         swapped = False
@@ -18306,9 +18429,22 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
             return {"ok": False, "status": 409, "error": "This item was already delivered."}
         return {"ok": False, "status": 500, "error": "The subscription couldn't be changed; nothing was changed. "
                                                      "Try again."}
-    if UPTODATE_AI_CODE_POOL.get(old_item) != UPTODATE_AI_CODE_POOL.get(new_item):
+    if not same and UPTODATE_AI_CODE_POOL.get(old_item) != UPTODATE_AI_CODE_POOL.get(new_item):
         # a bundle's Telegram code from another pool (or none): the new product's own code is sent
         db_del_meta(f"bundle_code_sent:{fid}")
+    if fill and info and info.get("account_type") == "new" and (info.get("email") or info.get("username")):
+        db_record_used_credentials(user_id, new_item, info.get("email"), info.get("username"))
+    addon_fid = None
+    if addon:
+        plan_info = info if info else (_unit_info(info_json) if same else None)
+        if addon in UPTODATE_AI_ON_ACCOUNT:
+            addon_info = dict(plan_info, for_account=MENU[new_item][0]) if plan_info else None
+        else:
+            addon_info = {"account_type": "new"}       # the Telegram bot code: nothing to fill in
+        try:
+            addon_fid = db_add_addon_unit(order_id, user_id, addon, addon_info, total)
+        except Exception:
+            logger.exception("change_unit_item: couldn't add %s to order #%s", addon, order_id)
     if utd_kind == "reask" and told is False:
         _set_reask_pending(fid, {"kind": ask_type, "applied": True})
 
@@ -18323,7 +18459,7 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
         if customer_data.get("registration_fulfilment_id") == fid:
             for key in [k for k in customer_data if k.startswith("registration_") or k == "awaiting_registration_field"]:
                 customer_data.pop(key, None)
-    if old_item in IMD_TRIGGER_ITEMS:
+    if old_item in IMD_TRIGGER_ITEMS and (not same or fill):
         pending = application.bot_data.get("pending_registrations", {})
         if isinstance(pending.get(order_id), dict) and pending[order_id].get("fulfilment_id") == fid:
             pending.pop(order_id, None)
@@ -18341,7 +18477,10 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
                "⚠️ the customer couldn't be reached; it waits for their details (Mini App: Complete Registration)")
     else:
         try:
-            await process_next_in_queue(ctx, user_id, order_id, only_fid=fid)
+            if not (same and not fill):
+                await process_next_in_queue(ctx, user_id, order_id, only_fid=fid)
+            if addon_fid and (db_get_fulfilment(addon_fid) or (None,) * 7)[6]:
+                await process_next_in_queue(ctx, user_id, order_id, only_fid=addon_fid)
         except Exception:
             logger.exception("change_unit_item: the next step of order #%s unit %s failed", order_id, fid)
         after = db_get_fulfilment(fid)
@@ -18354,7 +18493,8 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
     order = db_get_order(order_id)
     new_total = float(order[4] or 0) if order else 0.0
     cw = _order_coworker_id(order_id)
-    old_price, new_price = _coworker_unit_price_by_id(old_item, cw) if old_item in MENU else 0, _coworker_unit_price_by_id(new_item, cw)
+    old_price = _coworker_unit_price_by_id(old_item, cw) if old_item in MENU else 0
+    new_price = _coworker_unit_price_by_id(new_item, cw) + (_coworker_unit_price_by_id(addon, cw) if addon else 0)
     day = _order_paid_local_day(order_id)
     if day and day < (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date():
         try:
@@ -18362,13 +18502,25 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
         except Exception:
             logger.exception("DAILY_SALES for %s after changing order #%s failed", day, order_id)
 
-    if notify and not by_admin and user_id:
+    if fill and not by_admin and user_id and state == "needs_info":
+        # they were asked for these details: once, no credentials
+        try:
+            await application.bot.send_message(chat_id=user_id, text=(
+                f"✅ No need to send the details for {MENU[new_item][0]} (Order #{order_id}) — we've added them."))
+        except Exception:
+            logger.exception("change_unit_item: couldn't tell user %s", user_id)
+        customer_told = True
+    else:
+        customer_told = False
+    if notify and not by_admin and user_id and not (fill and not addon):
         try:
             await application.bot.send_message(chat_id=user_id, text=(
                 f"🔀 Order #{order_id}: {old_name} → {new_name}" + (f"\nOrder total: ${new_total:g}" if total is not None else "")))
         except Exception:
             logger.exception("change_unit_item: couldn't tell user %s", user_id)
-    lines = [f"🔀 Order #{order_id}: {old_name} → {new_name}",
+    head = (f"✍️ Order #{order_id} · {old_name}: details added by you" + (f", + {MENU[addon][0]}" if addon else "")
+            if fill else f"🔀 Order #{order_id}: {old_name} → {new_name}")
+    lines = [head,
              (f"Total: ${new_total:g} (typed)" if total is not None else f"Total kept: ${new_total:g}")
              + f" · list price ${old_price:g} → ${new_price:g}"]
     if utd_note:
@@ -18384,8 +18536,12 @@ async def change_unit_item(application, fulfilment_id: int, new_item: str, mode:
             await application.bot.send_message(chat_id=ADMIN_CHAT_ID, text=note_text)
         except Exception:
             logger.exception("change_unit_item: couldn't tell the admin about order #%s", order_id)
-    logger.info("Order #%s unit %s: subscription changed %s → %s by the admin (%s)", order_id, fid, old_item, new_item,
-                "asked" if asking else "details" if info else "no details")
+    if customer_told:
+        lines.insert(1, "The customer was told they don't need to send them.")
+    if addon and not addon_fid:
+        lines.append(f"⚠️ {MENU[addon][0]} couldn't be added to the order: add it again.")
+    logger.info("Order #%s unit %s: subscription changed %s → %s%s by the admin (%s)", order_id, fid, old_item, new_item,
+                f" + {addon}" if addon else "", "filled" if fill else "asked" if asking else "details" if info else "no details")
     return {"ok": True, "note": note_text, "order_id": order_id, "item_id": new_item, "name": new_name,
             "total": new_total, "reached": reached}
 
