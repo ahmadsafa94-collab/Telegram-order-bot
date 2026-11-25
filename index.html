@@ -1341,7 +1341,7 @@ const REMOVED_IDS = new Set((SUBS_DATA && SUBS_DATA.rm) || []);
 // coworkers. Its prices replace the regular ones (the old price is kept as `was`, shown crossed out with the red
 // note), its hidden items are left out, and it stops at its end time even on a link built earlier. The server
 // prices every order itself, so a page left open past the end is still charged the right amount.
-const PROMO_DATA = (!IS_COWORKER && SUBS_DATA && SUBS_DATA.pm && Date.now() < Date.parse(SUBS_DATA.pm.e)) ? SUBS_DATA.pm : null;
+const PROMO_DATA = (!IS_COWORKER && !ADMIN_EDIT && SUBS_DATA && SUBS_DATA.pm && Date.now() < Date.parse(SUBS_DATA.pm.e)) ? SUBS_DATA.pm : null;
 const PROMO_PRICES = (PROMO_DATA && PROMO_DATA.p) || {};
 const PROMO_HIDDEN = new Set((PROMO_DATA && PROMO_DATA.h) || []);
 const promoWas = id => (IMAP[id] && IMAP[id].was != null) ? IMAP[id].was : null;
@@ -1597,11 +1597,59 @@ const cartTotal=()=>{
 };
 const cartSize =()=>Object.values(cart).reduce((s,i)=>s+i.qty,0);
 
+// ── The promo as it is NOW (B1 PROMO, 25 Nov 2026) ──
+// The page fetches the bot's current promo (/api/promo) on load and again at checkout, so a page opened from an
+// older link (no `pm`, or one that has ended) still prices the basket right and keeps hidden items out before
+// payment. Customers only, never coworkers or the admin's editing link. The server prices the order regardless.
+let PROMO_LIVE;   // undefined until /api/promo answers; then the current promo or null
+function promoNow(){
+  if(IS_COWORKER||ADMIN_EDIT) return null;
+  const p = PROMO_LIVE!==undefined ? PROMO_LIVE : PROMO_DATA;
+  return (p && Date.now() < Date.parse(p.e)) ? p : null;
+}
+function promoRegular(id){ const i=IMAP[id]; return i ? (i.was!=null ? i.was : i.price) : null; }
+function promoLivePrice(id){
+  const reg=promoRegular(id), p=promoNow();
+  return (p && p.p && p.p[id]!=null && Number(p.p[id]) < reg) ? Number(p.p[id]) : reg;
+}
+function promoHiddenNow(id){ const p=promoNow(); return !!(p && (p.h||[]).includes(id)); }
+// Brings the basket in line with the promo as it is now; returns a note for the payment page, or ''.
+function syncPromoToCart(){
+  if(IS_COWORKER||ADMIN_EDIT) return '';
+  let ended=false; const removed=[];
+  Object.keys(cart).forEach(id=>{
+    if(!IMAP[id]) return;
+    if(promoHiddenNow(id)){
+      removed.push(cart[id].name); delete cart[id];
+      document.querySelectorAll('#ab-'+id).forEach(b=>{b.textContent='+';b.classList.remove('in');});
+      return;
+    }
+    const np=promoLivePrice(id);
+    if(np!==cart[id].price){ if(np>cart[id].price) ended=true; cart[id].price=np; }
+  });
+  if(ended||removed.length){ try{ syncBasket(); }catch(e){} }
+  return (ended?'The Black Friday price has ended, so regular prices apply. ':'')
+    +(removed.length?removed.join(', ')+" isn't available right now and was taken out of your basket.":'');
+}
+async function fetchPromo(){
+  if(IS_COWORKER||ADMIN_EDIT||!API_BASE) return;
+  try{ const r=await fetch(API_BASE+'/api/promo'); const d=await r.json(); if(d && 'promo' in d) PROMO_LIVE=d.promo||null; }catch(e){}
+}
+setTimeout(fetchPromo,0);
+function showPromoNote(text){
+  const old=document.getElementById('promoEndNote'); if(old) old.remove();
+  if(!text) return;
+  const n=document.createElement('div'); n.id='promoEndNote'; n.className='promo-note'; n.style.margin='0 2px 10px';
+  n.textContent=text;
+  const g=document.getElementById('pmGrid'); g.parentNode.insertBefore(n,g);
+}
+
 const MAX_QTY=20;   // per subscription in one order
 function addItem(id){
   const itm=IMAP[id]; if(!itm) return;
+  if(promoHiddenNow(id)){showToast("This subscription isn't available right now");return;}
   if(cart[id]&&cart[id].qty>=MAX_QTY){showToast('Up to '+MAX_QTY+' at a time');return;}
-  cart[id]=cart[id]?{...cart[id],qty:cart[id].qty+1}:{name:itm.fullname||itm.name,price:itm.price,qty:1};
+  cart[id]=cart[id]?{...cart[id],qty:cart[id].qty+1}:{name:itm.fullname||itm.name,price:promoLivePrice(id),qty:1};
   // A matched item can be showing in both the search results and its
   // normal category tab at once (the tab stays in the DOM, just
   // hidden) — update every button for this id, not just the first.
@@ -4491,6 +4539,9 @@ function effectiveTotal(){
   return Math.round(t*100)/100;
 }
 function buildPaymentPage(){
+  // the promo as it is now (it may have ended, or the link may be older than it); then re-checked with the server
+  const promoNote=syncPromoToCart();
+  if(!IS_COWORKER && !ADMIN_EDIT) fetchPromo().then(()=>{ const n=syncPromoToCart(); if(n){ buildPaymentPage(); showPromoNote(n); } });
   const total=effectiveTotal();
   // Clear previous payment method buttons — they capture `total` in their onclick
   // closure, so stale buttons from a previous buildPaymentPage call would fire
@@ -4502,6 +4553,7 @@ function buildPaymentPage(){
   const _ov=document.getElementById('pmDetailOverlay');
   if(_ov) _ov.classList.remove('on');
   selPay=null; selCountry=null; selApp=null;
+  showPromoNote(promoNote);
   const pmGrid=document.getElementById('pmGrid');
   if(POSTPAID){   // postpaid coworker: nothing to pay now, the order goes on their account
     document.getElementById('payTitle').textContent='Place your order';

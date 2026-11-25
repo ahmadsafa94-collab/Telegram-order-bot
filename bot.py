@@ -372,7 +372,7 @@ def customer_price(item_id: str, now: datetime = None) -> float:
     regular price (MENU, with the admin's price edits)."""
     promo = active_promo(now)
     if promo and item_id in promo.get("prices", {}):
-        return float(promo["prices"][item_id])
+        return min(float(promo["prices"][item_id]), MENU[item_id][1])   # never above the regular price
     return MENU[item_id][1]
 
 
@@ -5010,6 +5010,9 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
         if preview_coworker_id and coworker_login:
             data["cwn"] = coworker_login[1]
         elif admin_edit and user_id == ADMIN_CHAT_ID:
+            # no promo on the admin's own editing link: its ✏️ editor would otherwise start from the promo price
+            # and save it as the regular one
+            data.pop("pm", None)
             # Only the admin keyboard's own Shop button asks for this: it shows the
             # ✏️ editors. The Customer Menu's Shop stays exactly what a customer
             # sees. The server re-checks who is asking on every edit anyway.
@@ -11980,9 +11983,20 @@ async def _reuse_unpaid_order(application, user_id: int, existing, order_items: 
     except (ValueError, TypeError, AttributeError):
         current = {}
     if current == order_items:
-        return web.json_response(
-            {"error": "the customer already has an unpaid order", "order_id": order_id, "items": current}, status=409
-        )
+        body = {"error": "the customer already has an unpaid order", "order_id": order_id, "items": current}
+        if not (credits or discount_code or on_credit):
+            # priced as now (e.g. an order from before a promo started, or after it ended: PROMO), like a new one
+            total = _reply_bot_order_total(user_id, order_items)
+            conn = sqlite3.connect(DB_PATH)
+            row = conn.execute("SELECT total FROM orders WHERE id = ?", (order_id,)).fetchone()
+            if row and abs(float(row[0] or 0) - total) > 0.004:
+                conn.execute("UPDATE orders SET total = ? WHERE id = ? AND status IN ('awaiting_payment', 'awaiting_receipt')",
+                             (total, order_id))
+                conn.commit()
+                logger.info("create_order: unpaid order #%s total %s -> %s (repriced)", order_id, row[0], total)
+            conn.close()
+            body["total"] = total
+        return web.json_response(body, status=409)
     if credits or discount_code or on_credit:
         return web.json_response(
             {"error": f"the customer has unpaid order #{order_id} with other products and credits or a discount "
@@ -12889,6 +12903,18 @@ def _shop_data_for(user_id: int) -> dict:
         return json.loads(_b64.urlsafe_b64decode(blob + "=" * (-len(blob) % 4)))
     except ValueError:
         return {}
+
+
+async def http_promo(request):
+    """GET /api/promo (public, no per-user data): the running promo as the Mini App's `pm` ({e, p, h, l}) or
+    null, so a page opened from an older link uses the current one. Coworkers ignore it (the page checks)."""
+    from aiohttp import web
+    return web.json_response({"promo": promo_mini_app_data().get("pm")}, headers=_imd_search_cors_headers())
+
+
+async def http_promo_options(request):
+    from aiohttp import web
+    return web.Response(status=204, headers=_imd_search_cors_headers())
 
 
 async def http_bootstrap(request):
@@ -15635,6 +15661,8 @@ async def start_api_server(application):
     api_app.router.add_options("/api/set_item_price", http_set_coworker_price_options)
     api_app.router.add_get("/api/shop_edits", http_shop_edits)
     api_app.router.add_get("/api/my_prices", http_my_prices)
+    api_app.router.add_get("/api/promo", http_promo)
+    api_app.router.add_options("/api/promo", http_promo_options)
     api_app.router.add_post("/api/set_items_removed", http_set_items_removed)
     api_app.router.add_options("/api/set_items_removed", http_set_coworker_price_options)
     api_app.router.add_post("/api/add_item", http_add_item)
