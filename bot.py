@@ -332,6 +332,65 @@ BASE_PRICES = {item_id: price for item_id, (_, price) in MENU.items()}
 # duration_label_or_None, removed_bool)}
 ITEM_OVERRIDES = {}
 
+# ── Time-limited promotion (B3, owner 25 Nov 2026) ─────────────────────────
+# iMD Black Friday: 20% off for customers until Friday 27 Nov 2026 24:00 Iran time (UTC+3:30) = 20:30 UTC.
+# While active, customers (never coworkers: their prices stay as they were) pay `prices` for those items, see
+# the old price crossed out with `label` under it in the Mini App, and the `hide` items are not offered (the
+# admin can still sell them). Everything is worked out on each request, so at `ends_utc` it all goes back by
+# itself: no deploy or restart needed. To run another promo, change this dict (or set it to None).
+# SHOP_PROMO_OFF=1 switches it off (the test suite sets it so the regular prices are tested; imd_promo_test
+# tests the promo itself with PROMO_DEFINITION).
+PROMO_DEFINITION = {
+    "ends_utc": "2026-11-27T20:30:00Z",
+    "label": "Black Friday discount until Friday night",
+    "until": "Friday 27 Nov, midnight Iran time",
+    "prices": {"imd_1y": 60.0, "imd_6m": 40.0},
+    "hide": ["imd_2y"],
+    "chat_note": "Black Friday: 20% off",
+}
+PROMO = None if os.environ.get("SHOP_PROMO_OFF") else PROMO_DEFINITION
+
+
+def _promo_now() -> datetime:
+    """The clock the promo is checked against (UTC, naive). Tests replace it."""
+    return datetime.utcnow()
+
+
+def active_promo(now: datetime = None):
+    """PROMO while it is running, else None."""
+    if not PROMO:
+        return None
+    try:
+        ends = datetime.strptime(PROMO["ends_utc"], "%Y-%m-%dT%H:%M:%SZ")
+    except (KeyError, ValueError):
+        return None
+    return PROMO if (now or _promo_now()) < ends else None
+
+
+def customer_price(item_id: str, now: datetime = None) -> float:
+    """What a customer (not a coworker) pays for one unit right now: the promo price while one runs, else the
+    regular price (MENU, with the admin's price edits)."""
+    promo = active_promo(now)
+    if promo and item_id in promo.get("prices", {}):
+        return float(promo["prices"][item_id])
+    return MENU[item_id][1]
+
+
+def promo_hidden_items(now: datetime = None) -> set:
+    """Items the running promo takes off sale for customers (coworkers and the admin still see them)."""
+    promo = active_promo(now)
+    return set(promo.get("hide", [])) if promo else set()
+
+
+def promo_mini_app_data() -> dict:
+    """{pm: ...} for a customer's Mini App link while the promo runs: the end (the page stops showing it at
+    that moment even if the link is older), the prices, the hidden items and the note. Empty otherwise."""
+    promo = active_promo()
+    if not promo:
+        return {}
+    return {"pm": {"e": promo["ends_utc"], "p": promo.get("prices", {}), "h": promo.get("hide", []),
+                   "l": promo.get("label", "")}}
+
 # Navigation-only tree for the two multi-level products (Uptodate, Amboss).
 # Prices/names for the actual leaves live in MENU (single source of truth);
 # this only describes how to browse down to them. A node is a category if
@@ -2249,7 +2308,8 @@ def db_remove_pending_unit(fulfilment_id: int):
             items = {}
         gone = [i for i in [item_id] + addons if items.get(i)]
         if gone:
-            price = lambda i: (_coworker_unit_price_by_id(i, order[2]) if order[2] else MENU.get(i, (i, 0))[1])
+            price = lambda i: (_coworker_unit_price_by_id(i, order[2]) if order[2]
+                               else (customer_price(i) if i in MENU else 0))
             worth = sum(price(i) * q for i, q in items.items())
             share = sum(price(i) for i in gone) / worth if worth > 0 else 0
             for i in gone:
@@ -4332,7 +4392,17 @@ def _coworker_unit_price(item_id: str, user_id: int) -> float:
     coworker via /coworker — the same rule applied at actual checkout, so
     the in-chat basket preview and the final order total always agree."""
     coworker_login = db_get_user_coworker(user_id) if user_id else None
-    return _coworker_unit_price_by_id(item_id, coworker_login[0] if coworker_login else None)
+    if not coworker_login:
+        return customer_price(item_id)   # a running promo (PROMO) is for customers only
+    return _coworker_unit_price_by_id(item_id, coworker_login[0])
+
+
+def promo_refused_items(item_ids, user_id: int) -> list:
+    """The items a customer can't order right now because the running promo hides them (coworkers can)."""
+    hidden = promo_hidden_items() & set(item_ids)
+    if hidden and user_id and db_get_user_coworker(user_id):
+        return []
+    return sorted(hidden)
 
 
 def format_cart(cart: dict, user_id: int = 0) -> str:
@@ -4441,18 +4511,28 @@ async def imd_menu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     out_of_stock = db_out_of_stock_items()
 
-    def label_for(item_id, base_label, price):
+    user_id = query.from_user.id if query.from_user else 0
+    coworker = bool(user_id and db_get_user_coworker(user_id))
+    promo = None if coworker else active_promo()
+    hidden = set() if coworker else promo_hidden_items()
+
+    def label_for(item_id, base_label):
         if item_id in out_of_stock:
             return f"🚫 {base_label} (out of stock)"
+        price = _coworker_unit_price(item_id, user_id)
+        if promo and item_id in promo.get("prices", {}) and MENU[item_id][1] > price:
+            return f"🔥 {base_label} — {CURRENCY}{price:.2f} (was {CURRENCY}{MENU[item_id][1]:.2f})"
         return f"{base_label} — {CURRENCY}{price:.2f}"
 
     buttons = [
-        [InlineKeyboardButton(label_for("imd_6m", "6 Months", MENU["imd_6m"][1]), callback_data="add:imd_6m")],
-        [InlineKeyboardButton(label_for("imd_1y", "1 Year", MENU["imd_1y"][1]), callback_data="add:imd_1y")],
-        [InlineKeyboardButton(label_for("imd_2y", "2 Years", MENU["imd_2y"][1]), callback_data="add:imd_2y")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu")],
+        [InlineKeyboardButton(label_for(i, lbl), callback_data=f"add:{i}")]
+        for i, lbl in (("imd_6m", "6 Months"), ("imd_1y", "1 Year"), ("imd_2y", "2 Years")) if i not in hidden
     ]
-    await query.edit_message_text("iMD VIP — choose a duration:", reply_markup=InlineKeyboardMarkup(buttons))
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu")])
+    text = "iMD VIP — choose a duration:"
+    if promo and any(i in promo.get("prices", {}) for i in IMD_TRIGGER_ITEMS):
+        text += f"\n\n🔴 {promo.get('label', '')}"
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 # Persistent bottom keyboard labels (must match exactly between the keyboard
@@ -4753,9 +4833,10 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
     price_overrides, removed_ids = _mini_app_admin_edits()
 
     if not user_id:
-        if custom or price_overrides or removed_ids or SHOP_TITLES:
+        promo_data = promo_mini_app_data()
+        if custom or price_overrides or removed_ids or SHOP_TITLES or promo_data:
             try:
-                data = {'d': [], 'p': [], 'c': custom, 'po': price_overrides, 'rm': removed_ids}
+                data = {'d': [], 'p': [], 'c': custom, 'po': price_overrides, 'rm': removed_ids, **promo_data}
                 if SHOP_TITLES:
                     data['nm'] = dict(SHOP_TITLES)
                 return f"{MINI_APP_URL}?v={MINI_APP_VERSION}&subs={_encode(data)}"
@@ -4923,6 +5004,8 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
             **({"cwpost": 1} if coworker_login and db_get_coworker_mode(coworker_login[0]) == "postpaid" else {}),
             "an": db_unseen_announcement_count(user_id),
             **({"dx": delivered_more} if delivered_more else {}),
+            # a running promo (PROMO) — customers only; coworkers keep their prices and see every item
+            **({} if coworker_login else promo_mini_app_data()),
         }
         if preview_coworker_id and coworker_login:
             data["cwn"] = coworker_login[1]
@@ -6497,6 +6580,9 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if db_is_out_of_stock(item_id):
             await query.answer("🚫 Out of stock — try again later.", show_alert=True)
             return
+        if promo_refused_items([item_id], query.from_user.id):
+            await query.answer("This subscription isn't available right now.", show_alert=True)
+            return
 
         cart[item_id] = cart.get(item_id, 0) + 1
         name = MENU.get(item_id, (item_id,))[0]
@@ -6565,7 +6651,7 @@ def checkout_view(order_id: int):
 
     _, user_id, username, items_json, total, status, created_at = order
     items = json.loads(items_json)
-    lines = [f"{qty}x {MENU[i][0]} — {CURRENCY}{MENU[i][1] * qty:.2f}" for i, qty in items.items()]
+    lines = [f"{qty}x {MENU[i][0]} — {CURRENCY}{_coworker_unit_price(i, user_id) * qty:.2f}" for i, qty in items.items()]
     text = (
         f"*Order #{order_id} created*\n"
         f"Your Telegram ID: `{user_id}`\n\n"
@@ -6644,6 +6730,9 @@ async def start_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = query.from_user
     problem = addon_problem(cart)
+    refused = promo_refused_items(cart, user.id)
+    if refused:
+        problem = ", ".join(MENU[i][0] for i in refused) + " isn't available right now — please remove it from the basket."
     if problem:
         await query.edit_message_text("⚠️ " + problem, reply_markup=menu_keyboard())
         return
@@ -7178,8 +7267,8 @@ async def discount_code_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         items = json.loads(order[3] or "{}")
     except ValueError:
         items = {}
-    retail = sum(MENU[i][1] * q for i, q in items.items() if i in MENU) or 0
-    percentage, _ = discount_code_off(code, items, lambda i: MENU[i][1] if i in MENU else 0)
+    retail = sum(customer_price(i) * q for i, q in items.items() if i in MENU) or 0
+    percentage, _ = discount_code_off(code, items, lambda i: customer_price(i) if i in MENU else 0)
     scope = db_discount_code_items(code)
     if percentage is None and scope and db_check_discount_code(code) is not None:
         await update.message.reply_text(
@@ -7202,7 +7291,7 @@ async def discount_code_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if scope and retail > 0:
-        share = sum(MENU[i][1] * q for i, q in items.items() if i in scope) / retail
+        share = sum(customer_price(i) * q for i, q in items.items() if i in scope) / retail
         new_total = round(total - total * share * percentage / 100, 2)
         what = f"{percentage:.0f}% off " + ", ".join(discount_scope_names(scope & set(items)))
     else:
@@ -11734,16 +11823,19 @@ def _reply_bot_sellable() -> set:
     } | {i for i in PANEL_ITEM_IDS if i in MENU}
 
 
-def _reply_bot_check_items(requested: dict):
+def _reply_bot_check_items(requested: dict, user_id: int = 0):
     """Checks the products of an order the support chatbot is taking ({item_id: quantity}) the same way for
     /api/payment_details and /api/create_order. Returns (order_items, None) or (None, (error body, status))."""
     sellable = _reply_bot_sellable()
+    refused = set(promo_refused_items(requested, user_id))
     order_items = {}
     for item_id, qty in requested.items():
         if item_id not in sellable or item_id not in MENU or qty < 1:
             return None, ({"error": f"unknown product: {item_id}"}, 400)
         if db_is_out_of_stock(item_id):
             return None, ({"error": f"{MENU[item_id][0]} is out of stock"}, 409)
+        if item_id in refused:
+            return None, ({"error": f"{MENU[item_id][0]} isn't available right now"}, 409)
         order_items[item_id] = order_items.get(item_id, 0) + qty
     if not order_items or sum(order_items.values()) > CREATE_ORDER_MAX_UNITS:
         return None, ({"error": f"order between 1 and {CREATE_ORDER_MAX_UNITS} subscriptions"}, 400)
@@ -11817,7 +11909,7 @@ async def http_payment_details(request):
     method = codes[method.lower()]
     if method in CHAT_PAYMENT_METHODS_OFF:
         return web.json_response({"error": f"{method} isn't offered right now"}, status=409)
-    order_items, refusal = _reply_bot_check_items(requested)
+    order_items, refusal = _reply_bot_check_items(requested, user_id)
     if refusal:
         return web.json_response(refusal[0], status=refusal[1])
     item_id = next(iter(order_items))
@@ -11960,7 +12052,7 @@ async def http_create_order(request):
         )
     payment_method = codes[payment_method.lower()]
 
-    order_items, refusal = _reply_bot_check_items(requested)
+    order_items, refusal = _reply_bot_check_items(requested, user_id)
     if refusal:
         return web.json_response(refusal[0], status=refusal[1])
 
@@ -12482,23 +12574,33 @@ async def http_public_catalog(request):
     for extra in sorted(MANUAL_ACCESS_ITEMS):  # sold in the Mini App, not toggleable in Manage Stock
         if not ITEM_OVERRIDES.get(extra, (None, None, None, False))[3]:
             item_ids.append(extra)
+    promo = active_promo()
+    hidden = promo_hidden_items()   # a running promo takes these off sale for customers (PROMO)
     products = [
         {
             "id": item_id,
             "name": MENU[item_id][0],
-            "price": MENU[item_id][1],
+            "price": customer_price(item_id),
             "currency": "USD",
             "in_stock": item_id not in out_of_stock,
         }
         for item_id in dict.fromkeys(item_ids)
-        if item_id in MENU
+        if item_id in MENU and item_id not in hidden
     ]
+    if promo:
+        for p in products:
+            if p["id"] in promo.get("prices", {}) and MENU[p["id"]][1] > p["price"]:
+                was = MENU[p["id"]][1]
+                p["promo"] = {"price": p["price"], "was": was, "percent_off": round((1 - p["price"] / was) * 100),
+                              "until": promo.get("until", ""), "ends_utc": promo["ends_utc"],
+                              "label": promo.get("label", ""), "note": promo.get("chat_note", "")}
     # the All Subscriptions tab's supplier-panel products (owner, 24 Nov 2026), marked so the chatbot lists them apart
     listed = {p["id"] for p in products}
     products += [
-        {"id": i, "name": MENU[i][0], "price": MENU[i][1], "currency": "USD", "in_stock": i not in out_of_stock,
+        {"id": i, "name": MENU[i][0], "price": customer_price(i), "currency": "USD", "in_stock": i not in out_of_stock,
          "section": "all"}
-        for i in sorted(PANEL_ITEM_IDS, key=lambda x: (MENU.get(x, ("",))[0].lower(), x)) if i in MENU and i not in listed
+        for i in sorted(PANEL_ITEM_IDS, key=lambda x: (MENU.get(x, ("",))[0].lower(), x))
+        if i in MENU and i not in listed and i not in hidden
     ]
     local = [
         {
@@ -12524,6 +12626,9 @@ async def http_public_catalog(request):
             "guide": SHOP_GUIDE_FOR_REPLY_BOT,
             "payment_method_codes": reply_bot_payment_method_codes(),
             "generated_at": datetime.utcnow().isoformat() + "Z",
+            # the running promo (PROMO), so the chatbot can mention it; gone once it ends
+            **({"promo": {"label": promo.get("label", ""), "until": promo.get("until", ""), "ends_utc": promo["ends_utc"],
+                          "hidden": [MENU[i][0] for i in sorted(hidden) if i in MENU]}} if promo else {}),
         }
     )
 
@@ -13319,7 +13424,7 @@ def _admin_order_products(coworker_id=None, extra: bool = False) -> list:
     for iid, v in MENU.items():
         if extra and iid.startswith("book_"):
             continue
-        price = _coworker_unit_price_by_id(iid, coworker_id) if coworker_id else v[1]
+        price = _coworker_unit_price_by_id(iid, coworker_id) if coworker_id else customer_price(iid)
         p = {"id": iid, "name": v[0], "price": round(float(price), 2),
              "details": _register_kind(iid) in ("imd", "generic") and not (extra and iid in UPTODATE_AI_ON_ACCOUNT),
              "addon": iid in UPTODATE_AI_ADDONS}
@@ -22665,6 +22770,9 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
         if db_is_out_of_stock(item_id):
             skipped.append(MENU[item_id][0] + " (out of stock)")
             continue
+        if promo_refused_items([item_id], user_id):
+            skipped.append(MENU[item_id][0] + " (not available right now)")
+            continue
         order_items[item_id] = order_items.get(item_id, 0) + 1
 
     if not order_items:
@@ -22697,7 +22805,7 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
         if postpaid:
             data = {**data, "use_credits": False}
     else:
-        total = sum(MENU[i][1] * q for i, q in order_items.items())
+        total = round(sum(customer_price(i) * q for i, q in order_items.items()), 2)   # a running PROMO
     if pay_method.lower() == "postpaid" and not postpaid:
         text = "Pay-later ordering is only available to coworkers on a postpaid plan."
         await message.reply_text(text)
@@ -22708,7 +22816,7 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
     discount_code_raw = (data.get("discount_code") or "").strip()
     applied_discount_code = None
     if discount_code_raw:
-        unit = ((lambda i: _coworker_unit_price_by_id(i, coworker_id)) if coworker_id else (lambda i: MENU[i][1]))
+        unit = ((lambda i: _coworker_unit_price_by_id(i, coworker_id)) if coworker_id else customer_price)
         pct, off = discount_code_off(discount_code_raw, order_items, unit)   # only the subscriptions it works for
         if pct is not None:
             total = round(max(0.0, total - off), 2)
@@ -22863,7 +22971,7 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
     lines = [f"{q}× {MENU[i][0]}" for i, q in order_items.items()]
     summary = "\n".join(lines)
     if skipped:
-        summary += "\n\n⚠️ Skipped (out of stock):\n" + "\n".join(skipped)
+        summary += "\n\n⚠️ Skipped:\n" + "\n".join(skipped)
 
     if postpaid:
         return await _place_postpaid_order(context, message, order_id, user_id, username, coworker_id,

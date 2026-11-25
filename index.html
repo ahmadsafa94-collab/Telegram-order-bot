@@ -169,6 +169,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 .rn{font-size:13px;font-weight:500;line-height:1.3;overflow-wrap:anywhere}
 .rs{font-size:11px;color:var(--hint);margin-top:1px;overflow-wrap:anywhere}
 .rp{font-size:14px;font-weight:700;color:var(--teal2);flex-shrink:0}
+.rp .was{text-decoration:line-through;color:var(--hint);font-weight:400;font-size:11px;margin-right:3px}
+.promo-note{font-size:11px;font-weight:600;color:var(--red);margin-top:2px}
 .dur-btn{flex-shrink:0;margin-left:8px;background:transparent;border:1.5px solid var(--teal2);color:var(--teal2);
   border-radius:20px;padding:7px 11px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
 .dur-btn.need{border-color:#ef4444;color:#ef4444;animation:durGlow 1s ease-in-out infinite}
@@ -1335,9 +1337,20 @@ CATALOG.push({
 // OOS_IDS; the server re-prices everything at checkout regardless.
 const PRICE_OVERRIDES = (SUBS_DATA && SUBS_DATA.po) || {};
 const REMOVED_IDS = new Set((SUBS_DATA && SUBS_DATA.rm) || []);
+// A running promo from the bot (PROMO in bot.py, B3: iMD Black Friday, 25 Nov 2026): customers only, never
+// coworkers. Its prices replace the regular ones (the old price is kept as `was`, shown crossed out with the red
+// note), its hidden items are left out, and it stops at its end time even on a link built earlier. The server
+// prices every order itself, so a page left open past the end is still charged the right amount.
+const PROMO_DATA = (!IS_COWORKER && SUBS_DATA && SUBS_DATA.pm && Date.now() < Date.parse(SUBS_DATA.pm.e)) ? SUBS_DATA.pm : null;
+const PROMO_PRICES = (PROMO_DATA && PROMO_DATA.p) || {};
+const PROMO_HIDDEN = new Set((PROMO_DATA && PROMO_DATA.h) || []);
+const promoWas = id => (IMAP[id] && IMAP[id].was != null) ? IMAP[id].was : null;
 (function applyAdminEdits(){
-  const keep = i => !REMOVED_IDS.has(i.id);
-  const reprice = i => { if (PRICE_OVERRIDES[i.id] != null) i.price = Number(PRICE_OVERRIDES[i.id]); };
+  const keep = i => !REMOVED_IDS.has(i.id) && !PROMO_HIDDEN.has(i.id);
+  const reprice = i => {
+    if (PRICE_OVERRIDES[i.id] != null) i.price = Number(PRICE_OVERRIDES[i.id]);
+    if (PROMO_PRICES[i.id] != null && Number(PROMO_PRICES[i.id]) < i.price) { i.was = i.price; i.price = Number(PROMO_PRICES[i.id]); }
+  };
   for (let c = CATALOG.length - 1; c >= 0; c--) {
     const cat = CATALOG[c];
     if (cat.groups) {
@@ -3679,7 +3692,10 @@ document.addEventListener('click',e=>{ if(!e.target.closest('.dur-anchor')) clos
 // The price shown on a catalog row. In the admin's coworker preview a ✏️
 // sits beside it to set a custom price for that coworker (see openCwPriceEdit).
 function rowPriceHtml(id, basePrice, compact){
-  const price = compact
+  const was = hasCoworkerDiscount(id) ? null : promoWas(id);
+  const price = was != null
+    ? `<span class="was">$${was}</span>$${basePrice}`
+    : compact
     ? `$${hasCoworkerDiscount(id)?coworkerPrice(basePrice,id):basePrice}`
     : hasCoworkerDiscount(id)
     ? `<span style="text-decoration:line-through;color:var(--hint);font-weight:400;font-size:11px;margin-right:3px">$${basePrice}</span>$${coworkerPrice(basePrice,id)}`
@@ -3693,7 +3709,7 @@ function makeRow(itm,solo){
   const oos=OOS_IDS.has(itm.id);
   const priceHtml = rowPriceHtml(itm.id, itm.price);
   d.innerHTML=`${solo?`<div style="font-size:21px">${itm.e||'📦'}</div>`:''}
-    <div class="ri"><div class="rn">${escHtml(itm.name)}</div><div class="rs">${itm.sub||''}</div></div>
+    <div class="ri"><div class="rn">${escHtml(itm.name)}</div><div class="rs">${itm.sub||''}</div>${promoWas(itm.id)!=null&&PROMO_DATA&&PROMO_DATA.l?`<div class="promo-note">${escHtml(PROMO_DATA.l)}</div>`:''}</div>
     <div class="rp">${priceHtml}</div>
     <button class="add-btn${oos?' oos':(cart[itm.id]?' in':'')}" id="ab-${itm.id}" ${oos?'disabled':''} onclick="${oos?"event.stopPropagation();showToast('Out of stock')":`addItem('${itm.id}')`}">${oos?'✕':(cart[itm.id]?'✓':'+')}</button>${oos?'':`<span class="qty-step"><button class="qs-btn minus" type="button" aria-label="One less" onclick="event.stopPropagation();stepQty(this.parentElement.previousElementSibling.id.slice(3),-1)">−</button><span class="qs-n">${cart[itm.id]?cart[itm.id].qty:1}</span><button class="qs-btn" type="button" aria-label="One more" onclick="event.stopPropagation();stepQty(this.parentElement.previousElementSibling.id.slice(3),1)">+</button></span>`}`;
   return d;
@@ -4717,6 +4733,19 @@ const ADS = [
     cta: 'Copy code',
     art: ['🛍️','🏷️','%'],
     action: () => usePromoCode('BLACKFRIDAY26')
+  }] : []),
+  // iMD Black Friday (B3, owner 25 Nov 2026): only while the bot's promo runs (PROMO_DATA: from the server's
+  // promo data, never for coworkers (!IS_COWORKER), gone by itself at its end time); tapping opens iMD 1 Year.
+  ...(!IS_COWORKER && PROMO_DATA && PROMO_PRICES.imd_1y != null ? [{
+    promo: true, dark: true,
+    kicker: '🖤 Black Friday · iMD 20% off',
+    title: '1 Year $' + PROMO_PRICES.imd_1y + (promoWas('imd_1y') != null ? ' (was $' + promoWas('imd_1y') + ')' : '')
+      + (PROMO_PRICES.imd_6m != null ? ' · 6 Months $' + PROMO_PRICES.imd_6m + (promoWas('imd_6m') != null ? ' (was $' + promoWas('imd_6m') + ')' : '') : ''),
+    desc: 'iMD VIP · until Friday night (27 November)',
+    cta: 'See iMD',
+    art: ['🎓','🏷️','%'],
+    goToCategory: 'imd',
+    goToItem: 'imd_1y'
   }] : []),
   // Referral credits (16 Nov 2026): opens 🎁 How to get accounts for free, with the customer's link. Not for coworkers.
   ...(IS_COWORKER ? [] : [{
