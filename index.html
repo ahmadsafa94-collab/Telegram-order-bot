@@ -1341,7 +1341,20 @@ const REMOVED_IDS = new Set((SUBS_DATA && SUBS_DATA.rm) || []);
 // coworkers. Its prices replace the regular ones (the old price is kept as `was`, shown crossed out with the red
 // note), its hidden items are left out, and it stops at its end time even on a link built earlier. The server
 // prices every order itself, so a page left open past the end is still charged the right amount.
-const PROMO_DATA = (!IS_COWORKER && !ADMIN_EDIT && SUBS_DATA && SUBS_DATA.pm && Date.now() < Date.parse(SUBS_DATA.pm.e)) ? SUBS_DATA.pm : null;
+// A link without `pm` (the persistent menu/keyboard buttons, older "Open Shop" links, the admin's own editing link)
+// asks the bot for the current promo before the catalog is built, so it shows exactly what a fresh link shows
+// (25 Nov 2026). The admin sees the promo too; the ✏️ editor still works on the regular price (openCwPriceEdit).
+let PROMO_FETCHED;   // /api/promo's answer at load (undefined when not asked or it failed)
+if (!IS_COWORKER && (ADMIN_EDIT || !(SUBS_DATA && SUBS_DATA.pm))) {
+  try {
+    const x = new XMLHttpRequest();
+    x.open('GET', (API_BASE || BOT_API_DEFAULT) + '/api/promo', false);
+    x.send();
+    if (x.status === 200) { const d = JSON.parse(x.responseText); if (d && 'promo' in d) PROMO_FETCHED = d.promo || null; }
+  } catch(e) { /* keep what the link carried */ }
+}
+const PROMO_SRC = PROMO_FETCHED !== undefined ? PROMO_FETCHED : (SUBS_DATA && SUBS_DATA.pm);
+const PROMO_DATA = (!IS_COWORKER && PROMO_SRC && Date.now() < Date.parse(PROMO_SRC.e)) ? PROMO_SRC : null;
 const PROMO_PRICES = (PROMO_DATA && PROMO_DATA.p) || {};
 const PROMO_HIDDEN = new Set((PROMO_DATA && PROMO_DATA.h) || []);
 const promoWas = id => (IMAP[id] && IMAP[id].was != null) ? IMAP[id].was : null;
@@ -1603,7 +1616,7 @@ const cartSize =()=>Object.values(cart).reduce((s,i)=>s+i.qty,0);
 // payment. Customers only, never coworkers or the admin's editing link. The server prices the order regardless.
 let PROMO_LIVE;   // undefined until /api/promo answers; then the current promo or null
 function promoNow(){
-  if(IS_COWORKER||ADMIN_EDIT) return null;
+  if(IS_COWORKER) return null;
   const p = PROMO_LIVE!==undefined ? PROMO_LIVE : PROMO_DATA;
   return (p && Date.now() < Date.parse(p.e)) ? p : null;
 }
@@ -1615,7 +1628,7 @@ function promoLivePrice(id){
 function promoHiddenNow(id){ const p=promoNow(); return !!(p && (p.h||[]).includes(id)); }
 // Brings the basket in line with the promo as it is now; returns a note for the payment page, or ''.
 function syncPromoToCart(){
-  if(IS_COWORKER||ADMIN_EDIT) return '';
+  if(IS_COWORKER) return '';
   let ended=false; const removed=[];
   Object.keys(cart).forEach(id=>{
     if(!IMAP[id]) return;
@@ -1632,8 +1645,8 @@ function syncPromoToCart(){
     +(removed.length?removed.join(', ')+" isn't available right now and was taken out of your basket.":'');
 }
 async function fetchPromo(){
-  if(IS_COWORKER||ADMIN_EDIT||!API_BASE) return;
-  try{ const r=await fetch(API_BASE+'/api/promo'); const d=await r.json(); if(d && 'promo' in d) PROMO_LIVE=d.promo||null; }catch(e){}
+  if(IS_COWORKER) return;
+  try{ const r=await fetch((API_BASE||BOT_API_DEFAULT)+'/api/promo'); const d=await r.json(); if(d && 'promo' in d) PROMO_LIVE=d.promo||null; }catch(e){}
 }
 setTimeout(fetchPromo,0);
 function showPromoNote(text){
@@ -3937,7 +3950,8 @@ function openCwPriceEdit(id){
   const row=document.querySelector('[data-item-id="'+id+'"]')||{dataset:{}};
   if(!IMAP[id]&&!row.dataset.base) return;
   cwEditId=id; cwEditGroup=false; cwEditKey=null;
-  const base=IMAP[id]?IMAP[id].price:parseFloat(row.dataset.base);
+  // the REGULAR price (`was` while a promo shows a lower one), so saving never makes the promo price permanent
+  const base=IMAP[id]?(IMAP[id].was!=null?IMAP[id].was:IMAP[id].price):parseFloat(row.dataset.base);
   const info=document.getElementById('cwPriceInfo');
   const input=document.getElementById('cwPriceInput');
   document.getElementById('cwPriceTitle').textContent=(IMAP[id]&&IMAP[id].fullname)||row.dataset.name;
@@ -4136,15 +4150,17 @@ async function saveCwPrice(useDefault){
     }else{
       // The regular price itself changed: update everything built from it.
       if(data.edited) PRICE_OVERRIDES[id]=data.price; else delete PRICE_OVERRIDES[id];
-      if(IMAP[id]) IMAP[id].price=data.price;
+      // while a promo shows a lower price, the new regular price is the crossed-out one (`was`)
+      const inPromo=!!(IMAP[id]&&IMAP[id].was!=null&&PROMO_PRICES[id]!=null&&Number(PROMO_PRICES[id])<data.price);
+      if(IMAP[id]){ if(inPromo) IMAP[id].was=data.price; else { delete IMAP[id].was; IMAP[id].price=data.price; } }
       CATALOG.forEach(c=>{
-        const fix=i=>{ if(i.id===id) i.price=data.price; };
+        const fix=i=>{ if(i.id===id){ if(inPromo) i.was=data.price; else { delete i.was; i.price=data.price; } } };
         if(c.groups) c.groups.forEach(g=>g.items.forEach(fix));
         if(c.single) c.single.forEach(fix);
         if(c.panel) c.panel.forEach(p=>p.variants.forEach(fix));
       });
-      document.querySelectorAll('[data-item-id="'+id+'"]').forEach(row=>{ row.dataset.base=data.price; });
-      if(cart[id]) cart[id].price=data.price;
+      document.querySelectorAll('[data-item-id="'+id+'"]').forEach(row=>{ row.dataset.base=IMAP[id]?IMAP[id].price:data.price; });
+      if(cart[id]) cart[id].price=IMAP[id]?IMAP[id].price:data.price;
       toast=data.edited?'Price is now $'+data.price:'Back to the original $'+data.price;
     }
     document.querySelectorAll('[data-item-id="'+id+'"]').forEach(row=>{
@@ -4541,7 +4557,7 @@ function effectiveTotal(){
 function buildPaymentPage(){
   // the promo as it is now (it may have ended, or the link may be older than it); then re-checked with the server
   const promoNote=syncPromoToCart();
-  if(!IS_COWORKER && !ADMIN_EDIT) fetchPromo().then(()=>{ const n=syncPromoToCart(); if(n){ buildPaymentPage(); showPromoNote(n); } });
+  if(!IS_COWORKER) fetchPromo().then(()=>{ const n=syncPromoToCart(); if(n){ buildPaymentPage(); showPromoNote(n); } });
   const total=effectiveTotal();
   // Clear previous payment method buttons — they capture `total` in their onclick
   // closure, so stale buttons from a previous buildPaymentPage call would fire
@@ -4774,19 +4790,7 @@ tg.MainButton.onClick(submitOrder);
 // Earlier ads (kept in LOGOS to bring back): @Medicaltoolkit_bot (LOGOS.adMedicToolkit, link
 // https://t.me/Medicaltoolkit_bot) and UWorld Qbanks in iMD (LOGOS.uworld, goToCategory 'imd').
 const ADS = [
-  // Black Friday (owner, 16 Nov 2026): shown until the end of November; tapping copies BLACKFRIDAY26 and puts it in
-  // the discount box at checkout.
-  // Not for coworkers: discount codes are for customers only (19 Nov 2026).
-  ...(!IS_COWORKER && Date.now() < Date.parse('2026-11-30T21:00:00Z') ? [{
-    promo: true, dark: true,
-    kicker: 'Black Friday',
-    title: '15% off Uptodate, Amboss, ACP MKSAP & Boardvitals',
-    desc: 'Code BLACKFRIDAY26 at checkout · until 30 November',
-    cta: 'Copy code',
-    art: ['🛍️','🏷️','%'],
-    action: () => usePromoCode('BLACKFRIDAY26')
-  }] : []),
-  // iMD Black Friday (B3, owner 25 Nov 2026): only while the bot's promo runs (PROMO_DATA: from the server's
+  // iMD Black Friday (B3, owner 25 Nov 2026) — the FIRST slide (owner, 25 Nov 2026): only while the bot's promo runs (PROMO_DATA: from the server's
   // promo data, never for coworkers (!IS_COWORKER), gone by itself at its end time); tapping opens iMD 1 Year.
   ...(!IS_COWORKER && PROMO_DATA && PROMO_PRICES.imd_1y != null ? [{
     promo: true, dark: true,
@@ -4798,6 +4802,18 @@ const ADS = [
     art: ['🎓','🏷️','%'],
     goToCategory: 'imd',
     goToItem: 'imd_1y'
+  }] : []),
+  // Black Friday (owner, 16 Nov 2026): shown until the end of November; tapping copies BLACKFRIDAY26 and puts it in
+  // the discount box at checkout.
+  // Not for coworkers: discount codes are for customers only (19 Nov 2026).
+  ...(!IS_COWORKER && Date.now() < Date.parse('2026-11-30T21:00:00Z') ? [{
+    promo: true, dark: true,
+    kicker: 'Black Friday',
+    title: '15% off Uptodate, Amboss, ACP MKSAP & Boardvitals',
+    desc: 'Code BLACKFRIDAY26 at checkout · until 30 November',
+    cta: 'Copy code',
+    art: ['🛍️','🏷️','%'],
+    action: () => usePromoCode('BLACKFRIDAY26')
   }] : []),
   // Referral credits (16 Nov 2026): opens 🎁 How to get accounts for free, with the customer's link. Not for coworkers.
   ...(IS_COWORKER ? [] : [{
