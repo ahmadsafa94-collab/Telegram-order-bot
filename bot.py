@@ -71,6 +71,7 @@ from telegram import (
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -11623,6 +11624,12 @@ class ChatLoggingRequest(HTTPXRequest):
         except Exception:
             logger.exception("chat_log: failed to record an outgoing message")
         return result
+
+
+async def ignore_edited_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stops an edited private/group message from reaching any handler (channel posts are not affected)."""
+    if update.edited_message is not None:
+        raise ApplicationHandlerStop
 
 
 async def log_customer_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -24904,6 +24911,9 @@ def main():
 
     # Records customer messages/taps for the reply bot. Group -1 runs before
     # every other handler; block=False so it never delays them.
+    # Edited messages are ignored (26 Nov 2026): handlers read update.message, which is None for an edit, so editing a
+    # picture's caption crashed with "'NoneType' object has no attribute 'photo'" and editing a text re-ran it or failed.
+    app.add_handler(TypeHandler(Update, ignore_edited_message), group=-2)
     app.add_handler(TypeHandler(Update, log_customer_update, block=False), group=-1)
 
     # Nightly automatic backup at 00:00 local time (per REPORT_UTC_OFFSET —
