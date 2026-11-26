@@ -2681,6 +2681,14 @@ function deliveryTemplate(i){
       lines=['✅ Amboss official '+durl+' full Access','Date: '+date,'','Username:','Password: ',''].concat(TPL_AMBOSS); break;
     case 'amboss_library':
       lines=['✅ Amboss Library - '+durl,'Date: '+date,'','Username:','Password: ',''].concat(TPL_AMBOSS); break;
+    case 'imd': {           // iMD (owner, 26 Nov 2026): the same text as the bot's build_imd_delivery_message
+      const dl=(i.duration||'1 Year').toLowerCase();
+      lines=['✅ IMD '+dl+' Full Access ','','Date: '+date,'','Username: ','Password: ','',
+        '⭕️ This account is restricted to simultaneous use on a single device. Device changes are permitted; however, logging in on a new device will automatically terminate the session on the previous one.','',
+        '♦️ This account is designated for exclusive use by one individual. Please ensure your password is not shared with others. Unauthorized sharing or misuse may result in account suspension.','',
+        '🛑 Installation Guide:','','http://en.imedicaldoctor.net/dl','',
+        '🌐 Web Version for all platforms: ','www.imdweb.org','','',
+        '📱App version for Android:','sg.imedicaldoctor.net/imd200.apk']; break; }
     default:
       lines=['Subscription: '+title+' - '+durl,'Date: '+date,'','Username:','Password:','','','','Remarks:','',guar,'',TPL_LOSE];
   }

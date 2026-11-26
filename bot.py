@@ -13140,6 +13140,8 @@ def delivery_template_kind(item_id: str) -> str:
         return "uptodate_app"
     if item_id in ("item1", "item3"):
         return "uptodate"
+    if item_id in IMD_TRIGGER_ITEMS:
+        return "imd"      # the iMD account message (build_imd_delivery_message; owner, 26 Nov 2026)
     return "other"
 
 
@@ -21646,6 +21648,7 @@ def build_imd_delivery_message(username: str, password: str = None, date_str: st
         "Please ensure your password is not shared with others. Unauthorized "
         "sharing or misuse may result in account suspension.\n\n"
         "🛑 Installation Guide:\n\n"
+        "http://en.imedicaldoctor.net/dl\n\n"
         "🌐 Web Version for all platforms: \n"
         "www.imdweb.org\n\n\n"
         "📱App version for Android:\n"
