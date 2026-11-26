@@ -348,6 +348,11 @@ PROMO_DEFINITION = {
     # when it went live: unpaid orders made since then, before orders kept their promo's end (promo_ends, 26 Nov
     # 2026), get it at startup (db_mark_promo_orders), so they expire with the promo like the newer ones
     "starts_utc": "2026-11-25T07:20:00Z",
+    # Owner, 26 Nov 2026 (later the same day): "Keep everything open until I tell you the promo has ended". Unpaid
+    # promo-priced orders are NOT cancelled or refused at ends_utc while this is False; the prices themselves still
+    # end at ends_utc. When the owner says the promo has ended: set it to True and deploy (the run after the start
+    # cancels them and tells each customer).
+    "expire_unpaid": False,
     "label": "Black Friday discount until Friday night",
     "until": "the end of Friday 27 November",   # customer-facing: never mention Iran (owner, 26 Nov 2026)
     "prices": {"imd_1y": 60.0, "imd_6m": 40.0},
@@ -4785,6 +4790,8 @@ def db_promo_lapsed_orders() -> list:
     Coworker orders and orders by the admin are never promo-priced, so never in it."""
     if not PROMO:
         return []   # SHOP_PROMO_OFF
+    if not PROMO.get("expire_unpaid", True):
+        return []   # the owner keeps unpaid promo orders open until he says the promo has ended
     if active_promo():
         # A promo is running (e.g. this one was extended after the order was made): nothing has lapsed yet. The
         # orders are cancelled when it does end (review, 26 Nov 2026).
