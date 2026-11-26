@@ -2035,12 +2035,160 @@ def db_add_fulfilment_items(order_id: int, user_id: int, items: dict, links=None
 
 def db_order_needs_details(order_id: int) -> bool:
     """Will the customer still have to send account details for this order? True when a unit
-    is waiting for them, or when the order has no units yet (an order made by the support
-    chatbot gets them, all waiting for details, once its payment is approved)."""
+    that takes details (iMD, other subscriptions) has none yet or was asked again, or when the
+    order has no units yet (an order made by an older support chatbot gets them, all waiting
+    for details, once its payment is approved). A unit whose details are already stored (Mini
+    App, or taken in the support chat, 26 Nov 2026) doesn't count, although it is still
+    `needs_info` until the order is paid."""
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("SELECT state FROM fulfilment WHERE order_id = ?", (order_id,)).fetchall()
+    has_units = conn.execute("SELECT 1 FROM fulfilment WHERE order_id = ? LIMIT 1", (order_id,)).fetchone()
     conn.close()
-    return not rows or any(state == "needs_info" for (state,) in rows)
+    return not has_units or bool(db_order_missing_details(order_id))
+
+
+def _unit_has_details(info_json) -> bool:
+    return info_json not in (None, "", "{}", "null")
+
+
+def _units_open_for_details(order_id: int, user_id: int = None, item_id: str = None) -> list:
+    """(fulfilment id, item id, unit no) of the order's units still waiting for the customer's account details: state
+    needs_info, a product that takes details (iMD or another subscription; not a code, a book or manual access), and
+    no details stored yet or asked again (🔁). Units that already have details (the Mini App's) are never offered."""
+    conn = sqlite3.connect(DB_PATH)
+    sql = "SELECT id, item_id, unit_no, state, info_json FROM fulfilment WHERE order_id = ? AND state = 'needs_info'"
+    args = [order_id]
+    if user_id is not None:
+        sql += " AND user_id = ?"
+        args.append(user_id)
+    rows = conn.execute(sql + " ORDER BY id", args).fetchall()
+    conn.close()
+    out = []
+    for fid, iid, no, state, info_json in rows:
+        if item_id and iid != item_id:
+            continue
+        if _register_kind(iid) not in ("imd", "generic"):
+            continue
+        if _unit_has_details(info_json) and not _reask_waiting(fid, state):
+            continue
+        out.append((fid, iid, no))
+    return out
+
+
+def db_order_missing_details(order_id: int) -> list:
+    """What the support chatbot still has to ask the customer for (26 Nov 2026): [{item_id, name, unit, kind}] for each
+    unit waiting for account details (_units_open_for_details). kind: "imd" (new: email, username, password; renewal:
+    prev_username) or "generic" (new: first_name, last_name, email, username, password; renewal: login_username,
+    login_password). account_type is set when the unit was asked again as a new account or a renewal."""
+    out = []
+    for fid, iid, no in _units_open_for_details(order_id):
+        entry = {"item_id": iid, "name": fid_title(fid, iid), "unit": no, "kind": _register_kind(iid)}
+        forced = db_get_reask(fid).get("type")
+        if forced in ("new", "renew"):
+            entry["account_type"] = forced
+        out.append(entry)
+    return out
+
+
+def _chat_details_check(item_id: str, fields: dict, user_id: int, fulfilment_id=None, order_id=None):
+    """Account details for one unit, from the support chat: (clean info, None) or (None, why not). The reply bot's
+    rules (_clean_register_info: required fields, the username/password rules) plus what the forms check: a real
+    email, a username of at least 6 characters, and an email/username this customer hasn't used for this subscription
+    before (the details asked again 🔁 may be sent back as they were) nor for another unit of the same subscription in
+    this order. Errors keep the prefixes the chatbot matches."""
+    kind = _register_kind(item_id)
+    if kind not in ("imd", "generic"):
+        return {"account_type": "new"}, None
+    fields = {str(k): str(v).strip()[:200] for k, v in (fields or {}).items()
+              if v is not None and not isinstance(v, (dict, list)) and str(v).strip()}
+    forced = db_get_reask(fulfilment_id).get("type") if fulfilment_id else None
+    if forced in ("new", "renew") and kind == "generic":
+        fields["account_type"] = forced      # asked again as a new account / a renewal (22 Nov 2026)
+    clean, problem = _clean_register_info(kind, fields)
+    if problem:
+        return None, problem["error"]
+    if clean["account_type"] == "new":
+        if not _EMAIL_RE.match(clean["email"]):
+            return None, "Enter a valid email address"
+        if len(clean["username"]) < 6:
+            return None, "The username needs at least 6 characters"
+        for field in ("email", "username"):
+            again = fulfilment_id and clean[field].lower() == _reask_prev_value(fulfilment_id, field)
+            if not again and db_credential_already_used(user_id, item_id, field, clean[field]):
+                return None, f"This {field} was already used to register for this subscription; choose a different one"
+        if order_id:
+            conn = sqlite3.connect(DB_PATH)
+            others = conn.execute("SELECT info_json FROM fulfilment WHERE order_id = ? AND item_id = ? AND id != ?",
+                                  (order_id, item_id, fulfilment_id or 0)).fetchall()
+            conn.close()
+            for (raw,) in others:
+                try:
+                    other = json.loads(raw) if raw else {}
+                except ValueError:
+                    other = {}
+                for field in ("email", "username"):
+                    if isinstance(other, dict) and str(other.get(field) or "").lower() == clean[field].lower():
+                        return None, (f"This {field} was already used to register for this subscription; "
+                                      "choose a different one")
+    return clean, None
+
+
+def _chat_infos(info: dict, infos: dict, order_items: dict):
+    """The account details the support chat sent with an order: `info` (one product's, or naming it with item_id) and
+    `infos` {item_id: {...} or [{...}, {...}] one per unit}. Returns ({item_id: [details, ...]}, error)."""
+    given = {}
+    if info:
+        info = dict(info)
+        takers = [i for i in order_items if _register_kind(i) not in (None, "none")]
+        target = info.pop("item_id", "")
+        if not target and len(takers) > 1:
+            return {}, "several products in the order take account details: send them per product (infos)"
+        target = target or next(iter(takers), None)
+        if target:
+            given[target] = [info]
+    for item_id, entries in (infos or {}).items():
+        given.setdefault(item_id, []).extend(e for e in entries if e)
+    return given, None
+
+
+def _store_chat_details(order_id: int, user_id: int, given: dict) -> tuple:
+    """Puts account details taken in the support chat (26 Nov 2026) on the order's units before or after payment:
+    each on the next unit of its product still waiting for details (never over the Mini App's, never on a unit past
+    needs_info). The unit stays needs_info: once the order is paid, process_next_in_queue finds them and never asks
+    (iMD runs, other products go to the admin as 📝 Ready to deliver, UpToDate to @Utdreg_bot). Bad details never stop
+    the order: they're returned as problems for the chatbot to ask again. Returns (stored, problems). Only item ids
+    and field names are logged, never values."""
+    stored, problems = [], []
+    taken = set()
+    for item_id, entries in (given or {}).items():
+        if _register_kind(item_id) not in ("imd", "generic"):
+            continue   # a code, a book, manual access or an add-on on its plan: nothing to store
+        for fields in entries:
+            units = [u for u in _units_open_for_details(order_id, user_id, item_id) if u[0] not in taken]
+            if not units:
+                logger.info("chat details: order #%s has no %s unit waiting for details; skipped", order_id, item_id)
+                break
+            fid, _, unit_no = units[0]
+            clean, problem = _chat_details_check(item_id, fields, user_id, fid, order_id)
+            if problem:
+                problems.append({"item_id": item_id, "name": fid_title(fid, item_id), "unit": unit_no, "error": problem})
+                logger.info("chat details: order #%s %s unit %s refused (%s)", order_id, item_id, unit_no,
+                            problem.split(":")[0][:60])
+                taken.add(fid)
+                continue
+            db_set_fulfilment_info(fid, clean)
+            db_reask_answered(fid)
+            taken.add(fid)
+            stored.append({"item_id": item_id, "unit": unit_no, "fulfilment_id": fid})
+            logger.info("chat details: order #%s %s unit %s stored (%s)", order_id, item_id, unit_no,
+                        ", ".join(sorted(k for k in clean if k != "account_type")))
+    return stored, problems
+
+
+def _chat_details_answer(order_id: int, problems=None) -> dict:
+    """The details part of an answer to the support chatbot: what is still missing, what was refused and why."""
+    missing = db_order_missing_details(order_id)
+    return {"missing_details": missing, "details_problems": problems or [],
+            "needs_details": db_order_needs_details(order_id)}
 
 
 def db_next_needs_info(order_id: int):
@@ -11433,6 +11581,7 @@ ORDER_STATUS_MEANINGS = {
 }
 FULFILMENT_STATE_MEANINGS = {
     "needs_info": "waiting for the customer to send account details in the shop bot",
+    "details_received": "account details received",   # needs_info with details stored (only in these answers)
     "awaiting_delivery": "being prepared, will be delivered in the shop bot",
     "delivered": "delivered",
 }
@@ -11467,8 +11616,12 @@ async def http_customer_orders(request):
             except (TypeError, ValueError):
                 items = {}
             states = {}
-            for f_item, f_state, f_addons in conn.execute(
-                    "SELECT item_id, state, addons_json FROM fulfilment WHERE order_id = ? ORDER BY id", (order_id,)):
+            for f_item, f_state, f_addons, f_info in conn.execute(
+                    "SELECT item_id, state, addons_json, info_json FROM fulfilment WHERE order_id = ? ORDER BY id",
+                    (order_id,)):
+                # details already stored (Mini App, or taken in the support chat): not waiting for the customer
+                if f_state == "needs_info" and _unit_has_details(f_info):
+                    f_state = "details_received"
                 # an Uptodate AI add-on rides on its plan's unit and takes its state (24 Nov 2026)
                 for k in [f_item] + [a["id"] for a in addons_list(f_addons)]:
                     states[k] = (states[k] + "," if k in states else "") + f_state
@@ -11496,6 +11649,42 @@ async def http_customer_orders(request):
     finally:
         conn.close()
     return web.json_response({"user_id": user_id, "orders": result})
+
+
+async def http_order_progress(request):
+    """Where the orders the support chatbot took stand (26 Nov 2026), so it can tell the customer in its chat once one
+    is completed. GET ?ids=1,2,3 (at most 100), X-Api-Key protected. Per order found: {order_id, user_id, status,
+    units, delivered, complete, missing_details}; complete = delivered with every unit delivered (orders.status is
+    'delivered' from the FIRST unit on). Ids not found come back in `missing`. No credentials, no payer data."""
+    from aiohttp import web
+    if not _reply_bot_authorized(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        ids = [int(x) for x in (request.query.get("ids") or "").split(",") if x.strip()]
+    except ValueError:
+        return web.json_response({"error": "ids must be numbers"}, status=400)
+    ids = list(dict.fromkeys(ids))
+    if not ids or len(ids) > 100:
+        return web.json_response({"error": "send between 1 and 100 ids"}, status=400)
+    conn = sqlite3.connect(DB_PATH)
+    orders, missing = [], []
+    try:
+        for order_id in ids:
+            row = conn.execute("SELECT user_id, status FROM orders WHERE id = ?", (order_id,)).fetchone()
+            if not row:
+                missing.append(order_id)
+                continue
+            units, delivered = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(state = 'delivered'), 0) FROM fulfilment WHERE order_id = ?",
+                (order_id,)).fetchone()
+            orders.append({"order_id": order_id, "user_id": row[0], "status": row[1], "units": units,
+                           "delivered": delivered, "complete": row[1] == "delivered" and units > 0 and delivered == units})
+    finally:
+        conn.close()
+    for o in orders:
+        o["missing_details"] = db_order_missing_details(o["order_id"]) if o["status"] in (
+            "awaiting_payment", "awaiting_receipt", "awaiting_confirmation", "paid") else []
+    return web.json_response({"orders": orders, "missing": missing})
 
 
 def _reply_bot_authorized(request) -> bool:
@@ -11693,7 +11882,7 @@ async def http_submit_receipt(request):
         return web.json_response(
             {"error": "this order isn't waiting for a payment", "status": status,
              "status_meaning": ORDER_STATUS_MEANINGS.get(status, status),
-             "needs_details": db_order_needs_details(order_id)},
+             **_chat_details_answer(order_id)},
             status=409,
         )
 
@@ -11750,15 +11939,15 @@ async def http_submit_receipt(request):
         return web.json_response(
             {"error": "this order isn't waiting for a payment", "status": now_status,
              "status_meaning": ORDER_STATUS_MEANINGS.get(now_status, now_status),
-             "needs_details": db_order_needs_details(order_id)},
+             **_chat_details_answer(order_id)},
             status=409,
         )
     context = CallbackContext(application, chat_id=user_id, user_id=user_id)
     application.create_task(_verify_submitted_receipts(context, order, items, payer_name))
-    # needs_details: the support chatbot tells the customer the shop bot will ask for their
-    # account details after the payment is confirmed, instead of "nothing else to do".
+    # needs_details / missing_details (26 Nov 2026): the support chatbot asks the customer there for the account
+    # details still missing, or says there's nothing else to do.
     return web.json_response({"ok": True, "order_id": order_id, "status": "awaiting_confirmation",
-                              "needs_details": db_order_needs_details(order_id)})
+                              **_chat_details_answer(order_id)})
 
 
 # Payment-method values an order can be created with via /api/create_order:
@@ -11970,14 +12159,23 @@ def db_replace_unpaid_order_items(order_id: int, user_id: int, order_items: dict
         db_add_fulfilment_items(order_id, user_id, order_items)   # the missing units (existing ones are kept)
 
 
-async def _reuse_unpaid_order(application, user_id: int, existing, order_items: dict, payment_method: str):
+async def _reuse_unpaid_order(application, user_id: int, existing, order_items: dict, payment_method: str,
+                              given: dict = None):
     """The customer already has an unpaid order (e.g. an abandoned checkout) when the support chatbot
     creates one for a payment it took. 409 with that order's id, so the receipt goes onto it instead of a
     second order. If it holds other products than those paid for, it's changed to them first (same order
     number, one order with everything paid, 24 Nov 2026), unless credits, a discount code or postpaid
-    credit are on it: then it's refused (no order_id) and the chatbot hands it to the owner."""
+    credit are on it: then it's refused (no order_id) and the chatbot hands it to the owner.
+    `given`: account details taken in the chat (26 Nov 2026), put on the units still without any (the Mini App's
+    are kept); the answer says what is still missing."""
     from aiohttp import web
     order_id, items_json, credits, discount_code, on_credit = existing
+
+    def details_here(items):
+        # an order made by an older chatbot has no units yet: they're added now, as for a Mini App order
+        db_add_fulfilment_items(order_id, user_id, items)
+        _, problems = _store_chat_details(order_id, user_id, given or {})
+        return _chat_details_answer(order_id, problems)
     try:
         current = {str(k): int(v) for k, v in json.loads(items_json or "{}").items()}
     except (ValueError, TypeError, AttributeError):
@@ -11996,6 +12194,7 @@ async def _reuse_unpaid_order(application, user_id: int, existing, order_items: 
                 logger.info("create_order: unpaid order #%s total %s -> %s (repriced)", order_id, row[0], total)
             conn.close()
             body["total"] = total
+        body.update(details_here(order_items))
         return web.json_response(body, status=409)
     if credits or discount_code or on_credit:
         return web.json_response(
@@ -12007,6 +12206,7 @@ async def _reuse_unpaid_order(application, user_id: int, existing, order_items: 
     db_replace_unpaid_order_items(order_id, user_id, order_items, total, payment_method)
     logger.info("create_order: unpaid order #%s for %s changed from %s to %s (chat payment)",
                 order_id, user_id, current, order_items)
+    details = details_here(order_items)
     lines = [f"{qty}x {MENU[i][0]}" for i, qty in order_items.items()]
     try:
         await application.bot.send_message(
@@ -12018,7 +12218,7 @@ async def _reuse_unpaid_order(application, user_id: int, existing, order_items: 
         logger.exception("create_order: couldn't notify customer %s about order #%s", user_id, order_id)
     return web.json_response(
         {"error": "the customer already has an unpaid order", "order_id": order_id, "items": order_items,
-         "previous_items": current, "updated": True, "total": total}, status=409,
+         "previous_items": current, "updated": True, "total": total, **details}, status=409,
     )
 
 
@@ -12040,12 +12240,21 @@ async def http_create_order(request):
     payer_name, and the optional info {account_type, ...fields} saved on the
     first unit (or infos {item_id: {...}}, one per product, for several products),
     so delivery starts straight away (an iMD renewal runs on iMD)
-    instead of waiting for a receipt."""
+    instead of waiting for a receipt.
+
+    Orders taken in the support chat (26 Nov 2026): info / infos are accepted without owner_confirmed too
+    (infos values may be a list, one per unit). The units are created with the order, the details stored on them
+    (never refused: bad ones come back in details_problems), source = 'chat', and the answer (200, or 409 with
+    order_id) carries missing_details / details_problems / needs_details, so the chatbot asks for the rest there.
+    chat_details: true says the chatbot collects them in its chat (the customer's notice says so)."""
     from aiohttp import web
     from telegram.ext import CallbackContext
 
     if not _reply_bot_authorized(request):
         return web.json_response({"error": "Unauthorized"}, status=401)
+
+    def fields_of(d):
+        return {str(k): str(v).strip() for k, v in (d or {}).items() if v is not None}
     try:
         body = await request.json()
         user_id = int(body["user_id"])
@@ -12053,8 +12262,9 @@ async def http_create_order(request):
         payment_method = str(body.get("payment_method") or "").strip()
         owner_confirmed = body.get("owner_confirmed") is True
         payer_name = str(body.get("payer_name") or "").strip()[:100]
-        info = {str(k): str(v).strip() for k, v in (body.get("info") or {}).items()}
-        infos = {str(i): {str(k): str(v).strip() for k, v in (fields or {}).items()}
+        chat_details = body.get("chat_details") is True
+        info = fields_of(body.get("info"))
+        infos = {str(i): [fields_of(f) for f in fields] if isinstance(fields, list) else [fields_of(fields)]
                  for i, fields in (body.get("infos") or {}).items()}
     except (ValueError, KeyError, TypeError, AttributeError):
         return web.json_response({"error": "invalid request body"}, status=400)
@@ -12070,34 +12280,26 @@ async def http_create_order(request):
     if refusal:
         return web.json_response(refusal[0], status=refusal[1])
 
-    # Account details, checked before anything is created: `info` for one product (its "item_id", else the
-    # first that takes details), `infos` {item_id: {...}} for several. Each goes on that product's first unit;
-    # units without details are collected here after payment as usual.
-    clean_infos = {}
+    # Account details: `info` for one product (its "item_id", else the one that takes details), `infos`
+    # {item_id: {...} or [{...}, ...]} for several. Each goes on the next unit of its product without details; units
+    # left without them are asked for by the support chat, or here after payment as before. On the owner's
+    # instruction they're checked before anything is created (400: the owner corrects them); a customer's order is
+    # never refused for them (26 Nov 2026).
+    given, given_error = _chat_infos(info, infos, order_items)
     if owner_confirmed:
-        given = {}
-        if info:
-            takers = [i for i in order_items if _register_kind(i) not in (None, "none")]
-            target = info.pop("item_id", "")
-            if not target and len(takers) > 1:
-                return web.json_response(
-                    {"error": "several products in the order take account details: send them per product (infos)"},
-                    status=400,
-                )
-            target = target or next(iter(takers), None)
-            if target:
-                given[target] = info
-        for item_id, fields in infos.items():
-            given[item_id] = fields
-        for item_id, fields in given.items():
+        if given_error:
+            return web.json_response({"error": given_error}, status=400)
+        for item_id, entries in given.items():
             if item_id not in order_items or _register_kind(item_id) is None:
                 return web.json_response({"error": f"account details for {item_id}, which isn't in the order or takes none"}, status=400)
-            if not fields:
-                continue
-            clean, problem = _clean_register_info(_register_kind(item_id), fields)
-            if problem:
-                return web.json_response(problem, status=400)
-            clean_infos[item_id] = clean
+            for fields in entries:
+                _, problem = _clean_register_info(_register_kind(item_id), fields)
+                if problem:
+                    return web.json_response(problem, status=400)
+    else:
+        if given_error:
+            logger.warning("create_order: details for several products without saying which; not stored")
+        given = {i: e for i, e in given.items() if i in order_items}
 
     if not db_user_exists(user_id):
         return web.json_response(
@@ -12112,33 +12314,29 @@ async def http_create_order(request):
     user_row = conn.execute("SELECT username FROM users WHERE user_id = ?", (user_id,)).fetchone()
     conn.close()
     if existing and not owner_confirmed:
-        return await _reuse_unpaid_order(request.app["application"], user_id, existing, order_items, payment_method)
+        return await _reuse_unpaid_order(request.app["application"], user_id, existing, order_items, payment_method,
+                                         given)
 
     total = _reply_bot_order_total(user_id, order_items)
     order_id = db_create_order(user_id, (user_row[0] if user_row else None) or str(user_id), order_items, total)
     db_set_payment_method(order_id, payment_method)
     coworker_login = db_get_user_coworker(user_id)
+    conn = sqlite3.connect(DB_PATH)
     if coworker_login:
-        conn = sqlite3.connect(DB_PATH)
         conn.execute("UPDATE orders SET coworker_id = ? WHERE id = ?", (coworker_login[0], order_id))
-        conn.commit()
-        conn.close()
+    conn.execute("UPDATE orders SET source = 'chat' WHERE id = ?", (order_id,))   # taken in the support chat
+    conn.commit()
+    conn.close()
+    # the units exist before payment, as for a Mini App order (start_order_fulfilment adds none twice)
+    db_add_fulfilment_items(order_id, user_id, order_items)
+    _, problems = _store_chat_details(order_id, user_id, given)
+    details = _chat_details_answer(order_id, problems)
 
     lines = [f"{qty}x {MENU[i][0]}" for i, qty in order_items.items()]
     if owner_confirmed:
         application = request.app["application"]
         if payer_name:
             db_set_payer_name(order_id, payer_name)
-        db_add_fulfilment_items(order_id, user_id, order_items)
-        for item_id, clean in clean_infos.items():
-            conn = sqlite3.connect(DB_PATH)
-            row = conn.execute(
-                "SELECT id FROM fulfilment WHERE order_id = ? AND item_id = ? AND state = 'needs_info' ORDER BY id LIMIT 1",
-                (order_id, item_id),
-            ).fetchone()
-            conn.close()
-            if row:
-                db_set_fulfilment_info(row[0], clean)
         try:
             await application.bot.send_message(
                 chat_id=user_id,
@@ -12167,7 +12365,16 @@ async def http_create_order(request):
         )
         logger.info("create_order: order #%s for %s created as paid on the owner's instruction", order_id, user_id)
         return web.json_response({"ok": True, "order_id": order_id, "total": total,
-                                  "payment_method": payment_method, "confirmed": True})
+                                  "payment_method": payment_method, "confirmed": True, **details})
+    if not chat_details:
+        # an older support chatbot: this bot asks for the details after the payment is confirmed
+        ending = " If any account details are needed, I'll ask you for them here after the payment is confirmed."
+    elif details["missing_details"]:
+        ending = " Our support chat will ask you for the account details still needed."
+    elif given:
+        ending = " Your account details were received."
+    else:
+        ending = ""
     try:
         await request.app["application"].bot.send_message(
             chat_id=user_id,
@@ -12175,13 +12382,13 @@ async def http_create_order(request):
                 f"🧾 Order #{order_id} was created for you through our support chat:\n"
                 + "\n".join(lines)
                 + f"\n\nTotal: {CURRENCY}{total:.2f}\nPayment method: {payment_method}\n\n"
-                "Your receipt is being attached to it for verification. If any account details "
-                "are needed, I'll ask you for them here after the payment is confirmed."
+                "Your receipt is being attached to it for verification." + ending
             ),
         )
     except Exception:
         logger.exception("create_order: couldn't notify customer %s about order #%s", user_id, order_id)
-    return web.json_response({"ok": True, "order_id": order_id, "total": total, "payment_method": payment_method})
+    return web.json_response({"ok": True, "order_id": order_id, "total": total, "payment_method": payment_method,
+                              **details})
 
 
 async def _retry_stuck_imd_unit(application, order_id: int, user_id: int, wanted_item: str, info: dict):
@@ -12448,15 +12655,22 @@ def _register_kind(item_id: str):
 
 
 async def http_register_account(request):
-    """Lets the reply bot hand in a customer's account details for a paid
-    order, as if they'd filled the registration form here, when the admin
-    told it to (e.g. the customer sent them as a screenshot in the support
-    chat). The details are stored on the next unit still waiting for them,
-    and the normal fulfilment queue takes over: iMD registers automatically,
-    other products go to the admin for delivery. Delivery stays with this bot.
+    """Lets the reply bot hand in a customer's account details for one of their
+    orders, as if they'd filled the registration form here: when the admin told
+    it to (e.g. the customer sent them as a screenshot in the support chat), or
+    for an order the support chat took (26 Nov 2026). The details are stored on
+    the next unit still waiting for them (no details yet, or asked again 🔁; the
+    Mini App's are never overwritten).
 
-    JSON body: {user_id, order_id, item_id (optional), info: {account_type:
-    "new"|"renew", ...fields}}."""
+    Paid order: the normal fulfilment queue takes over (iMD registers
+    automatically, other products go to the admin for delivery). Unpaid order
+    (awaiting payment, receipt or confirmation): only stored; the queue uses
+    them once the payment is confirmed, so the customer is never asked again.
+    Delivery stays with this bot.
+
+    JSON body: {user_id, order_id, item_id (optional), unit (optional unit
+    number), info: {account_type: "new"|"renew", ...fields}}. The answer
+    carries missing_details: what is still missing in the order."""
     from aiohttp import web
     from telegram.ext import CallbackContext
 
@@ -12467,16 +12681,19 @@ async def http_register_account(request):
         user_id = int(body["user_id"])
         order_id = int(body["order_id"])
         wanted_item = str(body.get("item_id") or "").strip()
-        info = {str(k): str(v).strip() for k, v in (body.get("info") or {}).items()}
+        wanted_unit = int(body["unit"]) if body.get("unit") not in (None, "") else None
+        info = {str(k): str(v).strip() for k, v in (body.get("info") or {}).items() if v is not None}
     except (ValueError, KeyError, TypeError, AttributeError):
         return web.json_response({"error": "invalid request body"}, status=400)
 
     order = db_get_order(order_id)
     if not order or order[1] != user_id:
         return web.json_response({"error": f"order #{order_id} doesn't belong to this customer"}, status=404)
-    if order[5] not in ("paid", "delivered"):
+    paid = order[5] in ("paid", "delivered")
+    if not paid and order[5] not in UNPAID_ORDER_STATUSES:
         return web.json_response(
-            {"error": "this order isn't paid yet, so its account can't be registered",
+            {"error": "this order was " + ("rejected" if order[5] == "rejected" else "cancelled")
+                      + ", so its account can't be registered",
              "status": order[5], "status_meaning": ORDER_STATUS_MEANINGS.get(order[5], order[5])},
             status=409,
         )
@@ -12484,7 +12701,13 @@ async def http_register_account(request):
     conn = sqlite3.connect(DB_PATH)
     has_units = conn.execute("SELECT 1 FROM fulfilment WHERE order_id = ? LIMIT 1", (order_id,)).fetchone()
     conn.close()
-    if not has_units:
+    if not has_units and not paid:
+        # an unpaid order made by an older support chatbot: its units, as for a Mini App order
+        try:
+            db_add_fulfilment_items(order_id, user_id, json.loads(order[3]))
+        except (TypeError, ValueError):
+            pass
+    elif not has_units:
         # A paid order with no items left: its units were deleted (e.g. 🗑 Delete in Pending Orders
         # after a failed iMD run, order #468). The owner is asking to deliver it now, so put the
         # units back as waiting for details and carry on.
@@ -12503,41 +12726,38 @@ async def http_register_account(request):
             except Exception:
                 logger.exception("register_account: couldn't tell the admin about order #%s", order_id)
 
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        "SELECT id, item_id FROM fulfilment WHERE order_id = ? AND user_id = ? AND state = 'needs_info' ORDER BY id",
-        (order_id, user_id),
-    ).fetchall()
-    conn.close()
-    if wanted_item:
-        rows = [r for r in rows if r[1] == wanted_item]
-    rows = [r for r in rows if _register_kind(r[1]) is not None]
+    rows = _units_open_for_details(order_id, user_id, wanted_item or None)
+    if wanted_unit is not None and any(no == wanted_unit for _, _, no in rows):
+        rows = [r for r in rows if r[2] == wanted_unit]
     if not rows:
-        retry = await _retry_stuck_imd_unit(request.app["application"], order_id, user_id, wanted_item, info)
+        retry = await _retry_stuck_imd_unit(request.app["application"], order_id, user_id, wanted_item, info) \
+            if paid else None
         if retry is not None:
             return retry
         # Usually the customer already gave the details here (or the account was delivered):
         # say where each item stands so the reply bot can tell them.
         conn = sqlite3.connect(DB_PATH)
-        states = [r[0] for r in conn.execute(
-            "SELECT state FROM fulfilment WHERE order_id = ? AND user_id = ?", (order_id, user_id)
-        ).fetchall()]
+        units = conn.execute(
+            "SELECT state, info_json FROM fulfilment WHERE order_id = ? AND user_id = ?", (order_id, user_id)
+        ).fetchall()
         conn.close()
+        states = [st for st, _ in units]
+        meanings = [("account details received" if st == "needs_info" and _unit_has_details(raw)
+                     else FULFILMENT_STATE_MEANINGS.get(st, st)) for st, raw in units]
         return web.json_response(
             {"error": f"nothing in order #{order_id} is waiting for account details",
-             "already": bool(states) and all(st in ("awaiting_delivery", "delivered") for st in states),
-             "states": [FULFILMENT_STATE_MEANINGS.get(st, st) for st in states]},
+             "already": bool(states) and all(st in ("awaiting_delivery", "delivered") or
+                                             (st == "needs_info" and _unit_has_details(raw)) for st, raw in units),
+             "states": meanings},
             status=409,
         )
-    fulfilment_id, item_id = rows[0]
-    kind = _register_kind(item_id)
-    forced = db_get_reask(fulfilment_id).get("type")
-    if forced in ("new", "renew") and kind == "generic":
-        info["account_type"] = forced      # asked again as a new account / a renewal (22 Nov 2026)
-
-    clean, problem = _clean_register_info(kind, info)
+    fulfilment_id, item_id, unit_no = rows[0]
+    clean, problem = _chat_details_check(item_id, info, user_id, fulfilment_id, order_id)
     if problem:
-        return web.json_response(problem, status=400)
+        kind = _register_kind(item_id)
+        atype = "renew" if (db_get_reask(fulfilment_id).get("type") or info.get("account_type") or "").lower() in (
+            "renew", "renewal", "existing") else "new"
+        return web.json_response({"error": problem, "required": REGISTER_FIELDS.get((kind, atype), [])}, status=400)
 
     application = request.app["application"]
     # Drop any half-finished form for this unit in the customer's session,
@@ -12554,7 +12774,22 @@ async def http_register_account(request):
 
     db_set_fulfilment_info(fulfilment_id, clean)
     db_reask_answered(fulfilment_id)
-    item_name = MENU.get(item_id, (item_id, 0))[0]
+    item_name = fid_title(fulfilment_id, item_id)
+    logger.info("register_account: order #%s %s unit %s details stored (%s, %s)", order_id, item_id, unit_no,
+                "paid" if paid else "not paid yet", ", ".join(sorted(k for k in clean if k != "account_type")))
+    answer = {"ok": True, "order_id": order_id, "fulfilment_id": fulfilment_id, "item_id": item_id,
+              "item_name": item_name, "unit": unit_no, "stored": True}
+    if not paid:
+        # Only stored: the queue uses them once the payment is confirmed. Paid meanwhile (the admin confirmed while
+        # this ran)? Then start it now, as a paid order would.
+        now = db_get_order(order_id)
+        if now and now[5] in ("paid", "delivered"):
+            context = CallbackContext(application, chat_id=user_id, user_id=user_id)
+            application.create_task(process_next_in_queue(context, user_id, order_id))
+            paid = True
+        answer["paid"] = paid
+        answer["missing_details"] = db_order_missing_details(order_id)
+        return web.json_response(answer)
     try:
         await application.bot.send_message(
             chat_id=user_id,
@@ -12567,9 +12802,32 @@ async def http_register_account(request):
         logger.exception("register_account: couldn't message customer %s", user_id)
     context = CallbackContext(application, chat_id=user_id, user_id=user_id)
     application.create_task(process_next_in_queue(context, user_id, order_id))
-    return web.json_response(
-        {"ok": True, "order_id": order_id, "fulfilment_id": fulfilment_id, "item_id": item_id, "item_name": item_name}
-    )
+    answer["paid"] = True
+    answer["missing_details"] = db_order_missing_details(order_id)
+    return web.json_response(answer)
+
+
+def _catalog_details_kind(item_id: str) -> str:
+    """Which account details a product needs, for the support chat (26 Nov 2026): "imd", "account" (any other
+    subscription), "none" (a code, a book, manual access), "with_plan" (an Uptodate AI add-on bought with a plan rides
+    on the plan's account; one sold alone, the Telegram bot code, needs none)."""
+    if item_id in UPTODATE_AI_ADDONS and item_id not in UPTODATE_AI_TRIGGER_ITEMS:
+        return "with_plan"
+    kind = _register_kind(item_id)
+    return {"imd": "imd", "generic": "account"}.get(kind, "none")
+
+
+def _catalog_details_fields() -> dict:
+    """The account fields of each kind, from the shop's own forms, so the chatbot's questions can't drift from them."""
+    return {
+        "imd": {"new": REGISTER_FIELDS[("imd", "new")], "renew": REGISTER_FIELDS[("imd", "renew")]},
+        "account": {"new": REGISTER_FIELDS[("generic", "new")], "renew": REGISTER_FIELDS[("generic", "renew")]},
+        "rules": ("email: a real email address never used before to register for that subscription; username: at "
+                  "least 6 characters, never used before for that subscription (no spaces for iMD); password for "
+                  "other subscriptions: at least 8 characters, with at least one number, one capital letter and one "
+                  f"symbol from {GENERIC_PASSWORD_SYMBOLS}; prev_username: the iMD username of the account to renew; "
+                  "login_username / login_password: the login of the account to renew"),
+    }
 
 
 async def http_public_catalog(request):
@@ -12597,6 +12855,7 @@ async def http_public_catalog(request):
             "price": customer_price(item_id),
             "currency": "USD",
             "in_stock": item_id not in out_of_stock,
+            "details": _catalog_details_kind(item_id),
         }
         for item_id in dict.fromkeys(item_ids)
         if item_id in MENU and item_id not in hidden
@@ -12612,7 +12871,7 @@ async def http_public_catalog(request):
     listed = {p["id"] for p in products}
     products += [
         {"id": i, "name": MENU[i][0], "price": customer_price(i), "currency": "USD", "in_stock": i not in out_of_stock,
-         "section": "all"}
+         "section": "all", "details": _catalog_details_kind(i)}
         for i in sorted(PANEL_ITEM_IDS, key=lambda x: (MENU.get(x, ("",))[0].lower(), x))
         if i in MENU and i not in listed and i not in hidden
     ]
@@ -12638,6 +12897,8 @@ async def http_public_catalog(request):
                 ),
             },
             "guide": SHOP_GUIDE_FOR_REPLY_BOT,
+            # what the support chat asks for when it takes an order (26 Nov 2026): the forms' own fields and rules
+            "details_fields": _catalog_details_fields(),
             "payment_method_codes": reply_bot_payment_method_codes(),
             "generated_at": datetime.utcnow().isoformat() + "Z",
             # the running promo (PROMO), so the chatbot can mention it; gone once it ends
@@ -15655,6 +15916,7 @@ async def start_api_server(application):
     api_app.router.add_get("/api/payment_details", http_payment_details)
     api_app.router.add_get("/api/automation_export", http_automation_export)
     api_app.router.add_get("/api/orders", http_all_orders)
+    api_app.router.add_get("/api/order_progress", http_order_progress)
     api_app.router.add_post("/api/submit_receipt", http_submit_receipt)
     api_app.router.add_post("/api/create_order", http_create_order)
     api_app.router.add_post("/api/register_account", http_register_account)
