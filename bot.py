@@ -5607,8 +5607,14 @@ async def announcement_detail(update: Update, context: ContextTypes.DEFAULT_TYPE
     if fmt.get("send_mode") == "copy" and fmt.get("src_chat_id") and fmt.get("src_message_id"):
         # Telegram only kept the Premium emoji by copying the admin's own message: copy it again here.
         try:
-            await context.bot.copy_message(chat_id=query.message.chat_id, from_chat_id=int(fmt["src_chat_id"]),
-                                           message_id=int(fmt["src_message_id"]), reply_markup=back)
+            ids = [int(x) for x in str(fmt["src_message_id"]).split(",") if x.strip()]
+            if len(ids) == 1:
+                await context.bot.copy_message(chat_id=query.message.chat_id, from_chat_id=int(fmt["src_chat_id"]),
+                                               message_id=ids[0], reply_markup=back)
+            else:
+                await context.bot.copy_messages(chat_id=query.message.chat_id, from_chat_id=int(fmt["src_chat_id"]),
+                                                message_ids=ids)
+                await context.bot.send_message(chat_id=query.message.chat_id, text="📢", reply_markup=back)
             return
         except Exception as e:
             logger.warning("announcement %s: copy failed (%s), showing the text", announcement_id, e)
@@ -7717,12 +7723,95 @@ async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"Order #{order_id} cancelled.")
 
 
+# 📢 Broadcast with a picture, video, GIF or file (owner, 26 Nov 2026). The admin's message is copied to every customer
+# (caption, formatting and Premium emoji as Telegram allows). Several pictures sent at once (an album) arrive as separate
+# updates with one media_group_id: they are gathered for BROADCAST_ALBUM_WAIT seconds and copied together.
+BROADCAST_ALBUM_WAIT = 2.0
+_broadcast_albums: dict = {}
+
+
+def _broadcast_media_kind(message) -> str:
+    for kind in ("photo", "video", "animation", "document", "audio", "voice", "video_note", "sticker"):
+        if getattr(message, kind, None):
+            return kind
+    return ""
+
+
+async def _send_broadcast_copy(bot, admin_chat: int, message_ids: list, body: str, status_chat: int):
+    """Copy the admin's message(s) to every customer and save the announcement. Returns (sent, failed)."""
+    db_add_announcement(body, None, admin_chat, ",".join(str(m) for m in message_ids), "copy")
+    sent, failed = 0, 0
+    for user_id in db_all_user_ids(exclude=ADMIN_CHAT_ID):
+        try:
+            if len(message_ids) == 1:
+                await bot.copy_message(chat_id=user_id, from_chat_id=admin_chat, message_id=message_ids[0],
+                                       reply_markup=main_menu_keyboard(user_id))
+            else:
+                await bot.copy_messages(chat_id=user_id, from_chat_id=admin_chat, message_ids=message_ids)
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)  # gentle on Telegram's rate limits
+    await bot.send_message(
+        chat_id=status_chat,
+        text=f"✅ Broadcast sent.\nDelivered: {sent}\nFailed: {failed}\n\n"
+             "It's also saved under customers' 📢 Announcements tab.",
+    )
+    return sent, failed
+
+
+async def _broadcast_album_later(bot, group_id: str):
+    await asyncio.sleep(BROADCAST_ALBUM_WAIT)
+    album = _broadcast_albums.pop(group_id, None)
+    if not album:
+        return
+    try:
+        await _send_broadcast_copy(bot, album["chat"], sorted(album["ids"]), album["body"], album["chat"])
+    except Exception as e:
+        logger.exception("broadcast album %s failed: %s", group_id, e)
+
+
+async def broadcast_media_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """True if this media message was the admin's 📢 Broadcast (or a later picture of its album) and was handled."""
+    msg = update.message
+    if not msg or not update.effective_user or update.effective_user.id != ADMIN_CHAT_ID:
+        return False
+    group_id = msg.media_group_id
+    if group_id and group_id in _broadcast_albums:
+        album = _broadcast_albums[group_id]
+        album["ids"].append(msg.message_id)
+        if msg.caption and not album.get("caption"):
+            album["caption"] = album["body"] = msg.caption
+        return True
+    if context.user_data.get("awaiting_admin_input") != "broadcast":
+        return False
+    kind = _broadcast_media_kind(msg)
+    if not kind:
+        return False
+    context.user_data.pop("awaiting_admin_input", None)
+    body = msg.caption or ({"photo": "🖼 Picture", "video": "🎬 Video", "animation": "🎞 GIF"}.get(kind, "📎 File"))
+    if group_id:
+        _broadcast_albums[group_id] = {"chat": update.effective_chat.id, "ids": [msg.message_id],
+                                       "body": msg.caption or "🖼 Pictures", "caption": msg.caption}
+        asyncio.create_task(_broadcast_album_later(context.bot, group_id))
+        return True
+    await _send_broadcast_copy(context.bot, update.effective_chat.id, [msg.message_id], body, update.effective_chat.id)
+    return True
+
+
+async def broadcast_media_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Videos, GIFs, audio and stickers: only used for 📢 Broadcast."""
+    await broadcast_media_received(update, context)
+
+
 async def photo_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Single entry point for incoming photos — dispatches to the ticket
     screenshot flow or the payment receipt flow, whichever the sender is
     actually in the middle of. Mirrors text_state_router: one registered
     handler avoids two photo handlers silently stealing each other's
     updates."""
+    if await broadcast_media_received(update, context):
+        return
     if await ticket_screenshot_reply(update, context):
         return
     await receipt_photo(update, context)
@@ -7741,6 +7830,8 @@ async def receipt_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Same as receipt_photo, but for a receipt sent as a PDF document
     instead of a photo. Claude can read PDFs directly, no conversion
     needed."""
+    if await broadcast_media_received(update, context):
+        return
     doc = update.message.document
     if not doc or doc.mime_type != "application/pdf":
         return
@@ -8754,7 +8845,8 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_admin_input"] = "broadcast"
         recipient_count = len(db_all_user_ids(exclude=ADMIN_CHAT_ID))
         await update.message.reply_text(
-            f"Type the announcement to send to all {recipient_count} customer(s):"
+            f"Send the announcement for all {recipient_count} customer(s): text, or a picture, video, GIF or file "
+            "(with a caption if you like; several pictures at once go out as one album):"
         )
 
     elif text == A_FIND_CUSTOMER:
@@ -24545,6 +24637,8 @@ async def restore_file_received(update: Update, context: ContextTypes.DEFAULT_TY
     database at all."""
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
+    if await broadcast_media_received(update, context):
+        return
     if context.user_data.get("awaiting_restoreorder_file"):
         await restoreorder_file_received(update, context)
         return
@@ -25014,6 +25108,9 @@ def main():
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.PHOTO, photo_router))
+    app.add_handler(MessageHandler(
+        filters.VIDEO | filters.ANIMATION | filters.AUDIO | filters.VOICE | filters.VIDEO_NOTE | filters.Sticker.ALL,
+        broadcast_media_router))
     app.add_handler(MessageHandler(filters.Document.PDF, receipt_pdf))
     app.add_handler(MessageHandler(filters.Document.ALL, restore_file_received))
     app.add_handler(CallbackQueryHandler(restore_confirm, pattern=r"^restore_confirm$"))
