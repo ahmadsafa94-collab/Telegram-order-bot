@@ -4214,15 +4214,24 @@ def db_order_reductions(order_id: int):
     return ((row[0] or 0), (row[1] or None)) if row else (0, None)
 
 
+# Credits applied to an order that never got a receipt stop counting as reserved after this long (review, 26 Nov
+# 2026): unpaid orders are never expired, so without it one abandoned checkout would keep a customer's credits
+# unusable for ever. An order whose receipt is being checked keeps its reservation whatever its age. If the old
+# order is paid after all, the confirmation finds the credits gone and holds it (_settle_order_payment).
+CREDIT_RESERVATION_HOURS = 24
+
+
 def db_credits_reserved_elsewhere(user_id: int, exclude_order_id: int = None) -> int:
     """Credits the customer already reserved on their other open, unpaid orders (audit, 26 Nov 2026): they are
-    deducted when that order is confirmed, so they can't be counted as available again for another order."""
+    deducted when that order is confirmed, so they can't be counted as available again for another order. An order
+    still without a receipt counts for CREDIT_RESERVATION_HOURS only."""
+    since = (datetime.utcnow() - timedelta(hours=CREDIT_RESERVATION_HOURS)).isoformat()
     conn = sqlite3.connect(DB_PATH)
-    placeholders = ",".join("?" for _ in ORDER_OPEN_STATUSES)
     row = conn.execute(
-        f"SELECT COALESCE(SUM(credits_applied), 0) FROM orders WHERE user_id = ? AND id != ? "
-        f"AND status IN ({placeholders}) AND COALESCE(credits_applied, 0) > 0",
-        (user_id, exclude_order_id or -1, *ORDER_OPEN_STATUSES),
+        "SELECT COALESCE(SUM(credits_applied), 0) FROM orders WHERE user_id = ? AND id != ? "
+        "AND COALESCE(credits_applied, 0) > 0 AND (status = 'awaiting_confirmation' "
+        "OR (status IN ('awaiting_payment', 'awaiting_receipt') AND created_at >= ?))",
+        (user_id, exclude_order_id or -1, since),
     ).fetchone()
     conn.close()
     return int(row[0] or 0)
@@ -4259,15 +4268,18 @@ def db_set_receipt_references(order_id: int, references: list):
 
 
 def db_record_receipt_files(order_id: int, items: list):
-    """Stores the receipt files' keys for this order; returns another order that already had one of them
-    (the lowest id), or None."""
+    """Stores the receipt files' keys for this order; returns another order (not a cancelled one) that already had
+    one of them (the lowest id), or None."""
     keys = [k for item in items for k in (item.get("keys") or []) if k]
     if not keys:
         return None
     conn = sqlite3.connect(DB_PATH)
     placeholders = ",".join("?" for _ in keys)
+    # A cancelled order was never paid, so the same receipt on the order that replaced it is the normal case
+    # (cancel, order again, send the same screenshot): it doesn't count (review, 26 Nov 2026).
     row = conn.execute(
-        f"SELECT MIN(order_id) FROM receipt_files WHERE file_key IN ({placeholders}) AND order_id != ?",
+        f"SELECT MIN(order_id) FROM receipt_files WHERE file_key IN ({placeholders}) AND order_id != ? "
+        "AND order_id NOT IN (SELECT id FROM orders WHERE status = 'cancelled')",
         (*keys, order_id),
     ).fetchone()
     now = datetime.utcnow().isoformat()
@@ -4737,6 +4749,10 @@ def db_promo_lapsed_orders() -> list:
     Coworker orders and orders by the admin are never promo-priced, so never in it."""
     if not PROMO:
         return []   # SHOP_PROMO_OFF
+    if active_promo():
+        # A promo is running (e.g. this one was extended after the order was made): nothing has lapsed yet. The
+        # orders are cancelled when it does end (review, 26 Nov 2026).
+        return []
     now = _promo_now()
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
@@ -5349,7 +5365,8 @@ def _shop_url(user_id: int = 0, preview_coworker_id: int = None, admin_edit: boo
         # open the Shop, and the server re-verifies everything for real
         # at checkout regardless — the client-side numbers are only ever
         # used for display, never trusted for the actual charge.
-        credits_balance = db_get_credits(user_id)
+        # what a checkout can really use: not the credits reserved on their other open orders (review, 26 Nov 2026)
+        credits_balance = db_available_credits(user_id)
 
         # Coworker discount — if this Telegram account is logged in via
         # /coworker, embed their admin-set rate so the Mini App can show
@@ -7947,6 +7964,7 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
         context, order_id, owner[1] if owner else update.effective_user.id,
         admin_note=f"It was paid with Telegram Stars (charge {charge_id}): refund or settle it with the customer.")
     if settled == "credits_short":
+        db_set_payment_method(order_id, "Telegram Stars")
         await update.message.reply_text(
             f"✅ We received your Stars payment for order #{order_id}. We're checking the order and will "
             "get back to you here shortly.")
@@ -9282,8 +9300,11 @@ async def _settle_order_payment(context, order_id: int, user_id: int, admin_note
                     text=(f"⚠️ Order #{order_id} was NOT confirmed: {credits_applied} credit(s) "
                           f"({CURRENCY}{credits_applied * CREDIT_VALUE_USD}) were applied to it at checkout, but the "
                           f"customer (ID {user_id}) now has only {balance}. Nothing was delivered and the order "
-                          "stays unconfirmed. Ask them to pay the difference, then confirm it again."
-                          + (f"\n{admin_note}" if admin_note else "")))
+                          "stays unconfirmed. Once they have paid the difference, tap the button below: it confirms "
+                          "the order without those credits (Confirm alone keeps being refused)."
+                          + (f"\n{admin_note}" if admin_note else "")),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                        "✅ Confirm without the credits", callback_data=f"confirm_nocredits:{order_id}")]]))
             except Exception:
                 logger.exception("Couldn't tell the admin that order #%s's credits are short", order_id)
         return "credits_short"
@@ -9298,6 +9319,39 @@ async def _settle_order_payment(context, order_id: int, user_id: int, admin_note
         conn.commit()
         conn.close()
     return "ok"
+
+
+async def confirm_without_credits(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """✅ Confirm without the credits, under the "NOT confirmed: credits short" message (review, 26 Nov 2026): the
+    credits reserved on the order are no longer in the customer's balance, so Confirm can never go through. The admin
+    settled the difference with the customer: the reservation is dropped, its value goes back on the order's total,
+    and the order is confirmed like any other. Nothing is deducted."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    order_id = int(query.data.split(":", 1)[1])
+    order = db_get_order(order_id)
+    if not order:
+        await _safe_edit_confirmation(query, "Order not found.")
+        return
+    if db_order_payment_confirmed(order_id):
+        await _safe_edit_confirmation(query, f"✅ Order #{order_id} was already confirmed as paid. Nothing was done twice.")
+        return
+    if order[5] == "cancelled":
+        await _safe_edit_confirmation(query, f"Order #{order_id} is cancelled, so it wasn't confirmed.")
+        return
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE orders SET total = ROUND(total + COALESCE(credits_applied, 0) * ?, 2), credits_applied = 0 "
+        "WHERE id = ? AND COALESCE(credits_applied, 0) > 0", (CREDIT_VALUE_USD, order_id))
+    conn.commit()
+    conn.close()
+    await _safe_edit_confirmation(query, f"✅ Order #{order_id} confirmed as paid, without the credits.")
+    if not await finalize_order_confirmation(context, order_id, order[1], order[3]) \
+            and not db_order_payment_confirmed(order_id):
+        await _safe_edit_confirmation(query, f"⚠️ Order #{order_id} was NOT confirmed.")
 
 
 async def finalize_order_confirmation(context: ContextTypes.DEFAULT_TYPE, order_id: int,
@@ -14383,6 +14437,8 @@ async def http_admin_deliver(request):
     except UnitAlreadyDelivered:
         # Delivered from the chat (or a second tap here) while this request was on its way.
         return web.json_response({"ok": False, "error": "Already delivered."}, status=409, headers=headers)
+    except OrderRejected as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=409, headers=headers)
     except Exception:
         logger.exception("Admin Shop delivery of unit %s failed", fid)
         return web.json_response({"ok": False, "error": "Could not send it to the customer (they may have blocked the bot). Nothing was marked delivered."},
@@ -22340,9 +22396,15 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
         now_status = order[5] if order else None
         if now_status in ORDER_CLOSED_STATUSES:
             logger.warning("iMD success for order #%s, but the order is %s now: not delivered", order_id, now_status)
+            if data.get("fulfilment_id"):
+                # never back in the queue as "needs its iMD run": confirming the order again must not use a second
+                # serial for an account that already exists (review, 26 Nov 2026)
+                db_set_fulfilment_state(data["fulfilment_id"], "awaiting_delivery")
             await _safe_admin_send(
                 context, f"⚠️ {action_label} confirmed on iMD for order #{order_id}, but the order is {now_status} now, "
-                         f"so nothing was delivered. Serial used: {serial_code}\n\n{detail}")
+                         f"so nothing was delivered. Serial used: {serial_code}\n\n{detail}\n\n"
+                         "The account exists on iMD already: don't run iMD for it again. If you confirm the order "
+                         f"after all, deliver it by hand (📤 Send Credentials) with this:\n\n{delivery_message}")
             return
 
         db_save_delivery(order_id, delivery_message)
@@ -22919,6 +22981,9 @@ async def credentials_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Edit what was sent", callback_data=f"editdeliv:{last}")]])
             if last else None,
         )
+        return
+    except OrderRejected as exc:
+        await update.message.reply_text(f"⚠️ {exc} Your text was NOT sent to the customer.")
         return
     if not delivered:
         await update.message.reply_text("That item no longer exists.")
@@ -23925,10 +23990,13 @@ class _FauxMessage:
         return await self._bot.send_invoice(chat_id=self._chat_id, **kwargs)
 
 
-# What a Mini App checkout may store per unit (audit, 26 Nov 2026): at most MINI_APP_MAX_UNITS units (the Mini App's
-# MAX_QTY), and only the account-detail fields its forms have (index.html newFlds/renewFlds/imdNewFlds/imdRenewFlds),
+# What a Mini App checkout may store per unit (audit, 26 Nov 2026): at most MINI_APP_MAX_UNITS of one subscription
+# (the Mini App's MAX_QTY, which is per subscription) and MINI_APP_MAX_ORDER_UNITS units in the whole order (a cart
+# the Mini App itself allows, e.g. a coworker's 20 plans with their add-ons, must not be refused; review, 26 Nov
+# 2026), and only the account-detail fields its forms have (index.html newFlds/renewFlds/imdNewFlds/imdRenewFlds),
 # each at most MINI_APP_FIELD_MAX characters.
 MINI_APP_MAX_UNITS = 20
+MINI_APP_MAX_ORDER_UNITS = 60
 MINI_APP_FIELD_MAX = 200
 MINI_APP_DETAIL_FIELDS = (
     REGISTER_FIELDS[("generic", "new")] + REGISTER_FIELDS[("generic", "renew")]
@@ -24029,9 +24097,13 @@ async def _process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, 
         return {"ok": False, "error": "Your cart was empty."}
     if not isinstance(items_raw, list) or not all(isinstance(e, dict) for e in items_raw):
         return {"ok": False, "error": "Invalid order — please reopen the shop and try again."}
-    if len(items_raw) > MINI_APP_MAX_UNITS:
-        text = (f"An order can have at most {MINI_APP_MAX_UNITS} subscriptions. "
-                "Please split it into smaller orders.")
+    per_item = {}
+    for e in items_raw:
+        key = e.get("id") if isinstance(e.get("id"), str) else ""
+        per_item[key] = per_item.get(key, 0) + 1
+    if len(items_raw) > MINI_APP_MAX_ORDER_UNITS or max(per_item.values()) > MINI_APP_MAX_UNITS:
+        text = (f"An order can have at most {MINI_APP_MAX_UNITS} of one subscription and "
+                f"{MINI_APP_MAX_ORDER_UNITS} subscriptions in total. Please split it into smaller orders.")
         await message.reply_text(text)
         return {"ok": False, "error": text}
     items_raw = [_clean_mini_app_entry(e) for e in items_raw]
@@ -25062,6 +25134,8 @@ async def http_deliver_unit(request):
                                                          if kind == "renew" and body.get("sheet_below") else ""))
     except UnitAlreadyDelivered:
         return web.json_response({"ok": True, "status": "already_delivered"})
+    except OrderRejected:
+        return web.json_response({"error": "this order was rejected; nothing was delivered"}, status=409)
     except Exception as exc:
         logger.warning("@Utdreg_bot delivery of order #%s unit %s failed: %s", order_id, fid, exc.__class__.__name__)
         return web.json_response({"ok": False, "error": "couldn't send it to the customer (they may have blocked the bot); "
@@ -25856,6 +25930,7 @@ def main():
     app.add_handler(CallbackQueryHandler(announcement_detail, pattern=r"^annview:"))
     app.add_handler(CallbackQueryHandler(announcement_back, pattern=r"^ann_back$"))
     app.add_handler(CallbackQueryHandler(broadcast_confirm, pattern=r"^bcast_(send|cancel):"))
+    app.add_handler(CallbackQueryHandler(confirm_without_credits, pattern=r"^confirm_nocredits:"))
     app.add_handler(CallbackQueryHandler(admin_pending_back, pattern=r"^apend_back$"))
     app.add_handler(CallbackQueryHandler(ask_resend_start, pattern=r"^askresend:"))
     app.add_handler(CallbackQueryHandler(ask_resend_skip, pattern=r"^askresend_skip:"))
