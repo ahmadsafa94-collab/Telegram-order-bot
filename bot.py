@@ -41,6 +41,7 @@ import base64
 import math
 import re
 import sys
+import secrets
 import time
 import types
 import unicodedata
@@ -51,7 +52,7 @@ from sales_excel import build_sales_workbook
 import auto_sites
 import renewals
 
-from telegram.error import BadRequest, NetworkError, TimedOut
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -1229,6 +1230,13 @@ def db_init():
         ("source", "TEXT"), ("admin_label", "TEXT"), ("admin_coworker", "TEXT"),
         # 📝 the admin's own note on an order (24 Nov 2026): shown to the admin only, never to a customer
         ("admin_note", "TEXT"),
+        # What its payment actually took, so flagging a paid order as rejected gives it back exactly (owner, 26 Nov
+        # 2026): credits deducted, whether its discount code's use was consumed, the referrer credited for it.
+        ("credits_used", "INTEGER DEFAULT 0"), ("discount_consumed", "INTEGER DEFAULT 0"),
+        ("referral_credited_to", "INTEGER"),
+        # the ends_utc of the promo whose prices the order was made with (owner, 26 Nov 2026): unpaid at its end, it
+        # is cancelled (promo_end_job)
+        ("promo_ends", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE orders ADD COLUMN {column} {coltype}")
@@ -1670,6 +1678,13 @@ def db_init():
         "INSERT OR IGNORE INTO item_costs (item_id, cost, updated_at) VALUES (?, ?, ?)",
         [(item_id, cost, now) for item_id, cost in {**PANEL_COSTS, **DEFAULT_ITEM_COSTS}.items()],
     )
+    # The receipt files sent for each order (Telegram's file_unique_id, or the file's sha256 for a receipt sent
+    # through the support chat): the same image on a second order goes to the admin, never auto-confirmed (audit,
+    # 26 Nov 2026).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS receipt_files (file_key TEXT NOT NULL, order_id INTEGER NOT NULL, "
+        "created_at TEXT NOT NULL, PRIMARY KEY (file_key, order_id))"
+    )
 
     conn.commit()
     conn.close()
@@ -1992,6 +2007,18 @@ def sheet_import_message(item_id: str, cells, start) -> str:
 # subscriptions creates two independent rows, each collecting its own
 # details and delivered separately.
 
+def _customer_user_data(application, user_id) -> dict:
+    """application.user_data[user_id] for a user other than the one whose update is being handled, marked for the
+    persistence so what is written into it is saved too (audit, 26 Nov 2026)."""
+    data = application.user_data[user_id]
+    if getattr(application, "persistence", None) is not None:
+        try:
+            application.mark_data_for_update_persistence(user_ids=user_id)
+        except Exception:
+            logger.exception("Couldn't mark user %s's data for saving", user_id)
+    return data
+
+
 def queue_receipt_request(context: ContextTypes.DEFAULT_TYPE, order_id: int):
     """Registers that we're now expecting a receipt photo for order_id and
     makes it the IMMEDIATE target — i.e. the very next photo the customer
@@ -2218,6 +2245,10 @@ def db_next_needs_info(order_id: int):
 
 class UnitAlreadyDelivered(Exception):
     """The unit was delivered (by another tap, the Mini App or the automation) before this delivery ran."""
+
+
+class OrderRejected(Exception):
+    """The unit's order was flagged as rejected: nothing of it is delivered until the admin confirms it again."""
 
 
 _UNIT_LOCKS: dict = {}
@@ -4056,9 +4087,10 @@ def db_finalize_serial(serial_id: int, order_id: int, success: bool, mark_not_wo
 def db_create_order(user_id: int, username: str, items: dict, total: float) -> int:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute(
-        "INSERT INTO orders (user_id, username, items_json, total, status, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, username, json.dumps(items), total, "awaiting_payment", datetime.utcnow().isoformat()),
+        "INSERT INTO orders (user_id, username, items_json, total, status, created_at, promo_ends) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (user_id, username, json.dumps(items), total, "awaiting_payment", datetime.utcnow().isoformat(),
+         _promo_mark(items)),
     )
     conn.commit()
     order_id = cur.lastrowid
@@ -4143,31 +4175,62 @@ def db_set_payment_method(order_id: int, method: str):
     conn.close()
 
 
-def db_apply_credits_to_order(order_id: int, new_total: float, credits_applied: int):
+def db_apply_credits_to_order(order_id: int, new_total: float, credits_applied: int) -> bool:
     """Reduces (or zeroes) an order's total to reflect credits being used
     — the credits themselves aren't deducted from the balance yet, only
     reserved; finalize_order_confirmation deducts them once the order is
-    actually confirmed paid, so an abandoned order never costs credits."""
+    actually confirmed paid, so an abandoned order never costs credits.
+    Only once per order (audit, 26 Nov 2026): False, and nothing changes, when credits are already applied."""
     conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "UPDATE orders SET total = ?, credits_applied = ? WHERE id = ?",
+    cur = conn.execute(
+        "UPDATE orders SET total = ?, credits_applied = ? WHERE id = ? AND COALESCE(credits_applied, 0) = 0",
         (new_total, credits_applied, order_id),
     )
     conn.commit()
     conn.close()
+    return cur.rowcount > 0
 
 
-def db_apply_discount_to_order(order_id: int, new_total: float, code: str):
+def db_apply_discount_to_order(order_id: int, new_total: float, code: str) -> bool:
     """Reduces an order's total for a discount code — the code's use
     isn't consumed yet, only recorded; finalize_order_confirmation
-    consumes it once the order is actually confirmed paid."""
+    consumes it once the order is actually confirmed paid.
+    Only one code per order (audit, 26 Nov 2026): False, and nothing changes, when it already has one."""
     conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "UPDATE orders SET total = ?, discount_code = ? WHERE id = ?",
+    cur = conn.execute(
+        "UPDATE orders SET total = ?, discount_code = ? WHERE id = ? AND COALESCE(discount_code, '') = ''",
         (new_total, code.strip().upper(), order_id),
     )
     conn.commit()
     conn.close()
+    return cur.rowcount > 0
+
+
+def db_order_reductions(order_id: int):
+    """(credits_applied, discount_code) reserved on an order (0 / None when there are none)."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT credits_applied, discount_code FROM orders WHERE id = ?", (order_id,)).fetchone()
+    conn.close()
+    return ((row[0] or 0), (row[1] or None)) if row else (0, None)
+
+
+def db_credits_reserved_elsewhere(user_id: int, exclude_order_id: int = None) -> int:
+    """Credits the customer already reserved on their other open, unpaid orders (audit, 26 Nov 2026): they are
+    deducted when that order is confirmed, so they can't be counted as available again for another order."""
+    conn = sqlite3.connect(DB_PATH)
+    placeholders = ",".join("?" for _ in ORDER_OPEN_STATUSES)
+    row = conn.execute(
+        f"SELECT COALESCE(SUM(credits_applied), 0) FROM orders WHERE user_id = ? AND id != ? "
+        f"AND status IN ({placeholders}) AND COALESCE(credits_applied, 0) > 0",
+        (user_id, exclude_order_id or -1, *ORDER_OPEN_STATUSES),
+    ).fetchone()
+    conn.close()
+    return int(row[0] or 0)
+
+
+def db_available_credits(user_id: int, exclude_order_id: int = None) -> int:
+    """Balance minus the credits reserved on the customer's other open orders (never below 0)."""
+    return max(0, db_get_credits(user_id) - db_credits_reserved_elsewhere(user_id, exclude_order_id))
 
 
 def db_set_payer_name(order_id: int, name: str):
@@ -4193,6 +4256,26 @@ def db_set_receipt_references(order_id: int, references: list):
                  (json.dumps(references), order_id))
     conn.commit()
     conn.close()
+
+
+def db_record_receipt_files(order_id: int, items: list):
+    """Stores the receipt files' keys for this order; returns another order that already had one of them
+    (the lowest id), or None."""
+    keys = [k for item in items for k in (item.get("keys") or []) if k]
+    if not keys:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    placeholders = ",".join("?" for _ in keys)
+    row = conn.execute(
+        f"SELECT MIN(order_id) FROM receipt_files WHERE file_key IN ({placeholders}) AND order_id != ?",
+        (*keys, order_id),
+    ).fetchone()
+    now = datetime.utcnow().isoformat()
+    conn.executemany("INSERT OR IGNORE INTO receipt_files (file_key, order_id, created_at) VALUES (?, ?, ?)",
+                     [(k, order_id, now) for k in keys])
+    conn.commit()
+    conn.close()
+    return row[0] if row else None
 
 
 def db_reference_already_used(reference: str, exclude_order_id: int) -> bool:
@@ -4236,13 +4319,54 @@ def db_get_payment_record(order_id: int):
 
 
 def db_save_delivery(order_id: int, credentials_text: str):
+    """Saves what was delivered and marks the order delivered — except a rejected or cancelled order, which keeps
+    its status (owner, 26 Nov 2026: a delivery must never turn a reversed order back into a delivered one)."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
-        "UPDATE orders SET status = ?, credentials = ?, delivered_at = ? WHERE id = ?",
-        ("delivered", credentials_text, datetime.utcnow().isoformat(), order_id),
+        "UPDATE orders SET credentials = ?, "
+        "delivered_at = CASE WHEN status IN ('rejected', 'cancelled') THEN delivered_at ELSE ? END, "
+        "status = CASE WHEN status IN ('rejected', 'cancelled') THEN status ELSE 'delivered' END WHERE id = ?",
+        (credentials_text, datetime.utcnow().isoformat(), order_id),
     )
     conn.commit()
     conn.close()
+
+
+def db_note_credits_used(order_id: int, delta: int):
+    """Adds (or, giving them back, subtracts) credits actually deducted for this order's payment."""
+    if not delta:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE orders SET credits_used = MAX(0, COALESCE(credits_used, 0) + ?) WHERE id = ?", (delta, order_id))
+    conn.commit()
+    conn.close()
+
+
+def db_reverse_order_payment(order_id: int):
+    """A paid order flagged as rejected (owner, 26 Nov 2026): takes back, once, what its payment did. Returns
+    (user_id, credits given back, discount code whose use was restored or None, referrer whose credit was taken back
+    or None, whether that referrer still had the credit). The credits go back on the order as reserved
+    (credits_applied), so confirming it again later charges them again."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT user_id, COALESCE(credits_used, 0), discount_code, COALESCE(discount_consumed, 0), "
+                       "referral_credited_to FROM orders WHERE id = ?", (order_id,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    user_id, used, code, consumed, referrer = row
+    conn.execute("UPDATE orders SET credits_used = 0, credits_applied = ?, discount_consumed = 0, "
+                 "referral_credited_to = NULL WHERE id = ?", (used or None, order_id))
+    if used:
+        conn.execute("UPDATE users SET credits = credits + ? WHERE user_id = ?", (used, user_id))
+    if consumed and code:
+        conn.execute("UPDATE discount_codes SET uses_remaining = uses_remaining + 1 WHERE code = ?", (code,))
+    took_back = False
+    if referrer:
+        took_back = conn.execute("UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1",
+                                 (referrer,)).rowcount > 0
+    conn.commit()
+    conn.close()
+    return user_id, used, (code if consumed else None), referrer, took_back
 
 
 def db_update_order_credentials(order_id: int, credentials_text: str):
@@ -4590,6 +4714,75 @@ def _coworker_unit_price(item_id: str, user_id: int) -> float:
     if not coworker_login:
         return customer_price(item_id)   # a running promo (PROMO) is for customers only
     return _coworker_unit_price_by_id(item_id, coworker_login[0])
+
+
+def _promo_mark(items) -> str:
+    """The running promo's ends_utc when these items include one it prices lower, else None (stored on the order)."""
+    promo = active_promo()
+    if not promo or not isinstance(items, dict):
+        return None
+    for item_id in items:
+        if item_id in promo.get("prices", {}) and item_id in MENU and customer_price(item_id) < MENU[item_id][1]:
+            return promo["ends_utc"]
+    return None
+
+
+PROMO_LAPSE_STATUSES = ("awaiting_payment", "awaiting_receipt")   # no receipt sent yet
+PROMO_ENDED_PAY_TEXT = ("The offer for Order #{order_id} has ended, so it can't be paid any more. Please order "
+                        "again at the regular price.")
+
+
+def db_promo_lapsed_orders() -> list:
+    """Customer orders made with promo prices whose promo has ended, still without a receipt: (id, user_id).
+    Coworker orders and orders by the admin are never promo-priced, so never in it."""
+    if not PROMO:
+        return []   # SHOP_PROMO_OFF
+    now = _promo_now()
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, user_id, promo_ends FROM orders WHERE promo_ends IS NOT NULL AND status IN (?, ?) "
+        "AND coworker_id IS NULL AND COALESCE(source, '') != 'admin' AND user_id != ?",
+        (*PROMO_LAPSE_STATUSES, ADMIN_ORDER_USER_ID),
+    ).fetchall()
+    conn.close()
+    out = []
+    for order_id, user_id, ends in rows:
+        try:
+            if now >= datetime.strptime(ends, "%Y-%m-%dT%H:%M:%SZ"):
+                out.append((order_id, user_id))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def promo_order_lapsed(order_id: int) -> bool:
+    """True for an unpaid promo-priced order whose promo has ended: no receipt or Stars payment is taken for it."""
+    return any(o == order_id for o, _ in db_promo_lapsed_orders())
+
+
+PROMO_LAPSED_TEXT = ("The offer for Order #{order_id} has ended, so this unpaid order was cancelled. You can order "
+                     "again at the regular price.")
+
+
+async def promo_end_job(context: ContextTypes.DEFAULT_TYPE):
+    """Every few minutes (and soon after a start): once the promo has ended, its unpaid orders without a receipt are
+    cancelled and each customer is told (owner, 26 Nov 2026). Orders with a receipt already sent are left for the
+    admin. Idempotent: a cancelled order is no longer picked."""
+    cancelled = []
+    for order_id, user_id in db_promo_lapsed_orders():
+        if not db_update_status(order_id, "cancelled"):
+            continue
+        cancelled.append(order_id)
+        logger.info("Promo ended: unpaid order #%s of %s cancelled", order_id, user_id)
+        try:
+            await context.bot.send_message(chat_id=user_id, text=PROMO_LAPSED_TEXT.format(order_id=order_id))
+        except Exception:
+            logger.warning("Promo end: couldn't tell %s that order #%s was cancelled", user_id, order_id)
+    if cancelled:
+        await _safe_admin_send(
+            context, f"🏷 Promo ended: {len(cancelled)} unpaid promo order(s) cancelled "
+                     f"(#{', #'.join(str(o) for o in cancelled)}). Orders with a receipt already sent are left for you.")
+    return cancelled
 
 
 def promo_refused_items(item_ids, user_id: int) -> list:
@@ -5616,10 +5809,20 @@ async def announcement_detail(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await context.bot.copy_messages(chat_id=query.message.chat_id, from_chat_id=int(fmt["src_chat_id"]),
                                                 message_ids=ids)
                 await context.bot.send_message(chat_id=query.message.chat_id, text="📢", reply_markup=back)
+            await _delete_query_message(query)   # the copy replaces the list (audit, 26 Nov 2026)
             return
         except Exception as e:
             logger.warning("announcement %s: copy failed (%s), showing the text", announcement_id, e)
     head = f"📢 {created_at[:10]}\n\n"
+    if _query_message_is_media(query):
+        # A picture/video can't be edited into text: a new message instead (audit, 26 Nov 2026).
+        await _delete_query_message(query)
+        try:
+            await context.bot.send_message(chat_id=query.message.chat_id, text=head + body,
+                                           entities=shifted_entities(fmt.get("entities"), head) or None, reply_markup=back)
+        except BadRequest:
+            await context.bot.send_message(chat_id=query.message.chat_id, text=head + body, reply_markup=back)
+        return
     try:
         await query.edit_message_text(head + body, entities=shifted_entities(fmt.get("entities"), head) or None,
                                       reply_markup=back)
@@ -5631,10 +5834,31 @@ async def announcement_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     keyboard = announcements_keyboard()
-    if not keyboard:
-        await query.edit_message_text("No announcements yet.")
+    text = "📢 Announcements — tap one to read it:" if keyboard else "No announcements yet."
+    if _query_message_is_media(query):
+        # Back under a copied picture/video announcement: it can't be edited into the list, so it is deleted and the
+        # list sent as a new message (audit, 26 Nov 2026).
+        await _delete_query_message(query)
+        await context.bot.send_message(chat_id=query.message.chat_id, text=text, reply_markup=keyboard)
         return
-    await query.edit_message_text("📢 Announcements — tap one to read it:", reply_markup=keyboard)
+    await query.edit_message_text(text, reply_markup=keyboard)
+
+
+def _query_message_is_media(query) -> bool:
+    """True when the button's message is a picture, video, file… (Telegram can't edit it into a text message)."""
+    msg = getattr(query, "message", None)
+    if msg is None:
+        return False
+    if getattr(msg, "text", None):
+        return False
+    return bool(getattr(msg, "caption", None) or _broadcast_media_kind(msg))
+
+
+async def _delete_query_message(query):
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
 
 
 GET_FREE_ACCOUNTS_INTRO = (
@@ -6173,9 +6397,12 @@ async def uptodate_renewal_pick(update: Update, context: ContextTypes.DEFAULT_TY
     delivery_id = int(query.data.split(":", 1)[1])
 
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("SELECT item_id FROM deliveries WHERE id = ?", (delivery_id,)).fetchone()
+    row = conn.execute("SELECT item_id, user_id FROM deliveries WHERE id = ?", (delivery_id,)).fetchone()
     conn.close()
-    item_id = row[0] if row else None
+    if not row or row[1] != query.from_user.id:   # only the customer's own subscription (audit, 26 Nov 2026)
+        await query.edit_message_text("That subscription belongs to another account.")
+        return
+    item_id = row[0]
 
     await _start_uptodate_renewal_ticket(context, query, delivery_id, item_id)
 
@@ -6339,6 +6566,10 @@ async def ticket_resolved_check(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     _, ticket_id_str, answer = query.data.split(":", 2)
     ticket_id = int(ticket_id_str)
+    ticket = db_get_ticket(ticket_id)
+    if not ticket or ticket[1] != query.from_user.id:   # only the ticket's own customer (audit, 26 Nov 2026)
+        await query.edit_message_text("That ticket belongs to another account.")
+        return
     context.user_data.pop("ticket_awaiting_resolved_check", None)
 
     if answer == "yes":
@@ -6546,7 +6777,7 @@ async def restore_collection_state(context: ContextTypes.DEFAULT_TYPE, user_data
 
 
 async def start_ticket_message_collection(context: ContextTypes.DEFAULT_TYPE, user_id: int, ticket_id: int, chat_id: int):
-    customer_data = context.application.user_data[user_id]
+    customer_data = _customer_user_data(context.application, user_id)
     stash_collection_state(customer_data)
     customer_data["awaiting_ticket_field"] = "message"
     customer_data["ticket_id"] = ticket_id
@@ -6976,6 +7207,8 @@ async def local_pay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     order_id = int(query.data.split(":", 1)[1])
+    if not await _order_tap_allowed(query, db_get_order(order_id), order_id):   # owner, still unpaid (audit, 26 Nov 2026)
+        return
 
     rows = []
     for i in range(0, len(LOCAL_PAYMENT_COUNTRIES), 2):
@@ -7099,6 +7332,8 @@ async def local_country_selected(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     _, order_id_str, country = query.data.split(":", 2)
     order_id = int(order_id_str)
+    if not await _order_tap_allowed(query, db_get_order(order_id), order_id):   # owner, still unpaid (audit, 26 Nov 2026)
+        return
 
     context.user_data["selected_country"] = country
     db_set_payment_method(order_id, country)
@@ -7122,6 +7357,8 @@ async def usa_app_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     _, order_id_str, app = query.data.split(":", 2)
     order_id = int(order_id_str)
+    if not await _order_tap_allowed(query, db_get_order(order_id), order_id):   # owner, still unpaid (audit, 26 Nov 2026)
+        return
 
     context.user_data["selected_country"] = "USA"
     db_set_payment_method(order_id, app)
@@ -7149,6 +7386,8 @@ async def pay_card_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     order_id = int(query.data.split(":", 1)[1])
+    if not await _order_tap_allowed(query, db_get_order(order_id), order_id):   # owner, still unpaid (audit, 26 Nov 2026)
+        return
 
     order = db_get_order(order_id)
     total = order[4] if order else 0
@@ -7189,6 +7428,8 @@ async def pay_paypal_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     order_id = int(query.data.split(":", 1)[1])
+    if not await _order_tap_allowed(query, db_get_order(order_id), order_id):   # owner, still unpaid (audit, 26 Nov 2026)
+        return
 
     order = db_get_order(order_id)
     total = order[4] if order else 0
@@ -7255,7 +7496,10 @@ async def pay_credits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, order_user_id, username, items_json, total, status, created_at = order
 
     required_credits = math.ceil(total / CREDIT_VALUE_USD)
-    balance = db_get_credits(user_id)
+    # Credits already reserved on this order (credits_partial) are deducted too, and credits reserved on the
+    # customer's other open orders aren't available (audit, 26 Nov 2026).
+    reserved_here, _ = db_order_reductions(order_id)
+    balance = db_available_credits(user_id, order_id) - reserved_here
 
     if balance < required_credits:
         await query.edit_message_text(
@@ -7267,7 +7511,7 @@ async def pay_credits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    deducted = db_deduct_credits(user_id, required_credits)
+    deducted = db_deduct_credits(user_id, required_credits + reserved_here)
     if not deducted:
         # Balance changed between the check above and now (e.g. another
         # order paid with credits in the same moment) — fail safe rather
@@ -7281,19 +7525,27 @@ async def pay_credits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    db_update_status(order_id, "paid")
+    # Deducted directly above, so the confirmation must not deduct the reserved ones again; it does the rest of the
+    # bookkeeping (discount code use) and the fulfilment, like every other way of paying (audit, 26 Nov 2026).
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE orders SET credits_applied = 0 WHERE id = ?", (order_id,))
+    conn.commit()
+    conn.close()
+    db_note_credits_used(order_id, required_credits + reserved_here)
     db_set_payment_method(order_id, "Credits")
 
     remaining = db_get_credits(user_id)
-    await query.edit_message_text(
-        f"✅ Paid with {required_credits} credits! We're preparing your order now.\n"
-        f"Remaining credits: {remaining} ({CURRENCY}{remaining * CREDIT_VALUE_USD})"
-    )
+    try:
+        await query.edit_message_text(
+            f"✅ Paid with {required_credits + reserved_here} credits! We're preparing your order now.\n"
+            f"Remaining credits: {remaining} ({CURRENCY}{remaining * CREDIT_VALUE_USD})"
+        )
+    except Exception:
+        logger.exception("pay_credits_start: couldn't edit the message for order #%s", order_id)
 
-    items = json.loads(items_json)
-    await start_order_fulfilment(context, order_id, order_user_id, items)
-    await award_referral_credit(context, order_user_id)
-    await post_receipt_to_payments_channel(context, order_id)
+    if await finalize_order_confirmation(context, order_id, order_user_id, items_json) is False:
+        db_add_credits(user_id, required_credits + reserved_here)   # it was paid another way at the same moment
+        db_note_credits_used(order_id, -(required_credits + reserved_here))
 
 
 async def goto_getfree(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7318,6 +7570,8 @@ async def pay_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     order_id = int(query.data.split(":", 1)[1])
+    if not await _order_tap_allowed(query, db_get_order(order_id), order_id):   # owner, still unpaid (audit, 26 Nov 2026)
+        return
     db_set_payment_method(order_id, "Cryptocurrency")
 
     buttons = [
@@ -7341,8 +7595,20 @@ async def credits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     total = order[4]
     user_id = query.from_user.id
-    balance = db_get_credits(user_id)
+    if db_order_reductions(order_id)[0]:
+        await query.edit_message_text(
+            "Credits are already applied to this order.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"back_to_checkout:{order_id}")]]),
+        )
+        return
+    balance = db_available_credits(user_id, order_id)   # not the ones reserved on their other open orders
 
+    if balance <= 0 and db_get_credits(user_id) > 0:
+        await query.edit_message_text(
+            "Your credits are already applied to another unpaid order. Pay or cancel that order to use them here.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"precheck_back:{order_id}")]]),
+        )
+        return
     if balance <= 0:
         await query.edit_message_text(
             "You don't have any credits yet.",
@@ -7410,12 +7676,20 @@ async def credits_full(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     _, user_id, username, items_json, total, status, created_at = order
     credits_needed = math.ceil(total / CREDIT_VALUE_USD)
+    if db_order_reductions(order_id)[0]:
+        await query.edit_message_text("Credits are already applied to this order.")
+        return
 
-    if not db_deduct_credits(user_id, credits_needed):
+    # Credits reserved on the customer's other open orders aren't available here (audit, 26 Nov 2026).
+    if db_available_credits(user_id, order_id) < credits_needed or not db_deduct_credits(user_id, credits_needed):
         await query.edit_message_text("Your credit balance changed — please try again.")
         return
 
-    db_apply_credits_to_order(order_id, 0, credits_needed)
+    if not db_apply_credits_to_order(order_id, 0, credits_needed):
+        db_add_credits(user_id, credits_needed)
+        await query.edit_message_text("Credits are already applied to this order.")
+        return
+    db_note_credits_used(order_id, credits_needed)
     db_set_payment_method(order_id, "Credits (Full)")
     # Credits were already deducted above — finalize_order_confirmation
     # would otherwise deduct credits_applied again, so clear it first.
@@ -7424,8 +7698,13 @@ async def credits_full(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await query.edit_message_text(f"✅ Order #{order_id} paid in full using {credits_needed} credit(s)!")
-    await finalize_order_confirmation(context, order_id, user_id, items_json)
+    try:   # cosmetic: must never stop the fulfilment below (audit, 26 Nov 2026)
+        await query.edit_message_text(f"✅ Order #{order_id} paid in full using {credits_needed} credit(s)!")
+    except Exception:
+        logger.exception("credits_full: couldn't edit the message for order #%s", order_id)
+    if await finalize_order_confirmation(context, order_id, user_id, items_json) is False:
+        db_add_credits(user_id, credits_needed)   # it was paid another way at the same moment
+        db_note_credits_used(order_id, -credits_needed)
 
 
 async def credits_partial(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7439,11 +7718,22 @@ async def credits_partial(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     total = order[4]
     user_id = query.from_user.id
-    balance = db_get_credits(user_id)
+    # Once per order, and only credits not already reserved on the customer's other open orders (audit, 26 Nov 2026).
+    balance = db_available_credits(user_id, order_id)
+    if db_order_reductions(order_id)[0] or balance <= 0:
+        await query.edit_message_text(
+            "Credits are already applied to this order." if db_order_reductions(order_id)[0]
+            else "Your credits are already applied to another unpaid order.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"back_to_checkout:{order_id}")]]),
+        )
+        return
+    balance = min(balance, math.ceil(total / CREDIT_VALUE_USD))   # never reserve more than the order needs
     credit_value = balance * CREDIT_VALUE_USD
     new_total = round(max(0, total - credit_value), 2)
 
-    db_apply_credits_to_order(order_id, new_total, balance)
+    if not db_apply_credits_to_order(order_id, new_total, balance):
+        await query.edit_message_text("Credits are already applied to this order.")
+        return
 
     text, keyboard = checkout_view(order_id)
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
@@ -7457,6 +7747,15 @@ async def discount_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await query.answer()
     order_id = int(query.data.split(":", 1)[1])
+    order = db_get_order(order_id)
+    if not await _order_tap_allowed(query, order, order_id):   # owner, still unpaid (audit, 26 Nov 2026)
+        return
+    if db_order_reductions(order_id)[1]:
+        await query.edit_message_text(
+            "A discount code is already applied to this order.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"back_to_checkout:{order_id}")]]),
+        )
+        return
     context.user_data["awaiting_discount_code_for_order"] = order_id
     await query.edit_message_text(
         "Type your discount code:",
@@ -7478,6 +7777,16 @@ async def discount_code_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
     order = db_get_order(order_id)
     if not order:
         await update.message.reply_text("Order not found — please start over.")
+        return
+    # Only the customer's own unpaid order, and one code per order (audit, 26 Nov 2026).
+    if order[1] != update.effective_user.id:
+        await update.message.reply_text("This order belongs to another account.")
+        return
+    if order[5] not in PAYABLE_ORDER_STATUSES:
+        await update.message.reply_text(f"Order #{order_id} can't take a discount code any more.")
+        return
+    if db_order_reductions(order_id)[1]:
+        await update.message.reply_text("A discount code is already applied to this order.")
         return
     total = order[4]
     # A code limited to some subscriptions takes its % off only those (their share of this order's total).
@@ -7515,7 +7824,9 @@ async def discount_code_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         new_total = round(total * (1 - percentage / 100), 2)
         what = f"{percentage:.0f}% off"
-    db_apply_discount_to_order(order_id, new_total, code)
+    if not db_apply_discount_to_order(order_id, new_total, code):
+        await update.message.reply_text("A discount code is already applied to this order.")
+        return
     await update.message.reply_text(
         f"✅ Code applied — {what}! Total: {CURRENCY}{total:.2f} → {CURRENCY}{new_total:.2f}"
     )
@@ -7528,6 +7839,8 @@ async def precheck_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     order_id = int(query.data.split(":", 1)[1])
+    if not await _order_tap_allowed(query, db_get_order(order_id), order_id):   # owner, still unpaid (audit, 26 Nov 2026)
+        return
     text, keyboard = pre_payment_view(order_id)
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
@@ -7536,6 +7849,8 @@ async def back_to_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     order_id = int(query.data.split(":", 1)[1])
+    if not await _order_tap_allowed(query, db_get_order(order_id), order_id):   # owner, still unpaid (audit, 26 Nov 2026)
+        return
     text, keyboard = checkout_view(order_id)
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
@@ -7550,9 +7865,14 @@ async def pay_with_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not order:
         await context.bot.send_message(chat_id=query.message.chat_id, text="Order not found.")
         return
+    if not await _order_tap_allowed(query, order, order_id):   # owner, still unpaid (audit, 26 Nov 2026)
+        return
+    if promo_order_lapsed(order_id):
+        await query.edit_message_text(PROMO_ENDED_PAY_TEXT.format(order_id=order_id))
+        return
 
     total = order[4]  # id, user_id, username, items_json, total, status, created_at
-    star_amount = max(1, round(total * STAR_RATE))
+    star_amount = stars_amount_for(total)
 
     await context.bot.send_invoice(
         chat_id=query.message.chat_id,
@@ -7565,6 +7885,11 @@ async def pay_with_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def stars_amount_for(total: float) -> int:
+    """The Stars invoice amount for an order total (pay_with_stars, the Mini App and the pre-checkout check)."""
+    return max(1, round(total * STAR_RATE))
+
+
 async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Telegram calls this right before charging the user — final validation point."""
     pre_checkout_query = update.pre_checkout_query
@@ -7574,16 +7899,31 @@ async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await pre_checkout_query.answer(ok=False, error_message="Invalid order.")
         return
 
-    order_id = int(payload.split("_", 1)[1])
+    try:
+        order_id = int(payload.split("_", 1)[1])
+    except ValueError:
+        await pre_checkout_query.answer(ok=False, error_message="Invalid order.")
+        return
     order = db_get_order(order_id)
 
     if not order:
         await pre_checkout_query.answer(ok=False, error_message="Order not found — please start over.")
         return
     if db_order_payment_confirmed(order_id):
-        # An old invoice for an order that was already paid another way: don't charge again. (Every other
-        # status can still be paid by Stars, as before.)
+        # An old invoice for an order that was already paid another way: don't charge again.
         await pre_checkout_query.answer(ok=False, error_message=f"Order #{order_id} is already paid, so it can't be paid again.")
+        return
+    # Only the order's own customer, an order still waiting for payment, and exactly the order's current amount
+    # (an old invoice for an order whose total changed since must not pay it; audit, 26 Nov 2026).
+    from_user = getattr(pre_checkout_query, "from_user", None)
+    # (an order delivered before it was paid can still be paid; db_order_payment_confirmed refused the paid ones)
+    if (getattr(from_user, "id", None) != order[1] or order[5] in ORDER_CLOSED_STATUSES
+            or pre_checkout_query.total_amount != stars_amount_for(order[4])):
+        await pre_checkout_query.answer(
+            ok=False, error_message=f"This invoice is out of date. Please reopen Order #{order_id} and pay again.")
+        return
+    if promo_order_lapsed(order_id):
+        await pre_checkout_query.answer(ok=False, error_message=PROMO_ENDED_PAY_TEXT.format(order_id=order_id))
         return
 
     await pre_checkout_query.answer(ok=True)
@@ -7599,7 +7939,19 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     payload = update.message.successful_payment.invoice_payload
     order_id = int(payload.split("_", 1)[1])
 
-    if not db_update_status(order_id, "paid") and db_get_order(order_id):
+    # The same bookkeeping as every other confirmation (reserved credits deducted, discount code used; audit,
+    # 26 Nov 2026). The fulfilment below is this handler's own, so it isn't run twice.
+    owner = db_get_order(order_id)
+    charge_id = update.message.successful_payment.telegram_payment_charge_id
+    settled = await _settle_order_payment(
+        context, order_id, owner[1] if owner else update.effective_user.id,
+        admin_note=f"It was paid with Telegram Stars (charge {charge_id}): refund or settle it with the customer.")
+    if settled == "credits_short":
+        await update.message.reply_text(
+            f"✅ We received your Stars payment for order #{order_id}. We're checking the order and will "
+            "get back to you here shortly.")
+        return
+    if settled != "ok" and db_get_order(order_id):
         # Charged although the order was already paid (pre-checkout normally refuses this): nothing is delivered
         # twice; the admin refunds it.
         charge = update.message.successful_payment.telegram_payment_charge_id
@@ -7655,7 +8007,7 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
             logger.exception("Failed to notify admin of Stars payment for order #%s", order_id)
 
     await start_order_fulfilment(context, order_id, user_id, items)
-    await award_referral_credit(context, user_id)
+    await award_referral_credit(context, user_id, order_id)
     await post_receipt_to_payments_channel(context, order_id)
 
 
@@ -7738,27 +8090,137 @@ def _broadcast_media_kind(message) -> str:
     return ""
 
 
-async def _send_broadcast_copy(bot, admin_chat: int, message_ids: list, body: str, status_chat: int):
-    """Copy the admin's message(s) to every customer and save the announcement. Returns (sent, failed)."""
-    db_add_announcement(body, None, admin_chat, ",".join(str(m) for m in message_ids), "copy")
+# 📤 Confirm before sending (owner, 26 Nov 2026): the admin's announcement (text, media or album) is first shown to
+# the admin as customers will see it, with "📤 Send to N customers" / "❌ Cancel". Nothing goes out before Send, Send
+# works once, and a pending announcement expires after BROADCAST_CONFIRM_TIMEOUT. The preview of a text with Premium
+# emoji is also the probe: if Telegram dropped them for the bot, the admin's own message is copied instead.
+BROADCAST_CONFIRM_TIMEOUT = 30 * 60
+_pending_broadcasts: dict = {}   # token -> {"mode", "chat", "ids", "body", "entities", "at"}
+
+
+async def _broadcast_send_one(send):
+    """One customer's copy; Telegram's flood limit (RetryAfter) is waited out and retried once."""
+    try:
+        await send()
+    except RetryAfter as e:
+        wait = e.retry_after.total_seconds() if hasattr(e.retry_after, "total_seconds") else float(e.retry_after)
+        await asyncio.sleep(wait + 0.5)
+        await send()
+
+
+async def _run_broadcast(bot, b: dict):
+    """Sends a confirmed announcement to every customer, saves it, and reports to the admin. Runs as a background
+    task so the bot keeps answering while it goes out (audit, 26 Nov 2026)."""
+    head = "📢 Announcement:\n\n"
+    if b["mode"] == "copy":
+        db_add_announcement(b["body"], None, b["chat"], ",".join(str(m) for m in b["ids"]), "copy")
+    else:
+        db_add_announcement(b["body"], json.dumps([e.to_dict() for e in b["entities"]]) if b["entities"] else None,
+                            b["chat"], b["ids"][0], "text")
     sent, failed = 0, 0
     for user_id in db_all_user_ids(exclude=ADMIN_CHAT_ID):
+        if b["mode"] == "copy" and len(b["ids"]) == 1:
+            send = lambda u=user_id: bot.copy_message(chat_id=u, from_chat_id=b["chat"], message_id=b["ids"][0],
+                                                      reply_markup=main_menu_keyboard(u))
+        elif b["mode"] == "copy":
+            send = lambda u=user_id: bot.copy_messages(chat_id=u, from_chat_id=b["chat"], message_ids=b["ids"])
+        else:
+            # the text AND a refreshed keyboard in one message, so the 📢 badge appears at once
+            send = lambda u=user_id: bot.send_message(chat_id=u, text=head + b["body"],
+                                                      entities=shifted_entities(b["entities"], head) or None,
+                                                      reply_markup=main_menu_keyboard(u))
         try:
-            if len(message_ids) == 1:
-                await bot.copy_message(chat_id=user_id, from_chat_id=admin_chat, message_id=message_ids[0],
-                                       reply_markup=main_menu_keyboard(user_id))
-            else:
-                await bot.copy_messages(chat_id=user_id, from_chat_id=admin_chat, message_ids=message_ids)
+            await _broadcast_send_one(send)
             sent += 1
         except Exception:
             failed += 1
         await asyncio.sleep(0.05)  # gentle on Telegram's rate limits
-    await bot.send_message(
-        chat_id=status_chat,
-        text=f"✅ Broadcast sent.\nDelivered: {sent}\nFailed: {failed}\n\n"
-             "It's also saved under customers' 📢 Announcements tab.",
-    )
+    try:
+        await bot.send_message(
+            chat_id=b["chat"],
+            text=f"✅ Broadcast sent.\nDelivered: {sent}\nFailed: {failed}\n\n"
+                 "It's also saved under customers' 📢 Announcements tab.",
+        )
+    except Exception:
+        logger.exception("broadcast: couldn't send the report")
     return sent, failed
+
+
+async def _preview_broadcast(bot, b: dict):
+    """Shows the admin the announcement as customers will see it, then the Send / Cancel buttons."""
+    chat = b["chat"]
+    head = "📢 Announcement:\n\n"
+    if b["mode"] == "text":
+        try:
+            probe = await bot.send_message(chat_id=chat, text=head + b["body"],
+                                           entities=shifted_entities(b["entities"], head) or None)
+            if has_custom_emoji(b["entities"]) and not has_custom_emoji(probe.entities):
+                b["mode"] = "copy"   # Telegram dropped the Premium emoji for the bot: copy the admin's message
+                try:
+                    await bot.delete_message(chat_id=chat, message_id=probe.message_id)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning("broadcast: preview failed (%s); copying the admin's message", e)
+            b["mode"] = "copy"
+    if b["mode"] == "copy":
+        try:
+            if len(b["ids"]) == 1:
+                await bot.copy_message(chat_id=chat, from_chat_id=chat, message_id=b["ids"][0])
+            else:
+                await bot.copy_messages(chat_id=chat, from_chat_id=chat, message_ids=b["ids"])
+        except Exception as e:
+            logger.warning("broadcast: copy preview failed (%s)", e)
+    token = secrets.token_hex(6)
+    b["at"] = time.time()
+    _pending_broadcasts[token] = b
+    count = len(db_all_user_ids(exclude=ADMIN_CHAT_ID))
+    await bot.send_message(
+        chat_id=chat,
+        text=f"👆 This is how customers will see it. Nothing is sent until you tap Send "
+             f"(it expires in {BROADCAST_CONFIRM_TIMEOUT // 60} minutes).",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"📤 Send to {count} customers", callback_data=f"bcast_send:{token}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data=f"bcast_cancel:{token}")],
+        ]),
+    )
+    return token
+
+
+async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """📤 Send / ❌ Cancel under a broadcast preview. Once only: the pending announcement is taken off the list first,
+    so a double tap finds nothing to send."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+    await query.answer()
+    action, token = query.data.split(":", 1)
+    b = _pending_broadcasts.pop(token, None)
+    if not b:
+        await query.edit_message_text("This announcement was already sent or cancelled.")
+        return
+    if action == "bcast_cancel":
+        await query.edit_message_text("❌ Broadcast cancelled — nothing was sent.")
+        return
+    if time.time() - b["at"] > BROADCAST_CONFIRM_TIMEOUT:
+        await query.edit_message_text("⌛ This announcement expired — nothing was sent. Tap 📢 Broadcast to start again.")
+        return
+    count = len(db_all_user_ids(exclude=ADMIN_CHAT_ID))
+    await query.edit_message_text(f"📤 Sending to {count} customers…")
+    context.application.create_task(_run_broadcast(context.bot, b))
+
+
+def _broadcast_armed(user_data: dict) -> str:
+    """"ok" when the admin's 📢 Broadcast is waiting for the announcement, "stale" when it was armed more than
+    STEP_TIMEOUT_SECONDS (30 minutes) ago (it is then disarmed), "" when not armed."""
+    if user_data.get("awaiting_admin_input") != "broadcast":
+        return ""
+    if step_is_stale(user_data.get("broadcast_armed_at")):
+        user_data.pop("awaiting_admin_input", None)
+        user_data.pop("broadcast_armed_at", None)
+        return "stale"
+    return "ok"
 
 
 async def _broadcast_album_later(bot, group_id: str):
@@ -7767,7 +8229,8 @@ async def _broadcast_album_later(bot, group_id: str):
     if not album:
         return
     try:
-        await _send_broadcast_copy(bot, album["chat"], sorted(album["ids"]), album["body"], album["chat"])
+        await _preview_broadcast(bot, {"mode": "copy", "chat": album["chat"], "ids": sorted(album["ids"]),
+                                       "body": album["body"], "entities": []})
     except Exception as e:
         logger.exception("broadcast album %s failed: %s", group_id, e)
 
@@ -7784,19 +8247,26 @@ async def broadcast_media_received(update: Update, context: ContextTypes.DEFAULT
         if msg.caption and not album.get("caption"):
             album["caption"] = album["body"] = msg.caption
         return True
-    if context.user_data.get("awaiting_admin_input") != "broadcast":
+    armed = _broadcast_armed(context.user_data)
+    if not armed:
         return False
     kind = _broadcast_media_kind(msg)
     if not kind:
         return False
+    if armed == "stale":
+        await msg.reply_text("That 📢 Broadcast expired (it was started over 30 minutes ago), so nothing was sent. "
+                             "Tap 📢 Broadcast again.")
+        return True
     context.user_data.pop("awaiting_admin_input", None)
+    context.user_data.pop("broadcast_armed_at", None)
     body = msg.caption or ({"photo": "🖼 Picture", "video": "🎬 Video", "animation": "🎞 GIF"}.get(kind, "📎 File"))
     if group_id:
         _broadcast_albums[group_id] = {"chat": update.effective_chat.id, "ids": [msg.message_id],
                                        "body": msg.caption or "🖼 Pictures", "caption": msg.caption}
         asyncio.create_task(_broadcast_album_later(context.bot, group_id))
         return True
-    await _send_broadcast_copy(context.bot, update.effective_chat.id, [msg.message_id], body, update.effective_chat.id)
+    await _preview_broadcast(context.bot, {"mode": "copy", "chat": update.effective_chat.id, "ids": [msg.message_id],
+                                           "body": body, "entities": []})
     return True
 
 
@@ -7824,7 +8294,8 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order — e.g. split payments) and asks if there's more, rather than
     immediately moving on after just one."""
     photo_file_id = update.message.photo[-1].file_id
-    await _accumulate_receipt_item(update, context, "photo", photo_file_id)
+    await _accumulate_receipt_item(update, context, "photo", photo_file_id,
+                                   getattr(update.message.photo[-1], "file_unique_id", None))
 
 
 async def receipt_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7836,11 +8307,17 @@ async def receipt_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if not doc or doc.mime_type != "application/pdf":
         return
-    await _accumulate_receipt_item(update, context, "pdf", doc.file_id)
+    await _accumulate_receipt_item(update, context, "pdf", doc.file_id, getattr(doc, "file_unique_id", None))
+
+
+def _receipt_order_allowed(order, user_id: int) -> bool:
+    """A receipt can be sent in this chat for the sender's own order while it isn't paid or cancelled yet (a
+    rejected one may get a corrected receipt). A paid order is answered by _record_receipt_submission."""
+    return bool(order) and order[1] == user_id and order[5] in ORDER_OPEN_STATUSES + ("rejected",) + ORDER_PAID_STATUSES
 
 
 async def _accumulate_receipt_item(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                                    item_type: str, file_id: str):
+                                    item_type: str, file_id: str, file_unique_id: str = None):
     # Use the queue — always process the oldest pending receipt order
     pending_orders = context.user_data.get("pending_receipt_orders", [])
     order_id = pending_orders[0] if pending_orders else context.user_data.get("awaiting_receipt_for_order")
@@ -7856,8 +8333,16 @@ async def _accumulate_receipt_item(update: Update, context: ContextTypes.DEFAULT
         return
 
     order = db_get_order(order_id)
+    problem = None
     if not order:
-        await update.message.reply_text("Order not found — please start over with /start.")
+        problem = "Order not found — please start over with /start."
+    elif not _receipt_order_allowed(order, update.effective_user.id):
+        # Someone else's order, or one that isn't waiting for a payment (audit, 26 Nov 2026).
+        problem = f"Order #{order_id} isn't waiting for a receipt from you."
+    elif promo_order_lapsed(order_id):
+        problem = PROMO_ENDED_PAY_TEXT.format(order_id=order_id)
+    if problem:
+        await update.message.reply_text(problem)
         pending_orders = context.user_data.get("pending_receipt_orders", [])
         if order_id in pending_orders:
             pending_orders.remove(order_id)
@@ -7877,7 +8362,8 @@ async def _accumulate_receipt_item(update: Update, context: ContextTypes.DEFAULT
         context.user_data["collecting_receipts_for_order"] = order_id
         context.user_data["pending_receipt_items"] = []
 
-    context.user_data["pending_receipt_items"].append({"type": item_type, "file_id": file_id})
+    context.user_data["pending_receipt_items"].append(
+        {"type": item_type, "file_id": file_id, "keys": [file_unique_id] if isinstance(file_unique_id, str) else []})
     count = len(context.user_data["pending_receipt_items"])
 
     await update.message.reply_text(
@@ -7951,6 +8437,12 @@ async def payer_name_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not order:
         await update.message.reply_text("Order not found — please start over with /start.")
         return
+    if not _receipt_order_allowed(order, update.effective_user.id):
+        await update.message.reply_text(f"Order #{order_id} isn't waiting for a receipt from you.")
+        return
+    if promo_order_lapsed(order_id):
+        await update.message.reply_text(PROMO_ENDED_PAY_TEXT.format(order_id=order_id))
+        return
 
     order_id = order[0]
     if not _record_receipt_submission(order_id, items, payer_name):
@@ -7993,6 +8485,9 @@ async def _verify_submitted_receipts(context: ContextTypes.DEFAULT_TYPE, order, 
     order_id, user_id, username, items_json, total, status, created_at = order
     if not items:
         return
+    # The same receipt file already sent for another order (every payment method, Jordan/CLIQ included, where no
+    # reference is checked): never auto-confirmed; the admin sees it (audit, 26 Nov 2026).
+    same_receipt_order = db_record_receipt_files(order_id, items)
 
     conn = sqlite3.connect(DB_PATH)
     pm_row = conn.execute("SELECT payment_method FROM orders WHERE id = ?", (order_id,)).fetchone()
@@ -8067,7 +8562,7 @@ async def _verify_submitted_receipts(context: ContextTypes.DEFAULT_TYPE, order, 
         if payment_method in METHODS_REQUIRING_RECIPIENT_NAME:
             recipient_name_ok = bool(verdict.get("recipient_ok"))
 
-        if amount_ok and reference_ok and wallet_ok and recipient_name_ok and not duplicate_ref:
+        if amount_ok and reference_ok and wallet_ok and recipient_name_ok and not duplicate_ref and not same_receipt_order:
             # False: the admin confirmed it while the receipt was being checked. The receipt then
             # goes to the admin as a normal review copy below, not as "auto-confirmed".
             auto_confirmed = await finalize_order_confirmation(context, order_id, user_id, items_json) is not False
@@ -8100,7 +8595,8 @@ async def _verify_submitted_receipts(context: ContextTypes.DEFAULT_TYPE, order, 
             verdict["verdict"] = "looks_off"
 
     if not auto_confirmed:
-        await notify_admin_receipt(context, order, items, payer_name=payer_name, ai_verdict=verdict, payment_method=payment_method)
+        await notify_admin_receipt(context, order, items, payer_name=payer_name, ai_verdict=verdict, payment_method=payment_method,
+                                   warning=f"⚠️ Same receipt image as Order #{same_receipt_order}" if same_receipt_order else None)
 
 
 async def analyze_receipt_with_ai(context: ContextTypes.DEFAULT_TYPE, items: list,
@@ -8418,7 +8914,7 @@ async def send_receipt_items_to_admin(context: ContextTypes.DEFAULT_TYPE, items:
 
 async def notify_admin_receipt(
     context: ContextTypes.DEFAULT_TYPE, order_row, receipt_items: list, payer_name: str = None,
-    ai_verdict: dict = None, payment_method: str = None,
+    ai_verdict: dict = None, payment_method: str = None, warning: str = None,
 ):
     order_id, user_id, username, items_json, total, status, created_at = order_row
     purchased_items = json.loads(items_json)
@@ -8427,7 +8923,8 @@ async def notify_admin_receipt(
     # (like _ or *) that break Telegram's Markdown parser and silently fail
     # to send. No parse_mode here avoids that entirely.
     caption = (
-        f"🧾 Receipt received — Order #{order_id}\n"
+        (f"{warning}\n" if warning else "")
+        + f"🧾 Receipt received — Order #{order_id}\n"
         f"From: {username or 'unknown'} (ID: {user_id})\n"
         + (f"Payer name on receipt: {payer_name}\n" if payer_name else "")
         + (f"{len(receipt_items)} receipt{'s' if len(receipt_items) != 1 else ''} submitted\n" if len(receipt_items) != 1 else "")
@@ -8480,6 +8977,35 @@ async def coworker_login_start(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("Enter your coworker username:", reply_markup=_cancel_button())
 
 
+# /coworker login attempts (audit, 26 Nov 2026): at most COWORKER_LOGIN_MAX_FAILS wrong passwords per Telegram user
+# in COWORKER_LOGIN_WINDOW seconds; then logins are refused until the window passes and the admin is told once.
+COWORKER_LOGIN_MAX_FAILS = 5
+COWORKER_LOGIN_WINDOW = 15 * 60
+_COWORKER_LOGIN_FAILS: dict = {}   # user_id -> [time of each recent wrong attempt]
+
+
+def _coworker_login_recent(user_id: int) -> list:
+    now = time.time()
+    recent = [t for t in _COWORKER_LOGIN_FAILS.get(user_id, []) if now - t < COWORKER_LOGIN_WINDOW]
+    if recent:
+        _COWORKER_LOGIN_FAILS[user_id] = recent
+    else:
+        _COWORKER_LOGIN_FAILS.pop(user_id, None)
+    return recent
+
+
+def _coworker_login_locked(user_id: int) -> bool:
+    return len(_coworker_login_recent(user_id)) >= COWORKER_LOGIN_MAX_FAILS
+
+
+def _coworker_login_failed(user_id: int) -> bool:
+    """Records a wrong attempt; True when this one reached the limit (the moment to tell the admin, once)."""
+    recent = _coworker_login_recent(user_id)
+    recent.append(time.time())
+    _COWORKER_LOGIN_FAILS[user_id] = recent
+    return len(recent) == COWORKER_LOGIN_MAX_FAILS
+
+
 async def coworker_field_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Walks username -> password, then verifies against the coworkers
     table set up by the admin and, on a match, logs this Telegram account
@@ -8498,10 +9024,25 @@ async def coworker_field_reply(update: Update, context: ContextTypes.DEFAULT_TYP
     # field == "password"
     username = context.user_data.pop("coworker_login_username", "")
     context.user_data.pop("awaiting_coworker_field", None)
+    user_id = update.effective_user.id
+    if _coworker_login_locked(user_id):
+        await update.message.reply_text(
+            f"❌ Too many wrong attempts. Please try again in {COWORKER_LOGIN_WINDOW // 60} minutes.")
+        return
     result = db_verify_coworker_login(username, text)
     if not result:
+        if _coworker_login_failed(user_id) and ADMIN_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(f"⚠️ /coworker login: {COWORKER_LOGIN_MAX_FAILS} wrong attempts from user {user_id} "
+                          f"(@{update.effective_user.username or '-'}), last username tried: {username[:60]}. "
+                          f"Their logins are refused for {COWORKER_LOGIN_WINDOW // 60} minutes."))
+            except Exception:
+                logger.exception("Couldn't tell the admin about the /coworker login attempts of %s", user_id)
         await update.message.reply_text("❌ Username or password incorrect. Send /coworker to try again.")
         return
+    _COWORKER_LOGIN_FAILS.pop(user_id, None)
 
     coworker_id, name, discount_pct = result
     db_set_user_coworker(update.effective_user.id, coworker_id)
@@ -8597,15 +9138,21 @@ async def post_subscription_to_channel(context: ContextTypes.DEFAULT_TYPE, order
             )
 
 
-async def award_referral_credit(context: ContextTypes.DEFAULT_TYPE, paying_user_id: int):
+async def award_referral_credit(context: ContextTypes.DEFAULT_TYPE, paying_user_id: int, order_id: int = None):
     """Called once per successfully paid order. If the paying customer was
     referred, their referrer gets 1 credit — every single time that
-    customer completes an order, not just their first."""
+    customer completes an order, not just their first. Recorded on the order, so flagging it as rejected later
+    takes the credit back (owner, 26 Nov 2026)."""
     referrer_id = db_get_referred_by(paying_user_id)
     if not referrer_id:
         return
 
     new_balance = db_add_credits(referrer_id, 1)
+    if order_id:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE orders SET referral_credited_to = ? WHERE id = ?", (referrer_id, order_id))
+        conn.commit()
+        conn.close()
     try:
         await context.bot.send_message(
             chat_id=referrer_id,
@@ -8714,6 +9261,45 @@ async def _safe_edit_confirmation(query, text: str):
             logger.info("Could not edit admin message (neither caption nor text) for this action.")
 
 
+async def _settle_order_payment(context, order_id: int, user_id: int, admin_note: str = "") -> str:
+    """Marks the order paid and does what happens once per payment (audit, 26 Nov 2026): deducts the credits
+    reserved on it and consumes its discount code. Shared by finalize_order_confirmation (admin Confirm,
+    automatic check, credits) and the Stars payment, so every way of paying does the same bookkeeping.
+    Returns "ok"; "already" (already paid, or no such order: nothing done); or "credits_short" (the reserved
+    credits are no longer in the balance: nothing done, the order stays unconfirmed and the admin is told,
+    instead of delivering an order that was paid for with credits it didn't have)."""
+    credits_applied, discount_code = db_order_reductions(order_id)
+    if not db_get_order(order_id) or db_order_payment_confirmed(order_id):
+        return "already"
+    if credits_applied and not db_deduct_credits(user_id, credits_applied):
+        balance = db_get_credits(user_id)
+        logger.warning("Order #%s: %s reserved credits no longer covered (balance %s); not confirmed",
+                       order_id, credits_applied, balance)
+        if ADMIN_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(f"⚠️ Order #{order_id} was NOT confirmed: {credits_applied} credit(s) "
+                          f"({CURRENCY}{credits_applied * CREDIT_VALUE_USD}) were applied to it at checkout, but the "
+                          f"customer (ID {user_id}) now has only {balance}. Nothing was delivered and the order "
+                          "stays unconfirmed. Ask them to pay the difference, then confirm it again."
+                          + (f"\n{admin_note}" if admin_note else "")))
+            except Exception:
+                logger.exception("Couldn't tell the admin that order #%s's credits are short", order_id)
+        return "credits_short"
+    if not db_update_status(order_id, "paid"):
+        if credits_applied:
+            db_add_credits(user_id, credits_applied)   # confirmed by someone else at the same moment: give them back
+        return "already"
+    db_note_credits_used(order_id, credits_applied)
+    if discount_code and db_consume_discount_code(discount_code):
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE orders SET discount_consumed = 1 WHERE id = ?", (order_id,))
+        conn.commit()
+        conn.close()
+    return "ok"
+
+
 async def finalize_order_confirmation(context: ContextTypes.DEFAULT_TYPE, order_id: int,
                                        user_id: int, items_json: str):
     """The actual 'this order is paid' logic — marks it paid, notifies the
@@ -8726,24 +9312,14 @@ async def finalize_order_confirmation(context: ContextTypes.DEFAULT_TYPE, order_
     must never cost the customer credits), and a discount code gets its
     use consumed now (same reasoning — checking a code shouldn't burn a
     use if the order never actually completes)."""
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute(
-        "SELECT credits_applied, discount_code FROM orders WHERE id = ?", (order_id,)
-    ).fetchone()
-    conn.close()
-    credits_applied, discount_code = row if row else (None, None)
-
-    if not db_update_status(order_id, "paid"):
-        # Already paid (a second tap on Confirm, or the admin and the automatic check both
-        # confirming it), or the order is gone: everything below happened the first time and
+    settled = await _settle_order_payment(context, order_id, user_id)
+    if settled != "ok":
+        # "already": already paid (a second tap on Confirm, or the admin and the automatic check
+        # both confirming it), or the order is gone: everything below happened the first time and
         # must not happen again (credits, discount use, referral credit, delivery, messages).
-        logger.info("Order #%s: confirmation skipped, it is already confirmed or missing", order_id)
+        # "credits_short": the reserved credits are no longer there; the admin was told, the order stays unconfirmed.
+        logger.info("Order #%s: confirmation skipped (%s)", order_id, settled)
         return False
-
-    if credits_applied:
-        db_deduct_credits(user_id, credits_applied)
-    if discount_code:
-        db_consume_discount_code(discount_code)
 
     # Isolated like every other step below — a transient network blip
     # sending this confirmation must never stop fulfilment from starting.
@@ -8763,7 +9339,7 @@ async def finalize_order_confirmation(context: ContextTypes.DEFAULT_TYPE, order_
 
     items = json.loads(items_json)
     await start_order_fulfilment(context, order_id, user_id, items)
-    await award_referral_credit(context, user_id)
+    await award_referral_credit(context, user_id, order_id)
     await post_receipt_to_payments_channel(context, order_id)
     return True
 
@@ -8797,7 +9373,10 @@ async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 query, f"✅ Order #{order_id} was already confirmed as paid. Nothing was done twice.")
             return
         await _safe_edit_confirmation(query, f"✅ Order #{order_id} confirmed as paid.")
-        await finalize_order_confirmation(context, order_id, user_id, items_json)
+        if not await finalize_order_confirmation(context, order_id, user_id, items_json) \
+                and not db_order_payment_confirmed(order_id):
+            # Its reserved credits are short (the admin got a message saying so): not confirmed after all.
+            await _safe_edit_confirmation(query, f"⚠️ Order #{order_id} was NOT confirmed — see the message below.")
 
     elif action == "admin_reject":
         # Don't reject immediately — ask whether to include a reason first,
@@ -8844,6 +9423,7 @@ async def admin_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == A_BROADCAST:
         clear_admin_flow_state(context.user_data)
         context.user_data["awaiting_admin_input"] = "broadcast"
+        context.user_data["broadcast_armed_at"] = time.time()   # expires after 30 minutes (audit, 26 Nov 2026)
         recipient_count = len(db_all_user_ids(exclude=ADMIN_CHAT_ID))
         await update.message.reply_text(
             f"Send the announcement for all {recipient_count} customer(s): text, or a picture, video, GIF or file "
@@ -9160,7 +9740,27 @@ async def reject_comment_reply(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     user_id = order[1]
 
-    db_update_status(order_id, "rejected")
+    was_paid = db_order_payment_confirmed(order_id)
+    moved = db_update_status(order_id, "rejected")
+    if moved and was_paid:
+        # Flagged after it was paid (owner, 26 Nov 2026): what the payment did is taken back once, and nothing more
+        # of it is delivered (the queue, Pending Orders, the iMD run and @Utdreg_bot all go by its status now).
+        reversed_ = db_reverse_order_payment(order_id)
+        if reversed_:
+            _, used, code, referrer, took_back = reversed_
+            notes = []
+            if used:
+                notes.append(f"{used} credit(s) given back to the customer")
+            if code:
+                notes.append(f"discount code {code}'s use restored")
+            if referrer:
+                notes.append(f"the referral credit taken back from {referrer}" if took_back
+                             else f"the referral credit of {referrer} couldn't be taken back (they already used it)")
+            left = len(db_order_undelivered_items(order_id))
+            if left:
+                notes.append(f"{left} undelivered unit(s) won't be delivered")
+            if notes:
+                await update.message.reply_text(f"↩️ Order #{order_id}: " + "; ".join(notes) + ".")
 
     body = update.message.text.strip()
     if body == "/skip":
@@ -9228,6 +9828,11 @@ async def admin_comment_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         ),
     )
     await update.message.reply_text(f"✅ Comment sent to the customer for order #{order_id}.")
+
+
+def item_is_removed(item_id: str) -> bool:
+    """True when the admin removed the product in 📦 Manage Stock → Remove (it can't be ordered any more)."""
+    return bool(ITEM_OVERRIDES.get(item_id, (None, None, None, False))[3])
 
 
 def all_toggleable_items() -> list:
@@ -9358,6 +9963,9 @@ async def stock_item_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stock_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:   # admin only (audit, 26 Nov 2026)
+        await query.answer("Not authorized.", show_alert=True)
+        return
     await query.answer()
     await query.edit_message_text(
         "📦 Manage Stock — tap an item:\n✅ available · 🚫 out of stock",
@@ -9731,6 +10339,9 @@ async def book_requests_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def book_requests_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:   # admin only (audit, 26 Nov 2026)
+        await query.answer("Not authorized.", show_alert=True)
+        return
     await query.answer()
     await query.edit_message_text("📚 Book Requests:", reply_markup=_book_requests_summary_keyboard())
 
@@ -12000,6 +12611,16 @@ RECEIPT_MAX_FILES = 5
 RECEIPT_MAX_BYTES = 10 * 1024 * 1024
 
 
+def _receipt_keys(data: bytes, telegram_file) -> list:
+    """The keys a receipt sent through the support chat is recognised by: its bytes' sha256 and Telegram's id."""
+    import hashlib
+    keys = ["sha256:" + hashlib.sha256(data).hexdigest()]
+    unique = getattr(telegram_file, "file_unique_id", None)
+    if isinstance(unique, str) and unique:
+        keys.append(unique)
+    return keys
+
+
 async def http_submit_receipt(request):
     """A receipt the customer sent to the reply bot, submitted for one of
     their unpaid orders. Runs exactly the same approval flow as a receipt
@@ -12039,6 +12660,9 @@ async def http_submit_receipt(request):
     if not order or order[1] != user_id:
         return web.json_response({"error": f"order #{order_id} doesn't belong to this customer"}, status=404)
     status = order[5]
+    if status in ("awaiting_payment", "awaiting_receipt") and promo_order_lapsed(order_id):
+        return web.json_response({"error": PROMO_ENDED_PAY_TEXT.format(order_id=order_id), "status": status,
+                                  "promo_ended": True}, status=409)
     if status not in ("awaiting_payment", "awaiting_receipt"):
         return web.json_response(
             {"error": "this order isn't waiting for a payment", "status": status,
@@ -12067,13 +12691,15 @@ async def http_submit_receipt(request):
                         document=InputFile(io.BytesIO(receipt["data"]), filename=f"receipt_order_{order_id}.pdf"),
                         caption=caption if chat_id == user_id else f"Receipt for order #{order_id} via the reply bot",
                     )
-                    items.append({"type": "pdf", "file_id": sent.document.file_id})
+                    items.append({"type": "pdf", "file_id": sent.document.file_id,
+                                  "keys": _receipt_keys(receipt["data"], sent.document)})
                 else:
                     sent = await bot.send_photo(
                         chat_id=chat_id, photo=receipt["data"],
                         caption=caption if chat_id == user_id else f"Receipt for order #{order_id} via the reply bot",
                     )
-                    items.append({"type": "photo", "file_id": sent.photo[-1].file_id})
+                    items.append({"type": "photo", "file_id": sent.photo[-1].file_id,
+                                  "keys": _receipt_keys(receipt["data"], sent.photo[-1])})
                 break
             except Exception:
                 logger.exception("submit_receipt: couldn't post receipt for order #%s to chat %s", order_id, chat_id)
@@ -12082,7 +12708,7 @@ async def http_submit_receipt(request):
 
     # Drop any half-finished receipt upload for this order in the
     # customer's session here, so this bot doesn't ask for it again.
-    customer_data = application.user_data[user_id]
+    customer_data = _customer_user_data(application, user_id)
     pending = customer_data.get("pending_receipt_orders") or []
     if order_id in pending:
         pending.remove(order_id)
@@ -12185,7 +12811,7 @@ def _reply_bot_check_items(requested: dict, user_id: int = 0):
     for item_id, qty in requested.items():
         if item_id not in sellable or item_id not in MENU or qty < 1:
             return None, ({"error": f"unknown product: {item_id}"}, 400)
-        if db_is_out_of_stock(item_id):
+        if db_is_out_of_stock(item_id) or item_is_removed(item_id):
             return None, ({"error": f"{MENU[item_id][0]} is out of stock"}, 409)
         if item_id in refused:
             return None, ({"error": f"{MENU[item_id][0]} isn't available right now"}, 409)
@@ -12304,9 +12930,9 @@ def db_replace_unpaid_order_items(order_id: int, user_id: int, order_items: dict
     missing ones added. Only for an order that isn't paid, so no unit is delivered or running yet."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
-        "UPDATE orders SET items_json = ?, total = ?, payment_method = ? WHERE id = ? "
+        "UPDATE orders SET items_json = ?, total = ?, payment_method = ?, promo_ends = ? WHERE id = ? "
         "AND status IN ('awaiting_payment', 'awaiting_receipt')",
-        (json.dumps(order_items), total, payment_method, order_id),
+        (json.dumps(order_items), total, payment_method, _promo_mark(order_items), order_id),
     )
     for fid, item_id, unit_no in conn.execute(
         "SELECT id, item_id, unit_no FROM fulfilment WHERE order_id = ?", (order_id,)
@@ -12591,7 +13217,7 @@ async def _retry_stuck_imd_unit(application, order_id: int, user_id: int, wanted
         return None  # same details as the run already made: don't renew or register twice
 
     # Drop the "reply with your correct username" prompt the failed run left open here.
-    customer_data = application.user_data[user_id]
+    customer_data = _customer_user_data(application, user_id)
     if customer_data.get("registration_order") == order_id:
         for key in ("registration_order", "registration_data", "registration_duration", "registration_item_id",
                     "registration_fulfilment_id", "awaiting_registration_field", "registration_is_renew",
@@ -12929,7 +13555,7 @@ async def http_register_account(request):
     application = request.app["application"]
     # Drop any half-finished form for this unit in the customer's session,
     # so this bot doesn't keep asking them for the same details.
-    customer_data = application.user_data[user_id]
+    customer_data = _customer_user_data(application, user_id)
     if customer_data.get("registration_fulfilment_id") == fulfilment_id:
         for key in ("registration_order", "registration_data", "registration_duration", "registration_item_id",
                     "registration_fulfilment_id", "awaiting_registration_field", "registration_is_renew"):
@@ -13457,7 +14083,7 @@ class _HttpContext:
     def __init__(self, application, user_id: int):
         self.application = application
         self.bot = application.bot
-        self.user_data = application.user_data[user_id]
+        self.user_data = _customer_user_data(application, user_id)
 
 
 MINI_APP_CHAT_ACTIONS = {"order_ticket", "complete_registration", "send_receipt", "imd_catalog_search",
@@ -16410,6 +17036,9 @@ async def tickets_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def tickets_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:   # admin only (audit, 26 Nov 2026)
+        await query.answer("Not authorized.", show_alert=True)
+        return
     await query.answer()
     unresolved = len(db_list_tickets("unresolved"))
     resolved = len(db_list_tickets("resolved"))
@@ -17853,6 +18482,9 @@ async def inbox_message_detail(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def inbox_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:   # admin only (audit, 26 Nov 2026)
+        await query.answer("Not authorized.", show_alert=True)
+        return
     await query.answer()
     await query.edit_message_text("Inbox:", reply_markup=_inbox_summary_keyboard())
 
@@ -17982,6 +18614,10 @@ async def customer_reply_start(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     order_id = int(query.data.split(":", 1)[1])
+    order = db_get_order(order_id)
+    if not order or order[1] != query.from_user.id:   # only about the customer's own order (audit, 26 Nov 2026)
+        await context.bot.send_message(chat_id=query.from_user.id, text="That order belongs to another account.")
+        return
     context.user_data["awaiting_customer_reply_for_order"] = order_id
     await context.bot.send_message(chat_id=query.from_user.id, text="Type your reply:")
 
@@ -18415,7 +19051,7 @@ async def cancel_reask(application, fulfilment_id: int) -> dict:
         return {"ok": False, "error": "This item isn't waiting for its details again."}
     _, order_id, user_id, item_id = row[:4]
     name = MENU.get(item_id, (item_id,))[0]
-    customer_data = application.user_data[user_id]
+    customer_data = _customer_user_data(application, user_id)
     if customer_data.get("generic_fulfilment_id") == fulfilment_id:
         for key in ("awaiting_generic_field", "generic_data", "generic_account_type", "generic_fulfilment_id",
                     "generic_item_id", "generic_order_id"):
@@ -18522,7 +19158,7 @@ async def reask_unit(application, fulfilment_id: int, ask_type: str = "any", not
         _set_reask_pending(fulfilment_id, {"kind": ask_type, "applied": True})
     was = _unit_account_type(json.dumps(reask.get("prev") or {}))
     # a half-finished form of the old details mustn't carry on
-    customer_data = application.user_data[user_id]
+    customer_data = _customer_user_data(application, user_id)
     if customer_data.get("generic_fulfilment_id") == fulfilment_id:
         for key in ("awaiting_generic_field", "generic_data", "generic_account_type"):
             customer_data.pop(key, None)
@@ -20218,58 +20854,20 @@ async def admin_input_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await customer_lookup(update, context)
 
     elif mode == "broadcast":
+        if step_is_stale(context.user_data.pop("broadcast_armed_at", None)):
+            await update.message.reply_text(
+                "That 📢 Broadcast expired (it was started over 30 minutes ago), so nothing was sent. "
+                "Tap 📢 Broadcast again.")
+            return
         body = update.message.text  # unstripped — preserve the admin's formatting
         # Sent as written (owner, 26 Nov 2026): bold, links and Telegram Premium (custom) emoji included. The bot
         # sends the text with the admin's entities; if Telegram drops the custom emoji for the bot (it can, for bots
-        # without that right), the admin's own message is copied to each customer instead, which keeps them.
-        entities = list(update.message.entities or [])
-        head = "📢 Announcement:\n\n"
-        mode_used = "text"
-        if has_custom_emoji(entities):
-            try:
-                probe = await context.bot.send_message(
-                    chat_id=update.effective_chat.id, text=head + body,
-                    entities=shifted_entities(entities, head),
-                )
-                if not has_custom_emoji(probe.entities):
-                    mode_used = "copy"
-                    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=probe.message_id)
-                else:
-                    await update.message.reply_text("👆 This is how customers will see it.")
-            except Exception as e:
-                logger.warning("broadcast: custom emoji probe failed (%s); copying the admin's message", e)
-                mode_used = "copy"
-        db_add_announcement(body, json.dumps([e.to_dict() for e in entities]) if entities else None,
-                            update.effective_chat.id, update.message.message_id, mode_used)
-
-        recipients = db_all_user_ids(exclude=ADMIN_CHAT_ID)
-        sent, failed = 0, 0
-        for user_id in recipients:
-            try:
-                # Send the announcement text AND a refreshed keyboard in
-                # the same message so the 📢 badge appears immediately for
-                # each recipient without a separate follow-up message.
-                if mode_used == "copy":
-                    await context.bot.copy_message(
-                        chat_id=user_id, from_chat_id=update.effective_chat.id,
-                        message_id=update.message.message_id, reply_markup=main_menu_keyboard(user_id),
-                    )
-                else:
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=head + body,
-                        entities=shifted_entities(entities, head) or None,
-                        reply_markup=main_menu_keyboard(user_id),
-                    )
-                sent += 1
-            except Exception:
-                failed += 1
-            await asyncio.sleep(0.05)  # gentle on Telegram's rate limits
-
-        await update.message.reply_text(
-            f"✅ Broadcast sent.\nDelivered: {sent}\nFailed: {failed}\n\n"
-            "It's also saved under customers' 📢 Announcements tab."
-        )
+        # without that right), the admin's own message is copied to each customer instead, which keeps them. The
+        # preview shown to the admin first is that check; nothing goes out before 📤 Send (owner, 26 Nov 2026).
+        await _preview_broadcast(context.bot, {
+            "mode": "text", "chat": update.effective_chat.id, "ids": [update.message.message_id],
+            "body": body, "entities": list(update.message.entities or []),
+        })
 
 
 async def text_state_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -20555,6 +21153,12 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
             #
             # CRITICAL: change state BEFORE the recursive call below, otherwise
             # the next call finds the same needs_info item and loops forever.
+            if order_id in _IMD_RUNS_IN_PROGRESS:
+                # Another unit of this order is on iMD right now: its data must not be overwritten (it is keyed by
+                # order). This one keeps needing its run; the running one starts it when it ends (audit, 26 Nov 2026).
+                logger.info("process_next_in_queue: iMD run for order #%s in progress; fulfilment #%s waits",
+                            order_id, fulfilment_id)
+                return
             db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
 
             is_renew  = existing_info.get("account_type") == "renew"
@@ -21008,19 +21612,28 @@ async def deliver_uptodate_ai_code(context: ContextTypes.DEFAULT_TYPE, order_id:
         f"2️⃣ Type /Redeem {code}"
     )
     db_add_delivery(order_id, user_id, item_id, message)
+    if not db_order_undelivered_items(order_id):
+        db_update_status(order_id, "delivered")   # its last unit (audit, 26 Nov 2026)
 
+    sent_ok = True
     try:
         await _send_to_customer(context.bot, user_id, order_id, message)
     except Exception:
+        sent_ok = False
         logger.exception("Failed to deliver Uptodate AI code to user %s", user_id)
     else:
-        await send_delivery_promo(context, user_id)
+        try:
+            await send_delivery_promo(context, user_id)
+        except Exception:
+            logger.exception("Uptodate AI order #%s: the promo after the delivery failed", order_id)
 
     if ADMIN_CHAT_ID:
         try:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
-                text=f"✅ Delivered {label} code {code} — Order #{order_id}",
+                text=(f"✅ Delivered {label} code {code} — Order #{order_id}" if sent_ok else
+                      f"⚠️ {label} code {code} for Order #{order_id} is saved, but the message to the customer "
+                      f"failed. Send them this:\n\n{message}"),
             )
         except Exception:
             pass
@@ -21034,7 +21647,7 @@ async def start_generic_collection(context: ContextTypes.DEFAULT_TYPE, order_id:
     Resend Credentials" button (see resend_cred_tap) can reuse it exactly
     as-is to re-ask a customer who already went through this once."""
     item_name = MENU.get(item_id, (item_id, 0))[0]
-    customer_data = context.application.user_data[user_id]
+    customer_data = _customer_user_data(context.application, user_id)
     customer_data["generic_fulfilment_id"] = fulfilment_id
     customer_data["generic_item_id"] = item_id
     customer_data["generic_order_id"] = order_id
@@ -21067,7 +21680,7 @@ async def start_imd_collection(context: ContextTypes.DEFAULT_TYPE, order_id: int
 
     # context.application.user_data lets us reach into the CUSTOMER's data
     # store from here, even though this often runs in the admin's context.
-    customer_data = context.application.user_data[user_id]
+    customer_data = _customer_user_data(context.application, user_id)
     customer_data["registration_order"] = order_id
     customer_data["registration_data"] = {}
     customer_data["registration_duration"] = duration
@@ -21417,7 +22030,8 @@ async def finish_imd_collection(update: Update, context: ContextTypes.DEFAULT_TY
             ),
         )
 
-    await run_imd_registration(context, order_id)
+    # In the background, so the bot keeps answering everyone while iMD's page runs (audit, 26 Nov 2026).
+    context.application.create_task(run_imd_registration(context, order_id))
 
 
 async def reg_go(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -21429,7 +22043,7 @@ async def reg_go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     order_id = int(query.data.split(":", 1)[1])
-    await run_imd_registration(context, order_id)
+    context.application.create_task(run_imd_registration(context, order_id))   # in the background (audit)
 
 
 def db_recover_imd_registration_data(order_id: int):
@@ -21500,10 +22114,27 @@ async def run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: int
         logger.warning("iMD run for order #%s is already in progress; not starting another", order_id)
         return
     _IMD_RUNS_IN_PROGRESS.add(order_id)
+    result = None
     try:
-        await _run_imd_registration(context, order_id)
+        result = await _run_imd_registration(context, order_id)
     finally:
         _IMD_RUNS_IN_PROGRESS.discard(order_id)
+    if isinstance(result, tuple) and result[0] == "advance":
+        # The unit was delivered: the order's next unit (a second iMD account too) starts now (audit, 26 Nov 2026).
+        try:
+            await process_next_in_queue(context, result[1], order_id)
+        except Exception:
+            logger.exception("iMD order #%s: couldn't move on to the next unit", order_id)
+
+
+async def _safe_admin_send(context, text: str, **kwargs):
+    """A message to the admin that must never stop what comes after it."""
+    if not ADMIN_CHAT_ID:
+        return
+    try:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text, **kwargs)
+    except Exception:
+        logger.exception("Couldn't send the admin: %s", text[:80])
 
 
 async def _imd_admin_order_problem(context, order_id: int, data: dict, admin_note: str):
@@ -21704,21 +22335,42 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
                 data.get("username"), data.get("password"), duration=duration
             )
 
+        # Rejected (flagged as fraudulent) or cancelled while iMD was running: the account exists on iMD but
+        # nothing is delivered; the admin decides (owner, 26 Nov 2026).
+        now_status = order[5] if order else None
+        if now_status in ORDER_CLOSED_STATUSES:
+            logger.warning("iMD success for order #%s, but the order is %s now: not delivered", order_id, now_status)
+            await _safe_admin_send(
+                context, f"⚠️ {action_label} confirmed on iMD for order #{order_id}, but the order is {now_status} now, "
+                         f"so nothing was delivered. Serial used: {serial_code}\n\n{detail}")
+            return
+
         db_save_delivery(order_id, delivery_message)
         db_add_delivery(order_id, customer_user_id, data.get("item_id"), delivery_message)
-        await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=f"✅ {action_label} confirmed for order #{order_id}. Serial used: {serial_code}\n\n{detail}",
-        )
+        # Delivered as soon as iMD confirmed and the delivery is saved; a message that fails below must never leave
+        # the unit pending or stop the queue (audit, 26 Nov 2026).
+        if data.get("fulfilment_id"):
+            db_set_fulfilment_state(data["fulfilment_id"], "delivered")
+        await _safe_admin_send(
+            context, f"✅ {action_label} confirmed for order #{order_id}. Serial used: {serial_code}\n\n{detail}")
         if customer_user_id is not None:
             # an order by the admin: the delivery goes to the admin's chat, to forward
-            await _send_to_customer(context.bot, customer_user_id, order_id, delivery_message)
-            await send_delivery_promo(context, customer_user_id)
-            await post_subscription_to_channel(context, order_id, data.get("item_id"), delivery_message)
-            if data.get("fulfilment_id"):
-                db_set_fulfilment_state(data["fulfilment_id"], "delivered")
-            # This order may contain more items — move on to the next one.
-            await process_next_in_queue(context, customer_user_id, order_id)
+            try:
+                await _send_to_customer(context.bot, customer_user_id, order_id, delivery_message)
+            except Exception:
+                logger.exception("iMD order #%s: couldn't send the delivery to the customer", order_id)
+                await _safe_admin_send(
+                    context, f"⚠️ Order #{order_id}: iMD worked and it's saved as delivered, but the message to the "
+                             f"customer failed. Send them this:\n\n{delivery_message}")
+            for step in (lambda: send_delivery_promo(context, customer_user_id),
+                         lambda: post_subscription_to_channel(context, order_id, data.get("item_id"), delivery_message)):
+                try:
+                    await step()
+                except Exception:
+                    logger.exception("iMD order #%s: a message after the delivery failed", order_id)
+            # This order may contain more items: run_imd_registration moves on to the next one once this run has
+            # ended (a call from here would find this run still in progress).
+            return ("advance", customer_user_id)
         return
 
     # Everything below is a non-success. For serial errors, mark the serial
@@ -21806,7 +22458,7 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
             return
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_note)
         if customer_user_id:
-            customer_data = context.application.user_data[customer_user_id]
+            customer_data = _customer_user_data(context.application, customer_user_id)
             customer_data["registration_order"] = order_id
             customer_data["registration_is_renew"] = is_renew
             customer_data["registration_duration"] = duration
@@ -21839,7 +22491,7 @@ async def _run_imd_registration(context: ContextTypes.DEFAULT_TYPE, order_id: in
             ),
         )
         if customer_user_id:
-            customer_data = context.application.user_data[customer_user_id]
+            customer_data = _customer_user_data(context.application, customer_user_id)
             customer_data["registration_order"] = order_id
             customer_data["registration_is_renew"] = is_renew
             customer_data["registration_duration"] = duration
@@ -22290,6 +22942,10 @@ async def _deliver_credentials(context, fulfilment_id: int, credentials_text: st
         name = unit_title(item_id, addons)
         if only_if_undelivered and state == "delivered":
             raise UnitAlreadyDelivered(fulfilment_id)
+        order_now = db_get_order(order_id)
+        if order_now and order_now[5] == "rejected":
+            # Flagged as rejected (owner, 26 Nov 2026): its undelivered units are closed until it is confirmed again.
+            raise OrderRejected(f"Order #{order_id} was rejected: confirm its payment again before delivering it.")
         # the plan's Uptodate AI add-on comes in the same message (owner, 24 Nov 2026): the Telegram bot code, or
         # the Expert AI note
         no_code = []
@@ -22321,7 +22977,7 @@ async def _deliver_credentials(context, fulfilment_id: int, credentials_text: st
     # A manual delivery ends whatever the customer was mid-way through for
     # this unit, so clear any stale collection state and move the order on —
     # otherwise the remaining items are never asked for.
-    customer_data = context.application.user_data[user_id]
+    customer_data = _customer_user_data(context.application, user_id)
     for key in (
         "awaiting_registration_field", "registration_order", "registration_data",
         "registration_is_renew", "registration_duration", "registration_item_id",
@@ -23131,8 +23787,18 @@ async def handle_mini_app_action(update, context, data: dict):
 
     if action == "send_receipt":
         oid = data.get("order_id")
-        if not oid:
+        try:
+            oid = int(oid)
+        except (TypeError, ValueError):
+            oid = None
+        order = db_get_order(oid) if oid else None
+        # Only the customer's own order, still waiting for its payment (audit, 26 Nov 2026).
+        if not order or order[1] != user_id:
             await update.message.reply_text("Could not find that order. Please contact support.")
+            return
+        if order[5] not in PAYABLE_ORDER_STATUSES:
+            await update.message.reply_text(
+                f"Order #{oid} isn't waiting for a receipt ({ORDER_STATUS_MEANINGS.get(order[5], order[5])}).")
             return
         queue_receipt_request(context, oid)
         await update.message.reply_text(
@@ -23259,7 +23925,77 @@ class _FauxMessage:
         return await self._bot.send_invoice(chat_id=self._chat_id, **kwargs)
 
 
+# What a Mini App checkout may store per unit (audit, 26 Nov 2026): at most MINI_APP_MAX_UNITS units (the Mini App's
+# MAX_QTY), and only the account-detail fields its forms have (index.html newFlds/renewFlds/imdNewFlds/imdRenewFlds),
+# each at most MINI_APP_FIELD_MAX characters.
+MINI_APP_MAX_UNITS = 20
+MINI_APP_FIELD_MAX = 200
+MINI_APP_DETAIL_FIELDS = (
+    REGISTER_FIELDS[("generic", "new")] + REGISTER_FIELDS[("generic", "renew")]
+    + REGISTER_FIELDS[("imd", "new")] + REGISTER_FIELDS[("imd", "renew")]
+)
+
+
+def _clean_mini_app_entry(entry: dict) -> dict:
+    """One Mini App cart unit with only the keys the shop uses, as short strings."""
+    def short(v, n=MINI_APP_FIELD_MAX):
+        return v[:n] if isinstance(v, str) else (str(v)[:n] if isinstance(v, (int, float)) else "")
+    clean = {"id": short(entry.get("id"), 100)}
+    if entry.get("name"):
+        clean["name"] = short(entry.get("name"), 100)
+    if entry.get("account_type"):
+        clean["account_type"] = short(entry.get("account_type"), 20)
+    for key in ("with_plan", "with_unit"):
+        if entry.get(key) not in (None, ""):
+            clean[key] = short(entry.get(key), 100)
+    for key in MINI_APP_DETAIL_FIELDS:
+        value = short(entry.get(key))
+        if value:
+            clean[key] = value
+    return clean
+
+
+def _customer_unreachable(exc) -> bool:
+    """True for Telegram's answer when the bot can't message a customer: they never pressed Start, or blocked it."""
+    return isinstance(exc, Forbidden) or (isinstance(exc, BadRequest) and "chat not found" in str(exc).lower())
+
+
+def _start_the_bot_error(context) -> str:
+    try:
+        name = context.bot.username or "MedicAccounts_bot"
+    except Exception:
+        name = "MedicAccounts_bot"
+    return f"Please open @{name}, press Start, then tap I've Paid again."
+
+
 async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, username: str, data: dict) -> dict:
+    """A Mini App checkout (see _process_full_order). When the bot can't message the customer (they never pressed
+    Start, or blocked the bot) no order is left half-made (audit, 26 Nov 2026; seen live: customers retried 13 times
+    and got an error each time): the chat is checked first, before any order exists; if a message still fails
+    after the order was created, that order is cancelled. The customer is told to press Start and try again."""
+    try:
+        await context.bot.send_chat_action(chat_id=user_id, action="typing")
+    except Exception as e:
+        if _customer_unreachable(e):
+            logger.info("Mini App order from %s refused: the bot can't message them (%s)", user_id, e)
+            return {"ok": False, "error": _start_the_bot_error(context)}
+        # any other answer (a network blip): carry on, the order itself decides
+    created = []
+    try:
+        return await _process_full_order(context, user_id, username, data, created)
+    except Exception as e:
+        if not _customer_unreachable(e):
+            raise
+        logger.warning("Mini App order from %s: the bot can't message them (%s); orders %s", user_id, e, created)
+        for order_id in created:
+            if db_order_payment_confirmed(order_id):
+                return {"ok": True, "order_id": order_id}   # already paid in full (credits): it goes ahead
+            db_update_status(order_id, "cancelled")
+        return {"ok": False, "error": _start_the_bot_error(context)}
+
+
+async def _process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, username: str, data: dict,
+                              created: list = None) -> dict:
     """Core order-creation logic for a Mini App checkout submission —
     shared by two entry points:
       - the legacy Telegram WebApp.sendData() message, still handled by
@@ -23291,6 +24027,14 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
     if not items_raw:
         await message.reply_text("Your cart was empty.")
         return {"ok": False, "error": "Your cart was empty."}
+    if not isinstance(items_raw, list) or not all(isinstance(e, dict) for e in items_raw):
+        return {"ok": False, "error": "Invalid order — please reopen the shop and try again."}
+    if len(items_raw) > MINI_APP_MAX_UNITS:
+        text = (f"An order can have at most {MINI_APP_MAX_UNITS} subscriptions. "
+                "Please split it into smaller orders.")
+        await message.reply_text(text)
+        return {"ok": False, "error": text}
+    items_raw = [_clean_mini_app_entry(e) for e in items_raw]
 
     # Build the items dict for the order, checking stock
     order_items = {}
@@ -23300,7 +24044,7 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
         if not item_id or item_id not in MENU:
             skipped.append(entry.get("name") or item_id or "unknown")
             continue
-        if db_is_out_of_stock(item_id):
+        if db_is_out_of_stock(item_id) or item_is_removed(item_id):   # removed in Manage Stock too (audit, 26 Nov 2026)
             skipped.append(MENU[item_id][0] + " (out of stock)")
             continue
         if promo_refused_items([item_id], user_id):
@@ -23357,7 +24101,7 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
 
     credits_applied = 0
     if data.get("use_credits"):
-        balance = db_get_credits(user_id)
+        balance = db_available_credits(user_id)   # not the credits reserved on their other open orders (audit)
         if balance > 0:
             credit_value = balance * CREDIT_VALUE_USD
             if credit_value >= total:
@@ -23368,6 +24112,8 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
                 total = round(total - credit_value, 2)
 
     order_id = db_create_order(user_id, username, order_items, total)
+    if created is not None:
+        created.append(order_id)
     if credits_applied or applied_discount_code or coworker_id:
         conn = sqlite3.connect(DB_PATH)
         conn.execute(
@@ -23532,6 +24278,7 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
         conn.execute("UPDATE orders SET credits_applied = 0 WHERE id = ?", (order_id,))
         conn.commit()
         conn.close()
+        db_note_credits_used(order_id, credits_applied)
         paid_note = f" using {credits_applied} credit(s)" if credits_applied else " via your discount code"
         await message.reply_text(f"✅ Order #{order_id} paid in full{paid_note}!\n\n{summary}")
         await finalize_order_confirmation(context, order_id, user_id, json.dumps(order_items))
@@ -23541,7 +24288,7 @@ async def process_full_order(context: ContextTypes.DEFAULT_TYPE, user_id: int, u
         # Create a Stars invoice — the customer pays in Telegram, the
         # successful_payment_callback handles fulfilment.
         db_update_status(order_id, "awaiting_payment")
-        amount_stars = max(1, round(total * STAR_RATE))
+        amount_stars = stars_amount_for(total)
         try:
             await message.reply_invoice(
                 title      = "Medic SalesBot Order",
@@ -24644,6 +25391,23 @@ async def restore_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _describe_update(update) -> str:
+    """update_id, the user's id and the kind of update (a callback's data too: it never holds what was typed)."""
+    if not isinstance(update, Update):
+        return type(update).__name__
+    kind = next((k for k in ("callback_query", "message", "edited_message", "pre_checkout_query", "inline_query",
+                             "my_chat_member", "chat_member", "channel_post") if getattr(update, k, None)), "other")
+    user = update.effective_user
+    extra = ""
+    if update.callback_query is not None:
+        extra = f" data={str(update.callback_query.data or '')[:60]!r}"
+    elif update.effective_message is not None:
+        msg = update.effective_message
+        what = "text" if msg.text else (_broadcast_media_kind(msg) or "other")
+        extra = f" content={what}"
+    return f"update_id={update.update_id} user={user.id if user else None} kind={kind}{extra}"
+
+
 async def restore_file_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the .db file upload for /restore — downloads it to a temp
     path and asks for explicit confirmation before touching the live
@@ -24664,7 +25428,7 @@ async def restore_file_received(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     doc = update.message.document
-    if not doc or not doc.file_name.endswith(".db"):
+    if not doc or not (doc.file_name or "").endswith(".db"):   # a file without a name too (audit, 26 Nov 2026)
         await update.message.reply_text("That doesn't look like a `.db` file — send the backup file itself.")
         return
 
@@ -24746,6 +25510,9 @@ async def restore_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def restore_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:   # admin only (audit, 26 Nov 2026)
+        await query.answer("Not authorized.", show_alert=True)
+        return
     await query.answer()
     staged_path = context.user_data.pop("restore_staged_path", None)
     if staged_path and os.path.exists(staged_path):
@@ -24863,7 +25630,9 @@ def main():
         answers the callback so Telegram's loading spinner clears instead
         of hanging, and tells the person who clicked that something went
         wrong instead of leaving them looking at an unresponsive button."""
-        logger.error("Unhandled exception while processing update: %s", update, exc_info=context.error)
+        # Only what identifies the update, never its content: a typed password or a customer's details would
+        # otherwise land in the logs (audit, 26 Nov 2026). The traceback is kept.
+        logger.error("Unhandled exception while processing update: %s", _describe_update(update), exc_info=context.error)
 
         if ADMIN_CHAT_ID:
             try:
@@ -24942,6 +25711,8 @@ def main():
         app.job_queue.run_repeating(sheet_outbox_job, interval=30, first=20, name="delivered_sheet")
         # Paid UpToDate orders go to @Utdreg_bot's 📥 Pending orders by themselves (18 Nov 2026).
         app.job_queue.run_repeating(automation_push_job, interval=60, first=45, name="automation_push")
+        # unpaid promo-priced orders are cancelled once the promo ends (owner, 26 Nov 2026); first run soon after start
+        app.job_queue.run_repeating(promo_end_job, interval=300, first=15, name="promo_end")
         # Daily sales Excel to the admin 5 minutes after local midnight.
         app.job_queue.run_daily(
             daily_sales_excel_job,
@@ -25084,6 +25855,7 @@ def main():
     app.add_handler(CallbackQueryHandler(inbox_back, pattern=r"^inbox_back$"))
     app.add_handler(CallbackQueryHandler(announcement_detail, pattern=r"^annview:"))
     app.add_handler(CallbackQueryHandler(announcement_back, pattern=r"^ann_back$"))
+    app.add_handler(CallbackQueryHandler(broadcast_confirm, pattern=r"^bcast_(send|cancel):"))
     app.add_handler(CallbackQueryHandler(admin_pending_back, pattern=r"^apend_back$"))
     app.add_handler(CallbackQueryHandler(ask_resend_start, pattern=r"^askresend:"))
     app.add_handler(CallbackQueryHandler(ask_resend_skip, pattern=r"^askresend_skip:"))

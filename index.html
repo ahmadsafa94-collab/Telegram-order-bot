@@ -1138,7 +1138,7 @@ let BOOT = null;
 if (!_qs.get('subs') && !_qs.get('uid') && tg.initData) {
   try {
     const x = new XMLHttpRequest();
-    x.open('POST', (_qs.get('api') || BOT_API_DEFAULT) + '/api/bootstrap', false);
+    x.open('POST', BOT_API_DEFAULT + '/api/bootstrap', false);
     x.setRequestHeader('Content-Type', 'application/json');
     x.send(JSON.stringify({initData: tg.initData}));
     if (x.status === 200) { const d = JSON.parse(x.responseText); if (d && d.ok) BOOT = d; }
@@ -1147,7 +1147,10 @@ if (!_qs.get('subs') && !_qs.get('uid') && tg.initData) {
 if (BOOT) SUBS_DATA = BOOT.subs || null;
 const AUTH_UID = _qs.get('uid') || (BOOT && String(BOOT.uid)) || (SUBS_DATA && SUBS_DATA.uid) || '';
 const AUTH_TOK = _qs.get('tok') || (BOOT && BOOT.tok) || (SUBS_DATA && SUBS_DATA.tok) || '';
-const API_BASE = _qs.get('api') || (BOOT && BOOT.api) || (SUBS_DATA && SUBS_DATA.api) || '';
+// An api= in the link (or in the subs= blob) is used only when it is this shop's own API: a link pointing the page
+// elsewhere would send the customer's token and typed account details there (audit, 26 Nov 2026).
+const _ownApi = a => (a && String(a).replace(/\/+$/, '') === BOT_API_DEFAULT) ? BOT_API_DEFAULT : '';
+const API_BASE = _ownApi(_qs.get('api')) || (BOOT && BOOT.api) || _ownApi(SUBS_DATA && SUBS_DATA.api) || '';
 // Admin-only: set when this is a '👁 Preview Shop as This Coworker' link,
 // so My Orders/purchase history can show THAT coworker's data too, not
 // just the catalog's preview pricing — see withAuth() below.
@@ -1784,6 +1787,7 @@ function renderOrders(){
   if(d.length){
     html+=`<div class="sub-section-lbl">✅ Delivered (${d.length})</div>`;
     d.forEach(([name,date,creds,oid,did,fid],i)=>{
+      oid=+oid||0; did=+did||0; fid=+fid||0;   // numbers only: they go into onclick handlers (audit, 26 Nov 2026)
       // A row that knows its fulfilment id opens that subscription's full
       // detail page (credentials, copy button, ticket button) on its own —
       // same page the coworker's order list opens.
@@ -1793,8 +1797,8 @@ function renderOrders(){
           <div style="display:flex;align-items:flex-start;gap:10px;padding:11px 15px;width:100%">
             <div class="sub-icon">✅</div>
             <div class="sub-info">
-              <div class="sub-name">${name}${oid?` <span style="color:var(--hint);font-weight:400">#${oid}</span>`:''}</div>
-              ${date?`<div class="sub-meta">${date}</div>`:''}
+              <div class="sub-name">${escHtml(String(name))}${oid?` <span style="color:var(--hint);font-weight:400">#${escHtml(String(oid))}</span>`:''}</div>
+              ${date?`<div class="sub-meta">${escHtml(String(date))}</div>`:''}
               <div class="sub-meta" style="color:var(--teal2);margin-top:3px">Tap to view details ›</div>
             </div>
             <div class="sub-chevron">›</div>
@@ -1816,8 +1820,8 @@ function renderOrders(){
           <div style="display:flex;align-items:flex-start;gap:10px;padding:11px 15px;width:100%">
             <div class="sub-icon">✅</div>
             <div class="sub-info">
-              <div class="sub-name">${name}${oid?` <span style="color:var(--hint);font-weight:400">#${oid}</span>`:''}</div>
-              ${date?`<div class="sub-meta">${date}</div>`:''}
+              <div class="sub-name">${escHtml(String(name))}${oid?` <span style="color:var(--hint);font-weight:400">#${escHtml(String(oid))}</span>`:''}</div>
+              ${date?`<div class="sub-meta">${escHtml(String(date))}</div>`:''}
               ${hasCredentials?`<div class="sub-meta" style="color:var(--teal2);margin-top:3px">Tap to view credentials ›</div>`:''}
             </div>
             ${hasCredentials?`<div class="sub-chevron">›</div>`:''}
@@ -1868,6 +1872,7 @@ function renderPending(){
     awaiting_payment:     {icon:'⏳', label:'Waiting for payment', btn:null},
   };
   const row=([name,state,fid,oid,,own,editable])=>{
+    fid=+fid||0; oid=+oid||0;   // numbers only: they go into onclick handlers (audit, 26 Nov 2026)
     const mine=own!==0&&!PREVIEW_CW;   // an admin previewing a coworker only looks
     const info=stateInfo[state]||{icon:'⏳',label:'In progress',btn:null};
     return `
@@ -1875,7 +1880,7 @@ function renderPending(){
         <div style="display:flex;align-items:flex-start;gap:10px;padding:11px 15px;width:100%">
           <div class="sub-icon">${info.icon}</div>
           <div class="sub-info">
-            <div class="sub-name">${escHtml(String(name))}${oid?` <span style="color:var(--hint);font-weight:400">#${oid}</span>`:''}</div>
+            <div class="sub-name">${escHtml(String(name))}${oid?` <span style="color:var(--hint);font-weight:400">#${escHtml(String(oid))}</span>`:''}</div>
             <div class="sub-meta">${info.label}</div>
           </div>
         </div>
@@ -2068,7 +2073,7 @@ function renderBasket(){
   }
   el.innerHTML=items.map(([id,{name,price,qty}])=>
     `<div class="ci">
-      <div class="ci-name">${name}</div>
+      <div class="ci-name">${escHtml(String(name))}</div>
       <span class="qty-step"><button class="qs-btn minus" type="button" aria-label="One less" onclick="stepQty('${id}',-1)">−</button><span class="qs-n">${qty}</span><button class="qs-btn" type="button" aria-label="One more" onclick="stepQty('${id}',1)">+</button></span>
       <div class="ci-price">$${((hasCoworkerDiscount(id)?coworkerPrice(price,id):price)*qty).toFixed(2)}</div>
       <button class="rm" onclick="removeItem('${id}')">×</button>
@@ -3777,8 +3782,8 @@ function makeRow(itm,solo){
   d.dataset.itemId=itm.id; d.dataset.base=itm.price; d.dataset.name=itm.name;
   const oos=OOS_IDS.has(itm.id);
   const priceHtml = rowPriceHtml(itm.id, itm.price);
-  d.innerHTML=`${solo?`<div style="font-size:21px">${itm.e||'📦'}</div>`:''}
-    <div class="ri"><div class="rn">${escHtml(itm.name)}</div><div class="rs">${itm.sub||''}</div>${promoWas(itm.id)!=null&&PROMO_DATA&&PROMO_DATA.l?`<div class="promo-note">${escHtml(PROMO_DATA.l)}</div>`:''}</div>
+  d.innerHTML=`${solo?`<div style="font-size:21px">${escHtml(String(itm.e||'📦'))}</div>`:''}
+    <div class="ri"><div class="rn">${escHtml(String(itm.name))}</div><div class="rs">${escHtml(String(itm.sub||''))}</div>${promoWas(itm.id)!=null&&PROMO_DATA&&PROMO_DATA.l?`<div class="promo-note">${escHtml(PROMO_DATA.l)}</div>`:''}</div>
     <div class="rp">${priceHtml}</div>
     <button class="add-btn${oos?' oos':(cart[itm.id]?' in':'')}" id="ab-${itm.id}" ${oos?'disabled':''} onclick="${oos?"event.stopPropagation();showToast('Out of stock')":`addItem('${itm.id}')`}">${oos?'✕':(cart[itm.id]?'✓':'+')}</button>${oos?'':`<span class="qty-step"><button class="qs-btn minus" type="button" aria-label="One less" onclick="event.stopPropagation();stepQty(this.parentElement.previousElementSibling.id.slice(3),-1)">−</button><span class="qs-n">${cart[itm.id]?cart[itm.id].qty:1}</span><button class="qs-btn" type="button" aria-label="One more" onclick="event.stopPropagation();stepQty(this.parentElement.previousElementSibling.id.slice(3),1)">+</button></span>`}`;
   return d;
@@ -4344,7 +4349,7 @@ function makeNoDetailsBlock(id,name,price,idx){
   const note=UP_ADDON_NOTE[id] ? UP_ADDON_NOTE[id] : MANUAL_ACCESS_ITEMS.has(id)
     ? '✅ No account details needed — access is granted shortly after payment is confirmed.'
     : '✅ No account details needed — delivered automatically after payment.';
-  w.innerHTML=`<div class="dheader"><div class="ri"><div class="rn">${name}${lbl}</div></div>`+
+  w.innerHTML=`<div class="dheader"><div class="ri"><div class="rn">${escHtml(String(name))}${lbl}</div></div>`+
     `<div class="ptag">$${price}</div>`+
     `<button class="rm" title="Remove" onclick="removeDetailItem('${id}')">×</button></div>`+
     `<div style="font-size:12px;color:var(--hint);padding:4px 2px 8px">${note}</div>`;
@@ -4356,7 +4361,7 @@ function makeDetailBlock(id,name,price,idx){
   const isImd=IMD.has(id);
   const firstFlds=isImd?imdNewFlds(id,idx):newFlds(id,idx);
   const body=`<div class="toggle"><button class="tbtn active" onclick="setType(this,'new','${id}','${idx}')">🆕 New</button><button class="tbtn" onclick="setType(this,'renew','${id}','${idx}')">🔄 Renewal</button></div><div id="ff-${id}-${idx}">${firstFlds}</div>`;
-  w.innerHTML=`<div class="dheader"><div class="ri"><div class="rn">${name}${lbl}</div></div><div class="ptag">$${price}</div>`+
+  w.innerHTML=`<div class="dheader"><div class="ri"><div class="rn">${escHtml(String(name))}${lbl}</div></div><div class="ptag">$${price}</div>`+
     `<button class="rm" title="Remove" onclick="removeDetailItem('${id}')">×</button></div>${body}`;
   return w;
 }
@@ -5118,8 +5123,10 @@ function addCustomRow(itemId){
   moreSec.appendChild(row);
   return row;
 }
+// Only well-formed ids: an id lands in onclick handlers and element ids (audit, 26 Nov 2026).
+if (SUBS_DATA && SUBS_DATA.c && SUBS_DATA.c.length) SUBS_DATA.c = SUBS_DATA.c.filter(r => Array.isArray(r) && /^[\w.-]{1,80}$/.test(String(r[0])));
 if (SUBS_DATA && SUBS_DATA.c && SUBS_DATA.c.length) {
-  SUBS_DATA.c.forEach(([itemId, name, price]) => registerCustom(itemId, name, price));
+  SUBS_DATA.c.forEach(([itemId, name, price]) => registerCustom(itemId, String(name), price));
   [...SUBS_DATA.c].sort((a, b) => (IMAP[a[0]].title).localeCompare(IMAP[b[0]].title)).forEach(([itemId]) => addCustomRow(itemId));
 }
 if (ADMIN_EDIT) document.getElementById('addSubBtn').style.display = 'block';
