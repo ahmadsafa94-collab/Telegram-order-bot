@@ -16177,7 +16177,8 @@ async def start_api_server(application):
     api_app.router.add_post("/api/submit_order", http_submit_order)
     api_app.router.add_options("/api/submit_order", http_submit_order_options)
 
-    runner = web.AppRunner(api_app)
+    # No access log: request lines carry each user's permanent uid/tok (the admin's too) in the query (audit, 26 Nov 2026)
+    runner = web.AppRunner(api_app, access_log=None)
     await runner.setup()
     try:
         site = web.TCPSite(runner, "0.0.0.0", BOT_API_PORT)
@@ -19839,6 +19840,9 @@ async def _finish_imd_manual_delivery(context: ContextTypes.DEFAULT_TYPE, order_
 
 async def admin_pending_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Not authorized.", show_alert=True)
+        return
     await query.answer()
     rows = db_all_pending_items()
     rejected = db_rejected_orders()
@@ -19874,6 +19878,8 @@ async def show_serials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists available serials/codes and any not_working ones so the admin
     can review and delete failed serials. Codes are backtick-wrapped for
     Telegram's tap-to-copy."""
+    if not update.effective_user or update.effective_user.id != ADMIN_CHAT_ID:
+        return   # /listserials was open to every user (audit, 26 Nov 2026)
     available = db_list_serials(status="available")
     not_working = db_list_serials(status="not_working")
     held = db_list_serials(status="held")
