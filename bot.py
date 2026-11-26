@@ -11678,7 +11678,9 @@ async def http_order_progress(request):
                 "SELECT COUNT(*), COALESCE(SUM(state = 'delivered'), 0) FROM fulfilment WHERE order_id = ?",
                 (order_id,)).fetchone()
             orders.append({"order_id": order_id, "user_id": row[0], "status": row[1], "units": units,
-                           "delivered": delivered, "complete": row[1] == "delivered" and units > 0 and delivered == units})
+                           "delivered": delivered,
+                           # every unit delivered; 'paid' too: a code delivered on its own leaves the order 'paid'
+                           "complete": row[1] in ("paid", "delivered") and units > 0 and delivered == units})
     finally:
         conn.close()
     for o in orders:
@@ -12701,6 +12703,7 @@ async def http_register_account(request):
     conn = sqlite3.connect(DB_PATH)
     has_units = conn.execute("SELECT 1 FROM fulfilment WHERE order_id = ? LIMIT 1", (order_id,)).fetchone()
     conn.close()
+    recreated = False
     if not has_units and not paid:
         # an unpaid order made by an older support chatbot: its units, as for a Mini App order
         try:
@@ -12716,6 +12719,7 @@ async def http_register_account(request):
         except (TypeError, ValueError):
             pass
         logger.info("register_account: order #%s had no items left; recreated them from the order", order_id)
+        recreated = True
         if ADMIN_CHAT_ID:
             try:
                 await request.app["application"].bot.send_message(
@@ -12730,6 +12734,10 @@ async def http_register_account(request):
     if wanted_unit is not None and any(no == wanted_unit for _, _, no in rows):
         rows = [r for r in rows if r[2] == wanted_unit]
     if not rows:
+        if recreated:
+            # the units put back take no details (a code, a book, manual access): the queue delivers them
+            context = CallbackContext(request.app["application"], chat_id=user_id, user_id=user_id)
+            request.app["application"].create_task(process_next_in_queue(context, user_id, order_id))
         retry = await _retry_stuck_imd_unit(request.app["application"], order_id, user_id, wanted_item, info) \
             if paid else None
         if retry is not None:
@@ -20302,6 +20310,16 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
         return
     fulfilment_id, item_id = nxt
 
+    # Nothing of an order is asked for, registered or delivered from here before it is paid. Units exist before
+    # payment (the Mini App's, and since 26 Nov 2026 those of an order taken in the support chat, with or without
+    # details), so this is checked once here, whoever calls: without it a unit with no details on an unpaid order
+    # would get its form, or its code delivered.
+    order_row = db_get_order(order_id)
+    if not order_row or order_row[5] not in ("paid", "delivered"):
+        logger.warning("process_next_in_queue: order #%s is '%s', not paid; fulfilment #%s left as it is",
+                       order_id, order_row[5] if order_row else "missing", fulfilment_id)
+        return
+
     item_name = fid_title(fulfilment_id, item_id)
 
     # the old 3-month bundle's Telegram code at payment; a 1-year add-on comes with its plan's login (24 Nov 2026)
@@ -20477,6 +20495,33 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
         await start_imd_collection(context, order_id, user_id, item_id, fulfilment_id)
     elif item_id in UPTODATE_AI_TRIGGER_ITEMS:
         await deliver_uptodate_ai_code(context, order_id, user_id, fulfilment_id)
+        # Nothing is waited for here, so the rest of the order goes on: a unit after this one whose details are
+        # already stored (an order taken in the support chat, 26 Nov 2026) would otherwise never be reached.
+        still = db_get_fulfilment(fulfilment_id)
+        if only_fid is None and still and still[5] != "needs_info":
+            await process_next_in_queue(context, user_id, order_id)
+    elif item_id in MANUAL_ACCESS_ITEMS:
+        # Access granted by hand: there is nothing for the customer to fill in (an order taken in the support chat
+        # has no details on this unit, and the chatbot told them nothing more is needed, 26 Nov 2026).
+        db_set_fulfilment_info(fulfilment_id, {"account_type": "new"})
+        db_set_fulfilment_state(fulfilment_id, "awaiting_delivery")
+        if ADMIN_CHAT_ID:
+            who = (f"@{order_row[2]}" if order_row[2] else str(user_id)) + f" (ID: {user_id})"
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    f"🤖 {item_name} paid — Order #{order_id}\n"
+                    f"Customer: {who}\n\n"
+                    "Grant them access, then use the 📤 Send Credentials button to "
+                    "send a confirmation message."
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("📤 Send Credentials", callback_data=f"deliver:{fulfilment_id}")]]
+                ),
+            )
+        if only_fid is None:
+            await process_next_in_queue(context, user_id, order_id)
+        return
     elif item_id.startswith("book_"):
         # A book request already has everything it needs (the link was
         # collected up front, before payment) — skip straight to the
@@ -20494,6 +20539,8 @@ async def process_next_in_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int
                     [[InlineKeyboardButton("📤 Send Book", callback_data=f"deliver:{fulfilment_id}")]]
                 ),
             )
+        if only_fid is None:
+            await process_next_in_queue(context, user_id, order_id)   # the rest of the order, as above
     else:
         await start_generic_collection(context, order_id, user_id, item_id, fulfilment_id)
 
