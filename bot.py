@@ -51,7 +51,7 @@ from sales_excel import build_sales_workbook
 import auto_sites
 import renewals
 
-from telegram.error import NetworkError, TimedOut
+from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -60,6 +60,7 @@ from telegram import (
     InputMediaDocument,
     InputMediaPhoto,
     InputTextMessageContent,
+    MessageEntity,
     KeyboardButton,
     LabeledPrice,
     ReplyKeyboardMarkup,
@@ -1306,6 +1307,13 @@ def db_init():
         )
         """
     )
+    # Announcements keep the admin's formatting and Telegram Premium (custom) emoji (owner, 26 Nov 2026): the entities,
+    # the admin's own message (to copy it when Telegram won't let the bot send custom emoji itself) and how it went out.
+    for column in ("entities_json", "src_chat_id", "src_message_id", "send_mode"):
+        try:
+            conn.execute(f"ALTER TABLE announcements ADD COLUMN {column} TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS seen_announcements (
@@ -3817,11 +3825,13 @@ def db_unresolved_ticket_count() -> int:
     return len(db_list_tickets("unresolved"))
 
 
-def db_add_announcement(body: str) -> int:
+def db_add_announcement(body: str, entities_json: str = None, src_chat_id: int = None,
+                        src_message_id: int = None, send_mode: str = None) -> int:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute(
-        "INSERT INTO announcements (body, created_at) VALUES (?, ?)",
-        (body, datetime.utcnow().isoformat()),
+        "INSERT INTO announcements (body, created_at, entities_json, src_chat_id, src_message_id, send_mode) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (body, datetime.utcnow().isoformat(), entities_json, src_chat_id, src_message_id, send_mode),
     )
     conn.commit()
     announcement_id = cur.lastrowid
@@ -3845,6 +3855,42 @@ def db_get_announcement(announcement_id: int):
     ).fetchone()
     conn.close()
     return row
+
+
+def db_get_announcement_format(announcement_id: int) -> dict:
+    """The stored formatting of an announcement: entities (list of dicts), the admin's source message, send mode."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT entities_json, src_chat_id, src_message_id, send_mode FROM announcements WHERE id = ?",
+        (announcement_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return {}
+    try:
+        entities = json.loads(row[0]) if row[0] else []
+    except (TypeError, ValueError):
+        entities = []
+    return {"entities": entities, "src_chat_id": row[1], "src_message_id": row[2], "send_mode": row[3] or "text"}
+
+
+def _utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def shifted_entities(entities, prefix: str) -> list:
+    """Telegram entities (MessageEntity objects or their dicts) moved after `prefix` (offsets are UTF-16 units)."""
+    n = _utf16_len(prefix)
+    out = []
+    for e in entities or []:
+        d = e.to_dict() if hasattr(e, "to_dict") else dict(e)
+        d["offset"] = int(d.get("offset", 0)) + n
+        out.append(MessageEntity.de_json(d, None))
+    return out
+
+
+def has_custom_emoji(entities) -> bool:
+    return any((e.get("type") if isinstance(e, dict) else e.type) == "custom_emoji" for e in entities or [])
 
 
 def db_add_serials(duration: str, codes: list) -> int:
@@ -5557,7 +5603,21 @@ async def announcement_detail(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     _, body, created_at = row
-    await query.edit_message_text(f"📢 {created_at[:10]}\n\n{body}", reply_markup=back)
+    fmt = db_get_announcement_format(announcement_id)
+    if fmt.get("send_mode") == "copy" and fmt.get("src_chat_id") and fmt.get("src_message_id"):
+        # Telegram only kept the Premium emoji by copying the admin's own message: copy it again here.
+        try:
+            await context.bot.copy_message(chat_id=query.message.chat_id, from_chat_id=int(fmt["src_chat_id"]),
+                                           message_id=int(fmt["src_message_id"]), reply_markup=back)
+            return
+        except Exception as e:
+            logger.warning("announcement %s: copy failed (%s), showing the text", announcement_id, e)
+    head = f"📢 {created_at[:10]}\n\n"
+    try:
+        await query.edit_message_text(head + body, entities=shifted_entities(fmt.get("entities"), head) or None,
+                                      reply_markup=back)
+    except BadRequest:
+        await query.edit_message_text(head + body, reply_markup=back)
 
 
 async def announcement_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -20054,7 +20114,28 @@ async def admin_input_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif mode == "broadcast":
         body = update.message.text  # unstripped — preserve the admin's formatting
-        db_add_announcement(body)
+        # Sent as written (owner, 26 Nov 2026): bold, links and Telegram Premium (custom) emoji included. The bot
+        # sends the text with the admin's entities; if Telegram drops the custom emoji for the bot (it can, for bots
+        # without that right), the admin's own message is copied to each customer instead, which keeps them.
+        entities = list(update.message.entities or [])
+        head = "📢 Announcement:\n\n"
+        mode_used = "text"
+        if has_custom_emoji(entities):
+            try:
+                probe = await context.bot.send_message(
+                    chat_id=update.effective_chat.id, text=head + body,
+                    entities=shifted_entities(entities, head),
+                )
+                if not has_custom_emoji(probe.entities):
+                    mode_used = "copy"
+                    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=probe.message_id)
+                else:
+                    await update.message.reply_text("👆 This is how customers will see it.")
+            except Exception as e:
+                logger.warning("broadcast: custom emoji probe failed (%s); copying the admin's message", e)
+                mode_used = "copy"
+        db_add_announcement(body, json.dumps([e.to_dict() for e in entities]) if entities else None,
+                            update.effective_chat.id, update.message.message_id, mode_used)
 
         recipients = db_all_user_ids(exclude=ADMIN_CHAT_ID)
         sent, failed = 0, 0
@@ -20063,11 +20144,18 @@ async def admin_input_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Send the announcement text AND a refreshed keyboard in
                 # the same message so the 📢 badge appears immediately for
                 # each recipient without a separate follow-up message.
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"📢 Announcement:\n\n{body}",
-                    reply_markup=main_menu_keyboard(user_id),
-                )
+                if mode_used == "copy":
+                    await context.bot.copy_message(
+                        chat_id=user_id, from_chat_id=update.effective_chat.id,
+                        message_id=update.message.message_id, reply_markup=main_menu_keyboard(user_id),
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=head + body,
+                        entities=shifted_entities(entities, head) or None,
+                        reply_markup=main_menu_keyboard(user_id),
+                    )
                 sent += 1
             except Exception:
                 failed += 1
