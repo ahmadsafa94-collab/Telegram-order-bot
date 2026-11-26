@@ -345,6 +345,9 @@ ITEM_OVERRIDES = {}
 # tests the promo itself with PROMO_DEFINITION).
 PROMO_DEFINITION = {
     "ends_utc": "2026-11-27T20:30:00Z",
+    # when it went live: unpaid orders made since then, before orders kept their promo's end (promo_ends, 26 Nov
+    # 2026), get it at startup (db_mark_promo_orders), so they expire with the promo like the newer ones
+    "starts_utc": "2026-11-25T07:20:00Z",
     "label": "Black Friday discount until Friday night",
     "until": "the end of Friday 27 November",   # customer-facing: never mention Iran (owner, 26 Nov 2026)
     "prices": {"imd_1y": 60.0, "imd_6m": 40.0},
@@ -1688,6 +1691,10 @@ def db_init():
 
     conn.commit()
     conn.close()
+    try:
+        db_mark_promo_orders()
+    except Exception:
+        logger.exception("Couldn't mark the promo's earlier unpaid orders")
 
     utd_automation_init()
     load_bundled_imd_catalog()
@@ -4740,6 +4747,35 @@ def _promo_mark(items) -> str:
 
 
 PROMO_LAPSE_STATUSES = ("awaiting_payment", "awaiting_receipt")   # no receipt sent yet
+
+
+def db_mark_promo_orders() -> int:
+    """Gives promo_ends to the unpaid customer orders made at the promo's prices before orders kept it (at startup;
+    review, 26 Nov 2026): made between PROMO's starts_utc and ends_utc, with one of its items, still without a
+    receipt, not a coworker's and not by the admin. Returns how many. Nothing without starts_utc."""
+    if not PROMO or not PROMO.get("starts_utc") or not PROMO.get("prices"):
+        return 0
+    start, end = PROMO["starts_utc"].rstrip("Z"), PROMO["ends_utc"].rstrip("Z")
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, items_json FROM orders WHERE promo_ends IS NULL AND status IN (?, ?) AND coworker_id IS NULL "
+        "AND COALESCE(source, '') != 'admin' AND user_id != 0 AND created_at >= ? AND created_at < ?",
+        (*PROMO_LAPSE_STATUSES, start, end),
+    ).fetchall()
+    marked = 0
+    for order_id, items_json in rows:
+        try:
+            items = json.loads(items_json)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(items, dict) and any(i in PROMO["prices"] for i in items):
+            conn.execute("UPDATE orders SET promo_ends = ? WHERE id = ? AND promo_ends IS NULL", (PROMO["ends_utc"], order_id))
+            marked += 1
+    conn.commit()
+    conn.close()
+    if marked:
+        logger.info("Promo: %d earlier unpaid order(s) now expire with it", marked)
+    return marked
 PROMO_ENDED_PAY_TEXT = ("The offer for Order #{order_id} has ended, so it can't be paid any more. Please order "
                         "again at the regular price.")
 
@@ -4781,9 +4817,10 @@ PROMO_LAPSED_TEXT = ("The offer for Order #{order_id} has ended, so this unpaid 
 
 
 async def promo_end_job(context: ContextTypes.DEFAULT_TYPE):
-    """Every few minutes (and soon after a start): once the promo has ended, its unpaid orders without a receipt are
-    cancelled and each customer is told (owner, 26 Nov 2026). Orders with a receipt already sent are left for the
-    admin. Idempotent: a cancelled order is no longer picked."""
+    """Once, at the promo's end (schedule_promo_end; and once after a start that comes later than the end): its
+    unpaid orders without a receipt are cancelled and each customer is told (owner, 26 Nov 2026). Orders with a
+    receipt already sent are left for the admin. Idempotent: a cancelled order is no longer picked, so the run after
+    a start does nothing when the expiry already ran."""
     cancelled = []
     for order_id, user_id in db_promo_lapsed_orders():
         if not db_update_status(order_id, "cancelled"):
@@ -4799,6 +4836,29 @@ async def promo_end_job(context: ContextTypes.DEFAULT_TYPE):
             context, f"🏷 Promo ended: {len(cancelled)} unpaid promo order(s) cancelled "
                      f"(#{', #'.join(str(o) for o in cancelled)}). Orders with a receipt already sent are left for you.")
     return cancelled
+
+
+PROMO_END_CATCH_UP_SECONDS = 15
+
+
+def schedule_promo_end(job_queue):
+    """Unpaid promo orders expire once, at the promo's end (owner, 26 Nov 2026): a single run of promo_end_job a few
+    seconds after PROMO's ends_utc; when the bot starts after that moment (it was down or redeployed then), one
+    catch-up run PROMO_END_CATCH_UP_SECONDS after the start. No repeating job. Returns when it runs (a UTC datetime,
+    or the seconds for the catch-up), None when there is no promo."""
+    if not PROMO or job_queue is None:
+        return None
+    try:
+        ends = datetime.strptime(PROMO["ends_utc"], "%Y-%m-%dT%H:%M:%SZ")
+    except (KeyError, TypeError, ValueError):
+        return None
+    if _promo_now() >= ends:
+        when = PROMO_END_CATCH_UP_SECONDS
+    else:
+        from datetime import timezone
+        when = (ends + timedelta(seconds=5)).replace(tzinfo=timezone.utc)   # just after, so the promo reads as ended
+    job_queue.run_once(promo_end_job, when=when, name="promo_end")
+    return when
 
 
 def promo_refused_items(item_ids, user_id: int) -> list:
@@ -25785,8 +25845,9 @@ def main():
         app.job_queue.run_repeating(sheet_outbox_job, interval=30, first=20, name="delivered_sheet")
         # Paid UpToDate orders go to @Utdreg_bot's 📥 Pending orders by themselves (18 Nov 2026).
         app.job_queue.run_repeating(automation_push_job, interval=60, first=45, name="automation_push")
-        # unpaid promo-priced orders are cancelled once the promo ends (owner, 26 Nov 2026); first run soon after start
-        app.job_queue.run_repeating(promo_end_job, interval=300, first=15, name="promo_end")
+        # unpaid promo-priced orders are cancelled once, at the promo's end (owner, 26 Nov 2026); a start after the
+        # end runs it once to catch up
+        schedule_promo_end(app.job_queue)
         # Daily sales Excel to the admin 5 minutes after local midnight.
         app.job_queue.run_daily(
             daily_sales_excel_job,
