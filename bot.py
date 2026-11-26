@@ -343,7 +343,7 @@ ITEM_OVERRIDES = {}
 PROMO_DEFINITION = {
     "ends_utc": "2026-11-27T20:30:00Z",
     "label": "Black Friday discount until Friday night",
-    "until": "Friday 27 Nov, midnight Iran time",
+    "until": "the end of Friday 27 November",   # customer-facing: never mention Iran (owner, 26 Nov 2026)
     "prices": {"imd_1y": 60.0, "imd_6m": 40.0},
     "hide": ["imd_2y"],
     "chat_note": "Black Friday: 20% off",
