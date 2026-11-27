@@ -4367,9 +4367,9 @@ function makeDetailBlock(id,name,price,idx){
 }
 const newFlds=(id,idx)=>flds(id,idx,[['first_name','First Name','text',''],['last_name','Last Name','text',''],['email','Email','email','Never used for this subscription before'],['username','Username','text','≥6 chars'],['password','Password','password','8+ chars, 1 cap, 1 num, one of: - _ . # @']]);
 const renewFlds=(id,idx)=>flds(id,idx,[['login_username','Username or Email (existing)','text',''],['login_password','Existing Password','password','']]);
-// iMD has its own, simpler field set (no first/last name, no strict
-// password format — see the isImd check in validateDetails).
-const imdNewFlds=(id,idx)=>flds(id,idx,[['email','Email','email','Never used for iMD before'],['username','Username','text','≥6 chars'],['password','Password','password','Any password you\'ll remember']]);
+// iMD has its own, simpler field set (no first/last name; its own password rule, owner 27 Nov 2026:
+// 8+ characters, letters and numbers, not containing the username — see the isImd check in validateDetails).
+const imdNewFlds=(id,idx)=>flds(id,idx,[['email','Email','email','Never used for iMD before'],['username','Username','text','≥6 chars'],['password','Password','password','8+ chars, letters and numbers, not containing the username']]);
 const imdRenewFlds=(id,idx)=>flds(id,idx,[['prev_username','Existing iMD Username','text','']]);
 function flds(id,idx,list){return'<div class="fields">'+list.map(([n,l,t,h])=>{const fid=`f-${id}-${idx}-${n}`;return`<div class="field"><label for="${fid}">${l}</label><input id="${fid}" name="${n}" type="${t}" autocomplete="off" spellcheck="false">${h?`<div class="fhint">${h}</div>`:''}<div class="ferr" id="e-${fid}"></div></div>`;}).join('')+'</div>';}
 function setType(btn,type,id,idx){
@@ -4396,6 +4396,13 @@ function validateDetails(root){
       if(n==='email'&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)){setErr(inp,'Enter a valid email');ok=false;return;}
       if(n==='username'&&v.length<6){setErr(inp,'At least 6 characters');ok=false;return;}
       if(n==='username'&&isImd&&type==='new'&&/\s/.test(v)){setErr(inp,'One word only — no spaces');ok=false;return;}
+      if(n==='password'&&type==='new'&&isImd){
+        if(v.length<8){setErr(inp,'At least 8 characters');ok=false;return;}
+        if(!/\p{L}/u.test(v)){setErr(inp,'Need a letter');ok=false;return;}
+        if(!/[0-9]/.test(v)){setErr(inp,'Need a number');ok=false;return;}
+        const u=block.querySelector('input[name="username"]'), un=u?u.value.trim().toLowerCase():'';
+        if(un&&v.toLowerCase().includes(un)){setErr(inp,"Can't contain the username");ok=false;return;}
+      }
       if((n==='password'||n==='login_password')&&type==='new'&&!isImd){
         if(v.length<8){setErr(inp,'At least 8 characters');ok=false;return;}
         if(!/[A-Z]/.test(v)){setErr(inp,'Need a capital letter');ok=false;return;}

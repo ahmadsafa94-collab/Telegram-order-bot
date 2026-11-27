@@ -834,7 +834,8 @@ IMD_FIELD_PROMPTS = {
     "prev_username": "Reply with your previous iMD username:",
     "email": "Reply with your email address:",
     "username": "Reply with your desired username:",
-    "password": "Reply with your desired password:",
+    "password": "Reply with your desired password (at least 8 characters, with letters and numbers, not containing "
+                "your username):",
 }
 
 # Combined lookup for re-prompting a non-iMD field, covering both the New
@@ -847,6 +848,28 @@ def validate_generic_username(value: str):
     """Returns None if valid, or an error message explaining the rule."""
     if len(value) < 6:
         return "Username must be at least 6 characters long. Please choose another one:"
+    return None
+
+
+IMD_PASSWORD_RULE = "at least 8 characters, with letters and numbers, not containing the username"
+
+
+def validate_imd_password(value: str, username: str = ""):
+    """A new iMD account's password (owner, 27 Nov 2026): at least 8 characters, with letters and numbers, not
+    containing the username. Returns None if valid, or what's wrong (no re-ask line)."""
+    value = str(value or "")
+    problems = []
+    if len(value) < 8:
+        problems.append("at least 8 characters")
+    if not any(c.isalpha() for c in value):
+        problems.append("at least one letter")
+    if not re.search(r"[0-9]", value):
+        problems.append("at least one number")
+    username = str(username or "").strip()
+    if username and username.lower() in value.lower():
+        problems.append("not containing the username")
+    if problems:
+        return "That password doesn't meet the requirements. It needs " + ", ".join(problems) + "."
     return None
 
 
@@ -13343,7 +13366,7 @@ async def _retry_stuck_imd_unit(application, order_id: int, user_id: int, wanted
         stored_info = None
     if not stored_info:
         return None  # never ran with any details: nothing to correct
-    clean, problem = _clean_register_info("imd", info)
+    clean, problem = _clean_register_info("imd", info, stored_password=stored_info.get("password"))
     if problem:
         return web.json_response(problem, status=400)
     fields = ("account_type", "prev_username", "username", "password", "email")
@@ -13387,9 +13410,10 @@ REGISTER_FIELDS = {
 }
 
 
-def _clean_register_info(kind: str, info: dict):
+def _clean_register_info(kind: str, info: dict, stored_password=None):
     """Validates account details sent by the reply bot for one unit.
-    Returns (clean info, None) or (None, error body)."""
+    Returns (clean info, None) or (None, error body). stored_password: the password this unit already has; sent
+    again unchanged it isn't held to the iMD password rule (an order from before the rule can still be corrected)."""
     if kind == "none":
         return {"account_type": "new"}, None
     account_type = (info.get("account_type") or "new").lower()
@@ -13405,6 +13429,8 @@ def _clean_register_info(kind: str, info: dict):
     problem = None
     if account_type == "new" and kind == "imd" and re.search(r"\s", clean["username"]):
         problem = "the username can't contain spaces"
+    elif account_type == "new" and kind == "imd" and not (stored_password and clean["password"] == stored_password):
+        problem = validate_imd_password(clean["password"], clean["username"])
     elif account_type == "new" and kind == "generic":
         problem = validate_generic_username(clean["username"]) or validate_generic_password(clean["password"])
     if problem:
@@ -13439,6 +13465,13 @@ def _edit_problem(kind: str, info: dict, key: str, value: str):
             return re.split(r"\s*Please choose", problem)[0].strip() if problem else None
     if kind == "imd" and key == "username" and re.search(r"\s", value):
         return "the username can't contain spaces"
+    if value == str(info.get(key) or ""):
+        return None     # sent again unchanged (an order from before the iMD password rule can still be corrected)
+    if kind == "imd" and info.get("account_type") == "new" and key == "password":
+        return validate_imd_password(value, info.get("username", ""))
+    if kind == "imd" and info.get("account_type") == "new" and key == "username" and info.get("password") \
+            and value.lower() in str(info["password"]).lower():
+        return "the password contains this username; change the password too"
     return None
 
 
@@ -13531,7 +13564,13 @@ async def _edit_order_details(request):
         if key is None:
             return web.json_response({"error": f"{unit['name']} in order #{order_id} has no {field.replace('_', ' ')}",
                                       "fields": [label(k) for k in info if k != "account_type"]}, status=400)
-        problem = _edit_problem(kind, info, key, value)
+        probe = info
+        if kind == "imd" and key in ("username", "password"):
+            # username and password changed together: each is checked against the other's new value
+            other = "password" if key == "username" else "username"
+            if other in changes and other in info:
+                probe = {**info, other: changes[other]}
+        problem = _edit_problem(kind, probe, key, value)
         if problem:
             return web.json_response({"error": problem}, status=400)
         if str(info.get(key) or "") != value:
@@ -13750,7 +13789,8 @@ def _catalog_details_fields() -> dict:
         "imd": {"new": REGISTER_FIELDS[("imd", "new")], "renew": REGISTER_FIELDS[("imd", "renew")]},
         "account": {"new": REGISTER_FIELDS[("generic", "new")], "renew": REGISTER_FIELDS[("generic", "renew")]},
         "rules": ("email: a real email address never used before to register for that subscription; username: at "
-                  "least 6 characters, never used before for that subscription (no spaces for iMD); password for "
+                  "least 6 characters, never used before for that subscription (no spaces for iMD); iMD password: "
+                  f"{IMD_PASSWORD_RULE}; password for "
                   "other subscriptions: at least 8 characters, with at least one number, one capital letter and one "
                   f"symbol from {GENERIC_PASSWORD_SYMBOLS}; prev_username: the iMD username of the account to renew; "
                   "login_username / login_password: the login of the account to renew"),
@@ -21883,6 +21923,23 @@ async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
+    # iMD refused the username and another is asked for: it can't be part of the password already given
+    stored_password = str((context.user_data.get("registration_data") or {}).get("password") or "")
+    if (field == "username" and not is_renew and context.user_data.get("registration_retry_field") == "username"
+            and stored_password and value.lower() in stored_password.lower()):
+        await update.message.reply_text(
+            "⚠️ The username can't be part of your password. Please choose a different username:",
+            reply_markup=_cancel_button(),
+        )
+        return
+
+    if field == "password" and not is_renew:
+        problem = validate_imd_password(value, (context.user_data.get("registration_data") or {}).get("username", ""))
+        if problem:
+            await update.message.reply_text(f"⚠️ {problem}\n\nPlease choose another password:",
+                                            reply_markup=_cancel_button())
+            return
+
     data = context.user_data.setdefault("registration_data", {})
     data[field] = value
 
@@ -21908,7 +21965,9 @@ async def registration_field_reply(update: Update, context: ContextTypes.DEFAULT
 
     if field == "username":
         context.user_data["awaiting_registration_field"] = "password"
-        await update.message.reply_text("Desired password:", reply_markup=_cancel_button())
+        await update.message.reply_text(
+            "Desired password (at least 8 characters, with letters and numbers, not containing your username):",
+            reply_markup=_cancel_button())
         return
 
     if field == "password":
