@@ -344,7 +344,9 @@ ITEM_OVERRIDES = {}
 # SHOP_PROMO_OFF=1 switches it off (the test suite sets it so the regular prices are tested; imd_promo_test
 # tests the promo itself with PROMO_DEFINITION).
 PROMO_DEFINITION = {
-    "ends_utc": "2026-11-27T20:30:00Z",
+    # Owner, 27 Nov 2026: the discount stays on until he says it has ended (was 2026-11-27T20:30:00Z = end of Friday
+    # 27 Nov, Iran time). When he does: set ends_utc to that moment (or the past) and deploy.
+    "ends_utc": "2027-12-31T20:30:00Z",
     # when it went live: unpaid orders made since then, before orders kept their promo's end (promo_ends, 26 Nov
     # 2026), get it at startup (db_mark_promo_orders), so they expire with the promo like the newer ones
     "starts_utc": "2026-11-25T07:20:00Z",
@@ -353,8 +355,8 @@ PROMO_DEFINITION = {
     # end at ends_utc. When the owner says the promo has ended: set it to True and deploy (the run after the start
     # cancels them and tells each customer).
     "expire_unpaid": False,
-    "label": "Black Friday discount until Friday night",
-    "until": "the end of Friday 27 November",   # customer-facing: never mention Iran (owner, 26 Nov 2026)
+    "label": "Black Friday discount · limited time",
+    "until": "the offer ends (limited time)",   # customer-facing: no date while it runs until the owner ends it; never Iran
     "prices": {"imd_1y": 60.0, "imd_6m": 40.0},
     "hide": ["imd_2y"],
     "chat_note": "Black Friday: 20% off",
