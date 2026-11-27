@@ -13951,7 +13951,7 @@ async def http_set_items_removed(request):
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         data = await request.json()
@@ -13976,7 +13976,7 @@ async def http_add_item(request):
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         data = await request.json()
@@ -14452,7 +14452,7 @@ def db_admin_pending() -> list:
 async def http_admin_delivered(request):
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         offset = max(0, int(request.query.get("offset", "0")))
@@ -14466,7 +14466,7 @@ async def http_admin_delivered(request):
 async def http_admin_pending(request):
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     return web.json_response({"ok": True, "items": db_admin_pending()}, headers=_imd_search_cors_headers())
 
@@ -14477,7 +14477,7 @@ async def http_admin_deliver(request):
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         data = await request.json()
@@ -14696,7 +14696,7 @@ async def http_admin_create_order(request):
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         data = await request.json()
@@ -14843,7 +14843,7 @@ async def http_admin_order_note(request):
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         data = await request.json()
@@ -14868,7 +14868,7 @@ async def http_admin_reask(request):
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         data = await request.json()
@@ -14947,7 +14947,7 @@ async def http_admin_sheet(request):
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         data = await request.json()
@@ -15271,7 +15271,7 @@ async def http_admin_edit_delivery(request):
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         data = await request.json()
@@ -15426,7 +15426,7 @@ async def http_admin_transfer_delivery(request):
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     data = await _admin_json(request)
     did = data.get("delivery_id") if data else None
@@ -15504,7 +15504,7 @@ async def http_admin_delete_order(request):
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         order_id = (await request.json())["order_id"]
@@ -15535,7 +15535,7 @@ async def http_admin_chat_action(request):
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         data = await request.json()
@@ -15600,7 +15600,7 @@ async def http_admin_counts(request):
     """Numbers for the badges: unresolved tickets and book requests waiting for a price."""
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     books = db_admin_book_requests()
     return web.json_response({
@@ -15612,7 +15612,7 @@ async def http_admin_counts(request):
 async def http_admin_tickets(request):
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     status = "resolved" if request.query.get("status") == "resolved" else "unresolved"
     return web.json_response({"ok": True, "tickets": db_admin_tickets(status), "open": db_unresolved_ticket_count()},
@@ -15623,7 +15623,7 @@ async def http_admin_ticket_photo(request):
     """The screenshot a customer attached to a ticket, fetched from Telegram."""
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         ticket = db_get_ticket(int(request.query.get("id", "")))
@@ -15645,7 +15645,7 @@ async def http_admin_ticket_answer(request):
     or corrects the answer of an already-resolved ticket. The customer is told either way."""
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     data = await _admin_json(request)
     ticket_id, message = (data or {}).get("id"), (data or {}).get("message", "")
@@ -15668,7 +15668,7 @@ async def http_admin_ticket_answer(request):
 async def http_admin_book_requests(request):
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     return web.json_response({"ok": True, "items": db_admin_book_requests()}, headers=_imd_search_cors_headers())
 
@@ -15677,7 +15677,7 @@ async def http_admin_book_action(request):
     """Set the price of a book request, message the customer about it, or cancel it."""
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     data = await _admin_json(request) or {}
     request_id, action = data.get("id"), data.get("action")
@@ -15741,7 +15741,7 @@ def _serial_pools() -> list:
 async def http_admin_serials(request):
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     return web.json_response({"ok": True, "pools": _serial_pools()}, headers=_imd_search_cors_headers())
 
@@ -15750,7 +15750,7 @@ async def http_admin_serials_action(request):
     """add codes to a pool, remove one code, or clear every not-working code."""
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     data = await _admin_json(request) or {}
     action = data.get("action")
@@ -15813,7 +15813,7 @@ def _clean_pct(value):
 async def http_admin_coworkers(request):
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     return web.json_response({"ok": True, "items": _coworker_rows()}, headers=_imd_search_cors_headers())
 
@@ -15892,7 +15892,7 @@ async def http_admin_coworker_prices(request):
     """?id=<coworker> — every subscription with its retail price, the owner's cost and what this coworker pays."""
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         cid = int(request.query.get("id", ""))
@@ -15936,7 +15936,7 @@ async def http_admin_coworker_ledger(request):
     billed (they make up the report and 'mark all as paid'); orders still being delivered are listed apart."""
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         cid = int(request.query.get("id", ""))
@@ -15970,7 +15970,7 @@ async def http_admin_coworker_settle(request):
     """{id, action: 'mark_all_paid'} — marks every fully delivered unpaid order of this coworker as paid."""
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     data = await _admin_json(request) or {}
     cid = data.get("id")
@@ -15995,7 +15995,7 @@ async def http_admin_coworker_stats(request):
     """?id=<coworker>&period=today|week|month|overall — one coworker's statistics."""
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         cid = int(request.query.get("id", ""))
@@ -16033,7 +16033,7 @@ async def http_admin_coworker_action(request):
     """Add a coworker, change their percentage / username / password, or delete them."""
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     data = await _admin_json(request) or {}
     action = data.get("action")
@@ -16209,7 +16209,7 @@ async def http_admin_customer(request):
     """?q=<id or @username> lists matches; ?id=<user id> gives one customer in full."""
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     headers = _imd_search_cors_headers()
     if "id" in request.query:
@@ -16229,7 +16229,7 @@ async def http_admin_customer(request):
 async def http_admin_credits(request):
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     rows = db_customers_with_credits()
     items = [{"user_id": uid, "customer": _who(uid, uname), "credits": c, "usd": c * CREDIT_VALUE_USD} for uid, uname, c in rows]
@@ -16242,7 +16242,7 @@ async def http_admin_sales(request):
     """The 📈 Input report: accounts sold per product, revenue and revenue by payment method."""
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     period = request.query.get("period", "today")
     if period not in ("today", "week", "month", "overall"):
@@ -16262,7 +16262,7 @@ async def http_admin_sales_excel(request):
     """Sends the daily-profit Excel to the admin's chat."""
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     today = (datetime.utcnow() + timedelta(hours=REPORT_UTC_OFFSET)).date()
     try:
@@ -16290,7 +16290,7 @@ def _discount_rows() -> list:
 async def http_admin_discounts(request):
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     return web.json_response({"ok": True, "items": _discount_rows(), "products": discount_product_groups()},
                              headers=_imd_search_cors_headers())
@@ -16300,7 +16300,7 @@ async def http_admin_discount_action(request):
     """Issue a new discount code (percentage, number of uses, days valid) or delete one."""
     from aiohttp import web
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     data = await _admin_json(request) or {}
     action = data.get("action")
@@ -20109,7 +20109,7 @@ async def http_admin_change_unit_item(request):
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         data = await request.json()
@@ -25110,7 +25110,7 @@ async def http_admin_utd_push(request):
     from aiohttp import web
     headers = _post_cors_headers()
     _, err = _admin_shop_request(request)
-    if err:
+    if err is not None:
         return err
     try:
         data = await request.json()
