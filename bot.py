@@ -12907,6 +12907,12 @@ def palestine_payment_text(total_usd: float, rate: float) -> tuple:
     return amount, f"Amount to pay: {amount}\n\n{PALESTINE_PAYMENT_TEXT}"
 
 
+def _owner_payment_method_ok(method: str) -> bool:
+    """A payment method the owner names for a paid order he confirmed, that isn't one of the shop's codes: short
+    plain text (a country, an app, a bank)."""
+    return 0 < len(method) <= 40 and method.isprintable() and any(ch.isalnum() for ch in method)
+
+
 def reply_bot_payment_method_codes() -> list:
     return (list(LOCAL_PAYMENT_COUNTRIES) + list(USA_PAYMENT_APPS) + ["card", "Cryptocurrency", "PayPal"]
             + CHAT_ONLY_PAYMENT_METHODS)
@@ -13180,11 +13186,16 @@ async def http_create_order(request):
         return web.json_response({"error": "invalid request body"}, status=400)
 
     codes = {c.lower(): c for c in reply_bot_payment_method_codes()}
-    if payment_method.lower() not in codes:
+    if payment_method.lower() in codes:
+        payment_method = codes[payment_method.lower()]
+    elif owner_confirmed and _owner_payment_method_ok(payment_method):
+        # The owner was paid some other way (owner, 27 Nov 2026: a Nigerian bank transfer): a paid order he confirmed
+        # keeps the method he named, as the country orders of "My Country is not Mentioned" do.
+        pass
+    else:
         return web.json_response(
             {"error": "unknown payment method", "allowed": reply_bot_payment_method_codes()}, status=400
         )
-    payment_method = codes[payment_method.lower()]
 
     order_items, refusal = _reply_bot_check_items(requested, user_id)
     if refusal:
