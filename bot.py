@@ -344,16 +344,15 @@ ITEM_OVERRIDES = {}
 # SHOP_PROMO_OFF=1 switches it off (the test suite sets it so the regular prices are tested; imd_promo_test
 # tests the promo itself with PROMO_DEFINITION).
 PROMO_DEFINITION = {
-    # Owner, 27 Nov 2026: the discount stays on until he says it has ended (was 2026-11-27T20:30:00Z = end of Friday
-    # 27 Nov, Iran time). When he does: set ends_utc to that moment (or the past) and deploy.
-    "ends_utc": "2027-12-31T20:30:00Z",
+    # Owner, 27 Nov 2026 (evening): "Black Friday for iMD has ended": the regular prices are back and iMD 2 Years is
+    # offered again from this moment.
+    "ends_utc": "2026-11-27T20:00:00Z",
     # when it went live: unpaid orders made since then, before orders kept their promo's end (promo_ends, 26 Nov
     # 2026), get it at startup (db_mark_promo_orders), so they expire with the promo like the newer ones
     "starts_utc": "2026-11-25T07:20:00Z",
-    # Owner, 26 Nov 2026 (later the same day): "Keep everything open until I tell you the promo has ended". Unpaid
-    # promo-priced orders are NOT cancelled or refused at ends_utc while this is False; the prices themselves still
-    # end at ends_utc. When the owner says the promo has ended: set it to True and deploy (the run after the start
-    # cancels them and tells each customer).
+    # Owner, 27 Nov 2026, when ending it: unpaid orders made at the promo price may still be paid at that price,
+    # approved and delivered. So they are NOT cancelled (False), and their promo total is kept: the support chatbot
+    # quotes it and doesn't reprice them (_open_promo_order_total).
     "expire_unpaid": False,
     "label": "Black Friday discount · limited time",
     "until": "the offer ends (limited time)",   # customer-facing: no date while it runs until the owner ends it; never Iran
@@ -12989,6 +12988,33 @@ def _parse_items_param(text: str) -> dict:
     return items
 
 
+def _open_promo_order_total(user_id: int, order_items: dict, with_id: bool = False):
+    """The total of this customer's unpaid order for exactly these products when it was made at a promo's prices
+    (promo_ends set, cheaper than now) and that promo has ended, else None. The owner lets those be paid at the promo price after it ended (27 Nov 2026).
+    with_id: (order id, total), so create_order puts the payment on that very order (review, 27 Nov 2026)."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT items_json, total, id FROM orders WHERE user_id = ? AND promo_ends IS NOT NULL "
+        "AND status IN ('awaiting_payment', 'awaiting_receipt') ORDER BY id DESC",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    if active_promo() is not None:
+        return None
+    for items_json, total, order_id in rows:
+        try:
+            items = {str(k): int(v) for k, v in json.loads(items_json or "{}").items()}
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if items == order_items and total is not None:
+            total = round(float(total), 2)
+            # only after the promo, and only a promo price (an order made during it at the full price, e.g. from
+            # before it started, is priced as now like any other)
+            if total < _reply_bot_order_total(user_id, order_items):
+                return (order_id, total) if with_id else total
+    return None
+
+
 def _reply_bot_order_total(user_id: int, order_items: dict) -> float:
     """Server-side price for an order created by the reply bot: MENU prices,
     with this customer's coworker pricing applied the same way as a Mini App
@@ -13045,6 +13071,9 @@ async def http_payment_details(request):
         return web.json_response(refusal[0], status=refusal[1])
     item_id = next(iter(order_items))
     total = _reply_bot_order_total(user_id, order_items)  # the same price the order will have
+    promo_total = _open_promo_order_total(user_id, order_items)
+    if promo_total is not None:
+        total = promo_total   # their unpaid order from the promo keeps its price (owner, 27 Nov 2026)
     if method == "Palestine":
         rate = await usd_ils_rate()
         if not rate:
@@ -13121,8 +13150,11 @@ async def _reuse_unpaid_order(application, user_id: int, existing, order_items: 
         current = {}
     if current == order_items:
         body = {"error": "the customer already has an unpaid order", "order_id": order_id, "items": current}
-        if not (credits or discount_code or on_credit):
-            # priced as now (e.g. an order from before a promo started, or after it ended: PROMO), like a new one
+        promo = _open_promo_order_total(user_id, order_items, with_id=True)
+        if promo is not None and promo[0] == order_id:
+            body["total"] = promo[1]   # made at the promo price: kept after the promo ended (owner, 27 Nov 2026)
+        elif not (credits or discount_code or on_credit):
+            # priced as now (e.g. an order from before a promo started), like a new one
             total = _reply_bot_order_total(user_id, order_items)
             conn = sqlite3.connect(DB_PATH)
             row = conn.execute("SELECT total FROM orders WHERE id = ?", (order_id,)).fetchone()
@@ -13256,6 +13288,13 @@ async def http_create_order(request):
         (user_id,),
     ).fetchone()
     user_row = conn.execute("SELECT username FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    # The unpaid promo order /api/payment_details quoted (its kept price) is the one the payment goes onto, also when
+    # the customer has a newer unpaid order: the amount quoted and the order charged are the same (review, 27 Nov 2026)
+    promo = _open_promo_order_total(user_id, order_items, with_id=True) if existing and not owner_confirmed else None
+    if promo is not None and promo[0] != existing[0]:
+        existing = conn.execute(
+            "SELECT id, items_json, COALESCE(credits_applied, 0), discount_code, COALESCE(on_credit, 0) FROM orders "
+            "WHERE id = ?", (promo[0],)).fetchone() or existing
     conn.close()
     if existing and not owner_confirmed:
         return await _reuse_unpaid_order(request.app["application"], user_id, existing, order_items, payment_method,
